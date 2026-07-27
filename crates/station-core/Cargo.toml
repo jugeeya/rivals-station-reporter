@@ -1,0 +1,18 @@
+[package]
+name = "station-core"
+version = "0.1.0"
+edition = "2021"
+description = "Rivals Station Reporter core: save parsing, set machine, matching, hub, start.gg client. No Tauri dependency — everything here runs under plain `cargo test`."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uesave = "0.7.1"
+regex = "1"
+chrono = "0.4"
+# native-tls uses schannel on Windows and Security.framework on macOS (the only
+# release targets), matching the tag tool's choice — no bundled crypto needed.
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "native-tls"] }
+# Thread-per-connection HTTP server for the LAN hub — deliberately mirrors the
+# Python ThreadingHTTPServer design instead of pulling in an async stack.
+tiny_http = "0.12"

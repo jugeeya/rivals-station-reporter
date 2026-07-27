@@ -1,0 +1,520 @@
+//! start.gg client for the LAN hub.
+//!
+//! Only the operator runs this: the API token lives on exactly one machine and
+//! every start.gg call for the event funnels through one rate-limited client.
+//!
+//! The broker had to read through start.gg's unauthenticated website API (it had
+//! no token for reads); here we hold a token, so reads and writes both go to the
+//! official endpoint.
+//!
+//! Write semantics, unchanged from the broker:
+//! * `update_live()`  -> markSetInProgress + updateBracketSet: records the
+//!   games-so-far WITHOUT a winner, so the bracket does not
+//!   advance. Safe to call automatically after every game.
+//! * `report_set()`   -> reportBracketSet with a winner: advances the bracket.
+//!   Only ever called from an explicit operator action.
+//!
+//! # Port notes (for the hub porter)
+//!
+//! The Python hub is tested by assigning a duck-typed fake (`h.startgg =
+//! FakeStartgg()` in `test_hub.py`) that provides `enabled`, `station_set`,
+//! `character_map`, `update_live`, and `report_set`. The Rust hub should hold a
+//! `Box<dyn StartggApi>` (or accept one in its constructor) so tests can inject
+//! a fake the same way; [`Startgg`] implements [`StartggApi`] by delegating to
+//! its inherent methods. Signature choices, mirroring how `hub.py` calls in:
+//!
+//! * `station_set(slug, station, max_age)` — Rust has no default arguments, so
+//!   `max_age` is explicit: pass [`STATION_CACHE_S`] where Python used the
+//!   default and `0.0` where it passed `max_age=0` (force a fresh read).
+//!   Returns `Ok(Value::Null)` where Python returned `None` (no set at the
+//!   station).
+//! * `character_map(slug)` — like the Python, this never raises: transport
+//!   errors are logged and the stale cached map (or `{}`) is returned. It still
+//!   returns `Result` for trait uniformity; the real client always returns `Ok`.
+//! * `update_live(set_id, game_data)` / `report_set(set_id, winner_entrant_id,
+//!   game_data)` — GraphQL IDs may arrive as JSON numbers or strings, so ids
+//!   are `&Value`, and `game_data` is dynamic `Value` (a JSON array of
+//!   `BracketSetGameDataInput` objects), never a typed struct.
+//!
+//! `character_map` needs `matching.norm`; `matching.rs` is still a stub, so a
+//! private byte-equivalent copy lives here (see [`norm`]). Once the matching
+//! module is ported, this can switch to `crate::matching::norm` (same
+//! behaviour: lowercase, strip everything that isn't `a-z0-9`).
+
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+pub const API_URL: &str = "https://api.start.gg/gql/alpha";
+// start.gg allows ~80 requests/60s per token; stay well under it.
+pub const MIN_INTERVAL_S: f64 = 0.8;
+pub const STATION_CACHE_S: f64 = 15.0; // station lookups repeat on every heartbeat
+pub const CHARACTER_CACHE_S: f64 = 604800.0;
+
+/// GraphQL query strings, byte-for-byte from the Python source.
+const STATION_SET_QUERY: &str = "query($slug:String!){ event(slug:$slug){\n                 sets(page:1, perPage:60, sortType:STANDARD, filters:{ state:[1,2,6] }){\n                   nodes{ id state fullRoundText station{ number }\n                     slots{ entrant{ id name } } } } } }";
+const CHARACTER_MAP_QUERY: &str =
+    "query($slug:String!){ event(slug:$slug){ videogame{ id characters{ id name } } } }";
+const UPDATE_LIVE_MUTATION: &str = "mutation($id:ID!,$g:[BracketSetGameDataInput]){\n                 updateBracketSet(setId:$id, gameData:$g){ id state } }";
+const REPORT_SET_MUTATION: &str = "mutation($setId:ID!,$winnerId:ID!,$gameData:[BracketSetGameDataInput]){\n                 reportBracketSet(setId:$setId, winnerId:$winnerId, gameData:$gameData){ id state } }";
+
+/// Error type mirroring Python's `StartggError(Exception)`: just a message.
+#[derive(Debug, Clone)]
+pub struct StartggError(pub String);
+
+impl fmt::Display for StartggError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StartggError {}
+
+/// The interface the hub consumes; lets tests inject a fake (the Rust
+/// counterpart of `h.startgg = FakeStartgg()` in `test_hub.py`).
+pub trait StartggApi: Send + Sync {
+    fn enabled(&self) -> bool;
+    fn station_set(&self, slug: &str, station: i64, max_age: f64)
+        -> Result<Value, StartggError>;
+    fn character_map(&self, slug: &str) -> Result<Value, StartggError>;
+    fn update_live(&self, set_id: &Value, game_data: &Value) -> Result<(), StartggError>;
+    fn report_set(
+        &self,
+        set_id: &Value,
+        winner_entrant_id: &Value,
+        game_data: Option<&Value>,
+    ) -> Result<Value, StartggError>;
+}
+
+type LogFn = Box<dyn Fn(&str) + Send + Sync>;
+
+pub struct Startgg {
+    token: String,
+    log: LogFn,
+    /// Serializes + throttles requests (Python held one `threading.Lock`
+    /// around the gap check *and* the sleep, so concurrent callers queue).
+    last_call: Mutex<f64>,
+    /// slug -> (fetched_at, {norm(name): id})
+    chars: Mutex<HashMap<String, (f64, Value)>>,
+    /// (slug, station) -> (fetched_at, result); result is Null for "no set".
+    stations: Mutex<HashMap<(String, i64), (f64, Value)>>,
+    client: reqwest::blocking::Client,
+}
+
+impl Startgg {
+    pub fn new(token: Option<String>) -> Self {
+        Self::with_log(token, None)
+    }
+
+    /// Python's `Startgg(token, log=...)`; `new` is the `log=None` case.
+    pub fn with_log(token: Option<String>, log: Option<LogFn>) -> Self {
+        Startgg {
+            token: token.unwrap_or_default().trim().to_string(),
+            log: log.unwrap_or_else(|| Box::new(|_m| {})),
+            last_call: Mutex::new(0.0),
+            chars: Mutex::new(HashMap::new()),
+            stations: Mutex::new(HashMap::new()),
+            client: reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(20))
+                .build()
+                .expect("failed to build HTTP client"),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        !self.token.is_empty()
+    }
+
+    // -- transport ----------------------------------------------------------
+    fn gql(&self, query: &str, variables: Value) -> Result<Value, StartggError> {
+        if self.token.is_empty() {
+            return Err(StartggError("no start.gg token configured".to_string()));
+        }
+        {
+            // serialize + throttle (lock is held across the sleep, as in Python)
+            let mut last = self.last_call.lock().unwrap();
+            let gap = now() - *last;
+            if gap < MIN_INTERVAL_S {
+                std::thread::sleep(Duration::from_secs_f64(MIN_INTERVAL_S - gap));
+            }
+            *last = now();
+        }
+        let body = json!({ "query": query, "variables": variables });
+        let resp = self
+            .client
+            .post(API_URL)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("User-Agent", "rivals-station-hub/1.0")
+            .json(&body)
+            .send()
+            .map_err(|e| StartggError(format!("start.gg unreachable: {}", e)))?;
+        let status = resp.status();
+        if !status.is_success() {
+            // urllib raises HTTPError for any non-2xx; mirror the message.
+            return Err(StartggError(format!("start.gg HTTP {}", status.as_u16())));
+        }
+        let out: Value = resp
+            .json()
+            .map_err(|_| StartggError("start.gg returned invalid JSON".to_string()))?;
+        if truthy(out.get("errors")) {
+            let msg = match out
+                .get("errors")
+                .and_then(|e| e.get(0))
+                .and_then(|e0| e0.get("message"))
+            {
+                Some(m) if truthy(Some(m)) => match m {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                },
+                _ => "GraphQL error".to_string(),
+            };
+            return Err(StartggError(msg));
+        }
+        Ok(match out.get("data") {
+            Some(d) if truthy(Some(d)) => d.clone(),
+            _ => json!({}),
+        })
+    }
+
+    // -- reads --------------------------------------------------------------
+    /// The not-yet-completed set currently at a station, with entrants.
+    ///
+    /// start.gg's filters don't reliably support station number, so pull the
+    /// event's active sets and match locally (same approach as the broker).
+    pub fn station_set(
+        &self,
+        slug: &str,
+        station: i64,
+        max_age: f64,
+    ) -> Result<Value, StartggError> {
+        let key = (slug.to_string(), station);
+        if let Some((fetched_at, cached)) = self.stations.lock().unwrap().get(&key) {
+            if now() - fetched_at < max_age {
+                return Ok(cached.clone());
+            }
+        }
+        let data = self.gql(STATION_SET_QUERY, json!({ "slug": slug }))?;
+        let empty = Vec::new();
+        let nodes = data
+            .get("event")
+            .and_then(|e| e.get("sets"))
+            .and_then(|s| s.get("nodes"))
+            .and_then(|n| n.as_array())
+            .unwrap_or(&empty);
+        let mut found: Option<&Value> = None;
+        for n in nodes {
+            let st = n.get("station").and_then(|s| s.get("number"));
+            if let Some(st_num) = st.and_then(as_int) {
+                if st_num == station {
+                    found = Some(n);
+                    break;
+                }
+            }
+        }
+        let result = match found {
+            Some(f) => {
+                let mut entrants: Vec<Value> = Vec::new();
+                if let Some(slots) = f.get("slots").and_then(|s| s.as_array()) {
+                    for s in slots {
+                        if let Some(e) = s.get("entrant").filter(|e| truthy(Some(e))) {
+                            entrants.push(json!({
+                                "id": e.get("id").cloned().unwrap_or(Value::Null),
+                                "name": or_empty_string(e.get("name")),
+                            }));
+                        }
+                    }
+                }
+                json!({
+                    "found": true,
+                    "setId": f.get("id").cloned().unwrap_or(Value::Null),
+                    "state": f.get("state").cloned().unwrap_or(Value::Null),
+                    "fullRoundText": or_empty_string(f.get("fullRoundText")),
+                    "entrants": entrants,
+                })
+            }
+            None => Value::Null,
+        };
+        self.stations
+            .lock()
+            .unwrap()
+            .insert(key, (now(), result.clone()));
+        Ok(result)
+    }
+
+    /// Character name -> start.gg id for the event's game (cached).
+    ///
+    /// Never errors: like the Python, a failed fetch is logged and the stale
+    /// cached map (or an empty map) is returned.
+    pub fn character_map(&self, slug: &str) -> Result<Value, StartggError> {
+        let stale: Option<Value> = {
+            let chars = self.chars.lock().unwrap();
+            match chars.get(slug) {
+                Some((fetched_at, cached)) => {
+                    if now() - fetched_at < CHARACTER_CACHE_S {
+                        return Ok(cached.clone());
+                    }
+                    Some(cached.clone())
+                }
+                None => None,
+            }
+        };
+        let data = match self.gql(CHARACTER_MAP_QUERY, json!({ "slug": slug })) {
+            Ok(d) => d,
+            Err(e) => {
+                (self.log)(&format!("character map unavailable: {}", e));
+                return Ok(stale.unwrap_or_else(|| json!({})));
+            }
+        };
+        let empty = Vec::new();
+        let chars = data
+            .get("event")
+            .and_then(|e| e.get("videogame"))
+            .and_then(|v| v.get("characters"))
+            .and_then(|c| c.as_array())
+            .unwrap_or(&empty);
+        let mut cmap = serde_json::Map::new();
+        for c in chars {
+            if truthy(Some(c)) {
+                if let Some(name) = c.get("name").filter(|n| !n.is_null()) {
+                    let key = norm(&value_str(name));
+                    cmap.insert(key, c.get("id").cloned().unwrap_or(Value::Null));
+                }
+            }
+        }
+        let cmap = Value::Object(cmap);
+        if truthy(Some(&cmap)) {
+            self.chars
+                .lock()
+                .unwrap()
+                .insert(slug.to_string(), (now(), cmap.clone()));
+        }
+        Ok(cmap)
+    }
+
+    // -- writes -------------------------------------------------------------
+    /// Non-advancing: record games so far. No winner is set, so the bracket
+    /// never advances — finalizing stays an explicit operator action.
+    ///
+    /// Deliberately does NOT call markSetInProgress: starting a match is the
+    /// TO's call ("Start Match" on start.gg), and callers only reach here for
+    /// a set that is already ongoing. Doing it here meant warmups at a setup
+    /// could start the bracket match on their own.
+    pub fn update_live(&self, set_id: &Value, game_data: &Value) -> Result<(), StartggError> {
+        self.gql(UPDATE_LIVE_MUTATION, json!({ "id": set_id, "g": game_data }))?;
+        Ok(())
+    }
+
+    /// Advancing: set the winner and finalize. Operator action only.
+    pub fn report_set(
+        &self,
+        set_id: &Value,
+        winner_entrant_id: &Value,
+        game_data: Option<&Value>,
+    ) -> Result<Value, StartggError> {
+        self.gql(
+            REPORT_SET_MUTATION,
+            json!({
+                "setId": set_id,
+                "winnerId": winner_entrant_id,
+                "gameData": game_data.cloned().unwrap_or(Value::Null),
+            }),
+        )
+    }
+
+    // -- test hooks ----------------------------------------------------------
+    #[cfg(test)]
+    fn seed_station_cache(&self, slug: &str, station: i64, fetched_at: f64, result: Value) {
+        self.stations
+            .lock()
+            .unwrap()
+            .insert((slug.to_string(), station), (fetched_at, result));
+    }
+
+    #[cfg(test)]
+    fn seed_character_cache(&self, slug: &str, fetched_at: f64, map: Value) {
+        self.chars
+            .lock()
+            .unwrap()
+            .insert(slug.to_string(), (fetched_at, map));
+    }
+}
+
+impl StartggApi for Startgg {
+    fn enabled(&self) -> bool {
+        Startgg::enabled(self)
+    }
+    fn station_set(
+        &self,
+        slug: &str,
+        station: i64,
+        max_age: f64,
+    ) -> Result<Value, StartggError> {
+        Startgg::station_set(self, slug, station, max_age)
+    }
+    fn character_map(&self, slug: &str) -> Result<Value, StartggError> {
+        Startgg::character_map(self, slug)
+    }
+    fn update_live(&self, set_id: &Value, game_data: &Value) -> Result<(), StartggError> {
+        Startgg::update_live(self, set_id, game_data)
+    }
+    fn report_set(
+        &self,
+        set_id: &Value,
+        winner_entrant_id: &Value,
+        game_data: Option<&Value>,
+    ) -> Result<Value, StartggError> {
+        Startgg::report_set(self, set_id, winner_entrant_id, game_data)
+    }
+}
+
+// -- helpers ------------------------------------------------------------------
+
+/// `time.time()` — seconds since the epoch as f64.
+fn now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Python truthiness for a JSON value (`if x:`); `None` (absent key) is falsy.
+fn truthy(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(a)) => !a.is_empty(),
+        Some(Value::Object(o)) => !o.is_empty(),
+    }
+}
+
+/// Python `x or ''`: keep a truthy value as-is, anything falsy becomes `""`.
+fn or_empty_string(v: Option<&Value>) -> Value {
+    match v {
+        Some(val) if truthy(Some(val)) => val.clone(),
+        _ => Value::String(String::new()),
+    }
+}
+
+/// Python `int(x)` for the shapes start.gg actually returns (number or
+/// numeric string); `None`/other shapes yield `None` (the caller skips them).
+fn as_int(v: &Value) -> Option<i64> {
+    match v {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        Value::String(s) => s.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+/// Python `str(x)` for the values we feed to `norm` (character names).
+fn value_str(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Local mirror of `matching.norm` (matching.rs is not ported yet):
+/// lowercase, strip everything that isn't a letter or digit.
+fn norm(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enabled_reflects_token() {
+        assert!(!Startgg::new(None).enabled());
+        assert!(!Startgg::new(Some(String::new())).enabled());
+        assert!(!Startgg::new(Some("   ".to_string())).enabled()); // Python strips
+        assert!(Startgg::new(Some("tok".to_string())).enabled());
+        assert!(Startgg::new(Some("  tok  ".to_string())).enabled());
+    }
+
+    #[test]
+    fn error_displays_its_message() {
+        let e = StartggError("start.gg HTTP 429".to_string());
+        assert_eq!(e.to_string(), "start.gg HTTP 429");
+        let dyn_err: &dyn std::error::Error = &e;
+        assert_eq!(format!("{}", dyn_err), "start.gg HTTP 429");
+    }
+
+    #[test]
+    fn station_cache_serves_fresh_entries_without_network() {
+        // No token: any path that reaches gql() errors, so an Ok proves the
+        // cache answered.
+        let sg = Startgg::new(None);
+        let cached = json!({
+            "found": true, "setId": 105639152, "state": 2,
+            "fullRoundText": "Winners Round 1", "entrants": []
+        });
+        sg.seed_station_cache("slug", 1, now(), cached.clone());
+        assert_eq!(sg.station_set("slug", 1, STATION_CACHE_S).unwrap(), cached);
+
+        // A cached "no set at this station" (Python None) is served too.
+        sg.seed_station_cache("slug", 2, now(), Value::Null);
+        assert!(sg.station_set("slug", 2, STATION_CACHE_S).unwrap().is_null());
+
+        // Stale entry falls through to the network path (-> token error here).
+        sg.seed_station_cache("slug", 3, now() - 100.0, cached.clone());
+        let err = sg.station_set("slug", 3, STATION_CACHE_S).unwrap_err();
+        assert!(err.to_string().contains("no start.gg token"));
+
+        // max_age=0 forces a re-read even with a fresh entry (hub uses this).
+        let err = sg.station_set("slug", 1, 0.0).unwrap_err();
+        assert!(err.to_string().contains("no start.gg token"));
+    }
+
+    #[test]
+    fn character_cache_serves_fresh_and_falls_back_to_stale() {
+        use std::sync::{Arc, Mutex};
+        let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = logs.clone();
+        let sg = Startgg::with_log(
+            None,
+            Some(Box::new(move |m| sink.lock().unwrap().push(m.to_string()))),
+        );
+        let cmap = json!({"orcane": 41, "galvan": 42});
+
+        // Fresh entry: returned as-is, no network, no log.
+        sg.seed_character_cache("slug", now(), cmap.clone());
+        assert_eq!(sg.character_map("slug").unwrap(), cmap);
+        assert!(logs.lock().unwrap().is_empty());
+
+        // Stale entry + failing fetch (no token): logs and returns the stale map.
+        sg.seed_character_cache("slug", now() - CHARACTER_CACHE_S - 1.0, cmap.clone());
+        assert_eq!(sg.character_map("slug").unwrap(), cmap);
+        {
+            let l = logs.lock().unwrap();
+            assert_eq!(l.len(), 1);
+            assert!(l[0].starts_with("character map unavailable:"));
+        }
+
+        // No cache at all + failing fetch: logs and returns an empty map.
+        assert_eq!(sg.character_map("other-slug").unwrap(), json!({}));
+        assert_eq!(logs.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn startgg_is_usable_as_a_trait_object() {
+        let sg: Box<dyn StartggApi> = Box::new(Startgg::new(Some("tok".to_string())));
+        assert!(sg.enabled());
+    }
+
+    #[test]
+    fn norm_matches_the_python_helper() {
+        assert_eq!(norm("JUGZ!"), "jugz");
+        assert_eq!(norm("Mr. Game & Watch 2"), "mrgamewatch2");
+        assert_eq!(norm(""), "");
+    }
+}

@@ -5,10 +5,20 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Manual runs must name the tag explicitly — github.ref_name would be the
+  # branch ("main") here, which would publish a release called "main".
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release, e.g. v0.1.0'
+        required: true
 
 jobs:
   build:
+    # tauri-action creates the release, which the default read-only GITHUB_TOKEN
+    # can't do — without this the build succeeds and then 403s at the upload.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -32,7 +42,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Rivals Station Reporter ${{ github.ref_name }}'
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: Rivals Station Reporter ${{ inputs.tag || github.ref_name }}
           releaseBody: 'See the commit log for changes.'
           releaseDraft: true

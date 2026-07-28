@@ -30,7 +30,12 @@ pub struct Config {
     /// Output folder the set machine writes (current/live/sets files).
     /// Empty = `<app data dir>/matchlogger-out`.
     pub dir: String,
-    /// Finalize an open set after this many idle seconds.
+    /// Finalize an open set after this many idle seconds. Measured across
+    /// ten consecutive real online games: every set closed at exactly
+    /// 180-182s (the old default) while the next game of the SAME set arrived
+    /// only 2-118s later — i.e. games within a set are ~182-300s apart, so a
+    /// 180s idle timer always fires first and splits real sets. 420s clears
+    /// that observed gap with headroom.
     pub idle: f64,
     /// Seconds between engine passes.
     pub poll: f64,
@@ -52,7 +57,7 @@ impl Default for Config {
             save: String::new(),
             replays: String::new(),
             dir: String::new(),
-            idle: 180.0,
+            idle: 420.0,
             poll: 2.0,
             hub_port: DEFAULT_HUB_PORT,
             dry_run: false,

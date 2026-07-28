@@ -1,0 +1,11 @@
+# Rust build output (hundreds of MB — never commit)
+/target/
+/src-tauri/target/
+
+# Node
+node_modules/
+dist/
+
+# Tauri generates these per-platform on build
+/src-tauri/gen/schemas/windows-schema.json
+/src-tauri/gen/schemas/linux-schema.json

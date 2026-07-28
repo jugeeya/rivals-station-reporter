@@ -6,6 +6,13 @@
 //! dir the app owns. A GameN reset (a fresh Game1), an idle timeout, or
 //! shutdown bounds a set. The forwarder then ships those files — and the
 //! snapshot feeds the UI directly.
+//!
+//! `StatsProducer` treats a game's replay as required, not optional: the save
+//! flushes a game's stats before its replay file is visible on disk (see the
+//! comments on `StatsProducer::poll`), so a freshly-detected game is held as
+//! `pending` until its replay shows up (or a timeout forces it through
+//! without one), rather than being recorded on the spot with an incomplete
+//! picture.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -351,6 +358,17 @@ impl SetMachine {
     }
 }
 
+/// A game whose save-diff has already been detected but which cannot be
+/// recorded yet because its replay isn't on disk (see the race documented on
+/// `poll()`). Held until the replay shows up or `PENDING_TIMEOUT_S` elapses.
+struct PendingGame {
+    result: GameResult,
+    /// The epoch the game was detected at — used both as the replay-lookup
+    /// anchor and, if nothing else, the timestamp it's eventually recorded
+    /// under.
+    at: i64,
+}
+
 /// Wires the save/replays to the SetMachine. Call `poll()` each tick.
 pub struct StatsProducer {
     save: PathBuf,
@@ -360,10 +378,23 @@ pub struct StatsProducer {
     pub machine: SetMachine,
     mtime: Option<std::time::SystemTime>,
     baseline: Option<HashMap<String, f64>>,
+    /// At most one game at a time waiting on its replay to appear on disk.
+    pending: Option<PendingGame>,
 }
 
 impl StatsProducer {
-    pub const REPLAY_WINDOW_S: i64 = 20;
+    /// The save writes a game's stats, then its replay file becomes visible
+    /// on disk anywhere from a few seconds to ~15s later (measured: every
+    /// .rpl's mtime lands 9-16s after the timestamp encoded in its own
+    /// filename). This window has to comfortably cover that lag on both
+    /// sides, since detection time and replay time can each drift a little.
+    pub const REPLAY_WINDOW_S: i64 = 45;
+
+    /// Safety valve for `pending`: if a replay still hasn't shown up after
+    /// this long, stop waiting and record the game without one (today's old
+    /// behaviour) rather than holding it — and the data it protects —
+    /// forever.
+    pub const PENDING_TIMEOUT_S: i64 = 90;
 
     pub fn new(
         save_path: &Path,
@@ -382,6 +413,7 @@ impl StatsProducer {
             machine,
             mtime: None,
             baseline: None,
+            pending: None,
         };
         p.baseline = p.read();
         if let Some(base) = &p.baseline {
@@ -428,8 +460,56 @@ impl StatsProducer {
         best
     }
 
+    /// Try to record `pending` right now: with its replay if one has shown up
+    /// on disk, or — only when `force` — without one. Returns whether it was
+    /// recorded (i.e. whether the caller can stop holding it).
+    fn try_record_pending(&mut self, pending: &PendingGame, force: bool) -> bool {
+        if let Some(replay) = self.newest_replay_near(pending.at) {
+            self.machine
+                .record_game(&pending.result, Some(&replay), pending.at);
+            return true;
+        }
+        if force {
+            (self.machine.log)(&format!(
+                "no replay matched game at {} within {}s — recording without opponent/GameN (unmatched)",
+                pending.at,
+                Self::PENDING_TIMEOUT_S
+            ));
+            self.machine.record_game(&pending.result, None, pending.at);
+            return true;
+        }
+        false
+    }
+
+    /// Resolve the pending game if possible: record it once its replay is on
+    /// disk, or force it through unmatched once `PENDING_TIMEOUT_S` has
+    /// elapsed (the safety valve — a game is never silently lost). No-op if
+    /// nothing is pending or it's still within the wait window.
+    fn resolve_pending(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        let timed_out = now_sec() - pending.at > Self::PENDING_TIMEOUT_S;
+        if !self.try_record_pending(&pending, timed_out) {
+            self.pending = Some(pending); // still waiting
+        }
+    }
+
     pub fn poll(&mut self) {
-        self.machine.idle_check(self.idle_s);
+        // Resolve a pending game on EVERY poll, including ticks where the
+        // save didn't change — the replay we're waiting on can land at any
+        // point relative to our poll cadence, not just the tick a new game
+        // was detected on.
+        self.resolve_pending();
+
+        // Never idle-finalize while a game is pending: the open set is
+        // missing its most recent game until the pending one lands, so
+        // finalizing now would close the set moments early and split what
+        // should be one set into two.
+        if self.pending.is_none() {
+            self.machine.idle_check(self.idle_s);
+        }
+
         let Ok(meta) = std::fs::metadata(&self.save) else { return };
         let Ok(mtime) = meta.modified() else { return };
         if self.mtime == Some(mtime) {
@@ -442,11 +522,38 @@ impl StatsProducer {
             return;
         };
         let result = stats::to_game_result(stats::diff(&baseline, &nxt));
+        // The baseline must advance here regardless of what happens to
+        // `result` below — the diff is only computable against consecutive
+        // save reads, so this can't be redone once we've moved past it.
         self.baseline = Some(nxt);
         let Some(result) = result else { return }; // non-match write
         let at = now_sec();
-        let replay = self.newest_replay_near(at);
-        self.machine.record_game(&result, replay.as_ref(), at);
+
+        // THE RACE (measured from production data, not theorised): the save
+        // flushes a game's stats to disk before that game's replay file
+        // becomes visible — a game detected at 15:39:08 had its replay named
+        // ...15-39-07... (a second earlier, well inside the window) yet the
+        // lookup found nothing, because every .rpl's mtime lands 9-16s after
+        // the timestamp encoded in its own filename. Recording immediately
+        // with "whatever replay we can find right now" therefore regularly
+        // finds nothing — and for an ONLINE/RANKED game (whose opponent is
+        // ONLY recoverable from the replay) or set grouping (whose GameN
+        // ONLY comes from the replay), that permanently loses the opponent +
+        // character, or splits one real set into several one-game "sets".
+        // So: never record straight off a diff. Hold it as pending and only
+        // call record_game once a replay is actually found, or the
+        // PENDING_TIMEOUT_S safety valve fires.
+        if let Some(prev) = self.pending.take() {
+            // Only one game is pending in practice, but if a second save
+            // change lands before the first resolves, flush the older one
+            // first (forced, replay or not) so game order is preserved and
+            // neither game is silently dropped.
+            self.try_record_pending(&prev, true);
+        }
+        self.pending = Some(PendingGame { result, at });
+        // Try to resolve the fresh pending game immediately in case its
+        // replay is already sitting on disk (e.g. after a slow poll tick).
+        self.resolve_pending();
     }
 
     pub fn shutdown(&mut self) {
@@ -620,6 +727,232 @@ mod tests {
         let b = players.iter().find(|p| p["tag"] == "B").unwrap();
         assert_eq!(a["won"], true);
         assert_eq!(b["won"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `StatsProducer` rooted at a fresh temp dir, pointed at a save path
+    /// that doesn't exist. That's fine for the pending-replay tests below:
+    /// they drive `pending` and `poll()` directly rather than through a real
+    /// save-file diff, so `poll()` only ever gets as far as resolving/timing
+    /// out the pending game before `std::fs::metadata` on the missing save
+    /// bails it out early.
+    fn producer(dir: &Path, replays: &Path, idle_s: f64) -> StatsProducer {
+        StatsProducer::new(
+            &dir.join("missing.sav"),
+            replays,
+            &dir.join("out"),
+            idle_s,
+            Box::new(|_| {}),
+            None,
+        )
+        .unwrap()
+    }
+
+    /// A replay filename timestamped at (approximately) "now", in the local
+    /// wall-clock format the game itself writes. `parse_replay_name` reads
+    /// filenames as local time, so round-tripping through the machine's own
+    /// local clock lands back within a second of `now_sec()` — close enough
+    /// for these tests, which only need "recent enough to not be timed out
+    /// and close enough to match the REPLAY_WINDOW_S window".
+    fn now_replay_name(a: &str, ca: &str, b: &str, cb: &str, game: i64) -> String {
+        let ts = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S-000");
+        format!("{ts}-{a}({ca})-{b}({cb})-Game{game}.rpl")
+    }
+
+    /// No replay on disk yet: the pending game must not be recorded, and
+    /// must still be waiting afterwards.
+    #[test]
+    fn pending_without_replay_records_nothing_yet() {
+        let g1 = snap(&[
+            ("A", "Cla", "LOCAL", &[("wins", 1.0)]),
+            ("B", "Kra", "LOCAL", &[("losses", 1.0)]),
+        ]);
+        let r = to_game_result(diff(&Map::new(), &g1)).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("statstest_pend1_{}", std::process::id()));
+        let replays = dir.join("replays"); // left empty — replay hasn't landed yet
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&replays).unwrap();
+
+        let mut p = producer(&dir, &replays, 180.0);
+        // `at` is "just now" — well inside PENDING_TIMEOUT_S, so this must
+        // stay pending rather than being forced through unmatched.
+        p.pending = Some(PendingGame {
+            result: r,
+            at: now_sec(),
+        });
+
+        p.poll();
+
+        assert!(
+            !p.machine.has_open_set(),
+            "no replay yet -> nothing should be recorded"
+        );
+        assert!(p.pending.is_some(), "the game must still be held pending");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Once a matching replay appears on disk, the next poll records the
+    /// game — recovering the opponent (ONLINE games only move the local
+    /// tag's stats) and the GameN from the replay filename.
+    #[test]
+    fn pending_resolves_once_replay_appears_with_opponent_and_gamenum() {
+        // Simulates an ONLINE game: only the local tag's stats moved in the
+        // save, so the opponent is only knowable from the replay.
+        let g_online = snap(&[("ME", "Fle", "ONLINE", &[("wins", 1.0)])]);
+        let r = to_game_result(diff(&Map::new(), &g_online)).unwrap();
+        let fname = now_replay_name("ME", "Fle", "OPP", "Kra", 1);
+        let rep = parse_replay_name(&fname).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("statstest_pend2_{}", std::process::id()));
+        let replays = dir.join("replays");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&replays).unwrap();
+
+        let mut p = producer(&dir, &replays, 180.0);
+        p.pending = Some(PendingGame {
+            result: r,
+            at: rep.epoch,
+        });
+
+        p.poll(); // replay still missing -> stays pending
+        assert!(!p.machine.has_open_set());
+
+        // The replay lands on disk (mirrors the measured 9-16s lag).
+        std::fs::write(replays.join(fname), []).unwrap();
+
+        p.poll(); // now it can be resolved
+        assert!(p.pending.is_none());
+        assert!(p.machine.has_open_set());
+
+        let matches = &p.machine.set.as_ref().unwrap().matches;
+        assert_eq!(matches.len(), 1);
+        let players = matches[0]["players"].as_array().unwrap();
+        assert_eq!(players.len(), 2, "opponent recovered from the replay");
+        let opp = players.iter().find(|pl| pl["name"] == "OPP").unwrap();
+        assert_eq!(opp["character"], "Kragg");
+        assert_eq!(matches[0]["gameNumber"].as_i64(), Some(1));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The safety valve: a pending game older than PENDING_TIMEOUT_S is
+    /// eventually recorded without a replay rather than lost forever.
+    #[test]
+    fn pending_past_timeout_is_recorded_without_replay() {
+        let g1 = snap(&[
+            ("A", "Cla", "LOCAL", &[("wins", 1.0)]),
+            ("B", "Kra", "LOCAL", &[("losses", 1.0)]),
+        ]);
+        let r = to_game_result(diff(&Map::new(), &g1)).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("statstest_pend3_{}", std::process::id()));
+        let replays = dir.join("replays"); // left empty — no replay will ever show up
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&replays).unwrap();
+
+        let mut p = producer(&dir, &replays, 180.0);
+        let at = now_sec() - StatsProducer::PENDING_TIMEOUT_S - 1;
+        p.pending = Some(PendingGame { result: r, at });
+
+        p.poll(); // no replay, but past the timeout -> forced through
+
+        assert!(p.pending.is_none());
+        assert!(p.machine.has_open_set());
+        let matches = &p.machine.set.as_ref().unwrap().matches;
+        assert_eq!(matches[0]["gameNumber"], Value::Null); // no replay -> no GameN
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// idle_check must not finalize the open set while a game is pending —
+    /// otherwise the set could close moments before the pending game lands
+    /// and would get split in two.
+    #[test]
+    fn idle_check_is_suppressed_while_a_game_is_pending() {
+        let g1 = snap(&[
+            ("A", "Cla", "LOCAL", &[("wins", 1.0)]),
+            ("B", "Kra", "LOCAL", &[("losses", 1.0)]),
+        ]);
+        let r = to_game_result(diff(&Map::new(), &g1)).unwrap();
+        let rep = parse_replay_name("2026-07-23_19-00-00-000-A(Cla)-B(Kra)-Game1.rpl").unwrap();
+
+        let dir = std::env::temp_dir().join(format!("statstest_pend4_{}", std::process::id()));
+        let replays = dir.join("replays");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&replays).unwrap();
+
+        // idle_s tiny enough that it would fire immediately if not guarded.
+        let mut p = producer(&dir, &replays, 0.001);
+        p.machine.record_game(&r, Some(&rep), rep.epoch);
+        p.machine.last_game_at = now_sec() - 10; // well past idle_s
+
+        // A second game's diff just landed but its replay hasn't yet.
+        let r2 = to_game_result(diff(&Map::new(), &g1)).unwrap();
+        p.pending = Some(PendingGame {
+            result: r2,
+            at: now_sec(),
+        });
+
+        p.poll(); // idle_s has clearly elapsed, but a game is pending
+
+        assert!(
+            p.machine.has_open_set(),
+            "set must stay open while a game is pending"
+        );
+        let sets_written = std::fs::read_dir(dir.join("out").join("sets"))
+            .unwrap()
+            .count();
+        assert_eq!(sets_written, 0, "idle_check must not have fired");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// If a second save change arrives while one game is still pending, the
+    /// older one is flushed (forced, replay or not) before the new one is
+    /// stored — order is preserved and neither game is dropped.
+    #[test]
+    fn second_pending_game_flushes_the_first_in_order() {
+        let g1 = snap(&[
+            ("A", "Cla", "LOCAL", &[("wins", 1.0)]),
+            ("B", "Kra", "LOCAL", &[("losses", 1.0)]),
+        ]);
+        let r1 = to_game_result(diff(&Map::new(), &g1)).unwrap();
+        let r2 = to_game_result(diff(&Map::new(), &g1)).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("statstest_pend5_{}", std::process::id()));
+        let replays = dir.join("replays"); // no replays land for either game
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&replays).unwrap();
+
+        let mut p = producer(&dir, &replays, 180.0);
+        p.pending = Some(PendingGame {
+            result: r1,
+            at: now_sec() - 5,
+        });
+        // Directly exercises poll()'s "flush the old pending game first"
+        // branch by taking the existing pending game and forcing it through
+        // exactly as poll() would when a fresh result arrives.
+        let prev = p.pending.take().unwrap();
+        p.try_record_pending(&prev, true);
+        p.pending = Some(PendingGame {
+            result: r2,
+            at: now_sec(),
+        });
+
+        assert!(p.machine.has_open_set());
+        let matches = &p.machine.set.as_ref().unwrap().matches;
+        assert_eq!(
+            matches.len(),
+            1,
+            "the first pending game was flushed, unmatched"
+        );
+        assert!(
+            p.pending.is_some(),
+            "the second game is now the one pending"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

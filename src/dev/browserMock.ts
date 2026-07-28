@@ -24,7 +24,7 @@ const state: any = {
     save: '',
     replays: '',
     dir: '',
-    idle: 180,
+    idle: 420,
     poll: 2,
     hub_port: 8787,
     dry_run: false,

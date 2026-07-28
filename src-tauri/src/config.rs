@@ -78,15 +78,29 @@ impl Config {
 
 /// Standard %LOCALAPPDATA% locations for the stats save and replays folder.
 pub fn default_save_paths() -> (PathBuf, PathBuf) {
-    let base = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs_home().join("AppData").join("Local"))
-        .join("Rivals2")
-        .join("Saved");
+    let base = rivals2_saved_dir();
     (
         base.join("SaveGames").join("Rivals2_StatsSaveSlot.sav"),
         base.join("Replays"),
     )
+}
+
+/// The *settings* save — a different file than the stats save above, in a
+/// sibling `Settings\` folder under the same `Rivals2\Saved` base. Holds the
+/// "Replay Auto Save" gameplay option this app depends on (see
+/// `station_core::save::check_replay_autosave`).
+pub fn default_settings_path() -> PathBuf {
+    rivals2_saved_dir()
+        .join("Settings")
+        .join("Rivals2_SettingsSaveSlot.sav")
+}
+
+fn rivals2_saved_dir() -> PathBuf {
+    std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| dirs_home().join("AppData").join("Local"))
+        .join("Rivals2")
+        .join("Saved")
 }
 
 fn dirs_home() -> PathBuf {

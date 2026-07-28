@@ -77,8 +77,7 @@ impl std::error::Error for StartggError {}
 /// counterpart of `h.startgg = FakeStartgg()` in `test_hub.py`).
 pub trait StartggApi: Send + Sync {
     fn enabled(&self) -> bool;
-    fn station_set(&self, slug: &str, station: i64, max_age: f64)
-        -> Result<Value, StartggError>;
+    fn station_set(&self, slug: &str, station: i64, max_age: f64) -> Result<Value, StartggError>;
     fn character_map(&self, slug: &str) -> Result<Value, StartggError>;
     fn update_live(&self, set_id: &Value, game_data: &Value) -> Result<(), StartggError>;
     fn report_set(
@@ -151,7 +150,7 @@ impl Startgg {
             .header("User-Agent", "rivals-station-hub/1.0")
             .json(&body)
             .send()
-            .map_err(|e| StartggError(format!("start.gg unreachable: {}", e)))?;
+            .map_err(|e| StartggError(format!("start.gg unreachable: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
             // urllib raises HTTPError for any non-2xx; mirror the message.
@@ -265,7 +264,7 @@ impl Startgg {
         let data = match self.gql(CHARACTER_MAP_QUERY, json!({ "slug": slug })) {
             Ok(d) => d,
             Err(e) => {
-                (self.log)(&format!("character map unavailable: {}", e));
+                (self.log)(&format!("character map unavailable: {e}"));
                 return Ok(stale.unwrap_or_else(|| json!({})));
             }
         };
@@ -304,7 +303,10 @@ impl Startgg {
     /// a set that is already ongoing. Doing it here meant warmups at a setup
     /// could start the bracket match on their own.
     pub fn update_live(&self, set_id: &Value, game_data: &Value) -> Result<(), StartggError> {
-        self.gql(UPDATE_LIVE_MUTATION, json!({ "id": set_id, "g": game_data }))?;
+        self.gql(
+            UPDATE_LIVE_MUTATION,
+            json!({ "id": set_id, "g": game_data }),
+        )?;
         Ok(())
     }
 
@@ -347,12 +349,7 @@ impl StartggApi for Startgg {
     fn enabled(&self) -> bool {
         Startgg::enabled(self)
     }
-    fn station_set(
-        &self,
-        slug: &str,
-        station: i64,
-        max_age: f64,
-    ) -> Result<Value, StartggError> {
+    fn station_set(&self, slug: &str, station: i64, max_age: f64) -> Result<Value, StartggError> {
         Startgg::station_set(self, slug, station, max_age)
     }
     fn character_map(&self, slug: &str) -> Result<Value, StartggError> {
@@ -446,7 +443,7 @@ mod tests {
         let e = StartggError("start.gg HTTP 429".to_string());
         assert_eq!(e.to_string(), "start.gg HTTP 429");
         let dyn_err: &dyn std::error::Error = &e;
-        assert_eq!(format!("{}", dyn_err), "start.gg HTTP 429");
+        assert_eq!(format!("{dyn_err}"), "start.gg HTTP 429");
     }
 
     #[test]
@@ -463,7 +460,10 @@ mod tests {
 
         // A cached "no set at this station" (Python None) is served too.
         sg.seed_station_cache("slug", 2, now(), Value::Null);
-        assert!(sg.station_set("slug", 2, STATION_CACHE_S).unwrap().is_null());
+        assert!(sg
+            .station_set("slug", 2, STATION_CACHE_S)
+            .unwrap()
+            .is_null());
 
         // Stale entry falls through to the network path (-> token error here).
         sg.seed_station_cache("slug", 3, now() - 100.0, cached.clone());

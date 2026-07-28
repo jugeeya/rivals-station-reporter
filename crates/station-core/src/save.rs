@@ -54,14 +54,19 @@ pub fn parse_stats(bytes: &[u8]) -> Result<HashMap<String, f64>, String> {
     let save = Save::read(&mut Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let mut flat = HashMap::new();
 
-    let Some(Property::Array(uesave::ValueVec::Struct(tags))) =
-        save.root.properties.0.get(&PropertyKey::from("AllPlayerTagStats"))
+    let Some(Property::Array(uesave::ValueVec::Struct(tags))) = save
+        .root
+        .properties
+        .0
+        .get(&PropertyKey::from("AllPlayerTagStats"))
     else {
         return Ok(flat);
     };
 
     for sv in tags {
-        let StructValue::Struct(props) = sv else { continue };
+        let StructValue::Struct(props) = sv else {
+            continue;
+        };
         let name = match props.0.get(&PropertyKey::from("PlayerTagName")) {
             Some(p) => match prop_str(p) {
                 Some(n) => n,
@@ -80,13 +85,16 @@ pub fn parse_stats(bytes: &[u8]) -> Result<HashMap<String, f64>, String> {
                 let Some(ch) = prop_str(key) else { continue };
                 // Each character maps to a struct holding a `Values` map of
                 // EGameModeType -> number.
-                let Property::Struct(StructValue::Struct(inner)) = value else { continue };
-                let Some(Property::Map(values)) = inner.0.get(&PropertyKey::from("Values"))
-                else {
+                let Property::Struct(StructValue::Struct(inner)) = value else {
+                    continue;
+                };
+                let Some(Property::Map(values)) = inner.0.get(&PropertyKey::from("Values")) else {
                     continue;
                 };
                 for MapEntry { key: mk, value: mv } in values {
-                    let Some(mode_key) = prop_str(mk) else { continue };
+                    let Some(mode_key) = prop_str(mk) else {
+                        continue;
+                    };
                     let Some(val) = prop_num(mv) else { continue };
                     // "EGameModeType::LOCAL" -> "LOCAL"
                     let mode = mode_key.rsplit("::").next().unwrap_or(&mode_key);
@@ -120,13 +128,18 @@ mod tests {
     /// to run it (skipped silently otherwise — CI has no save file).
     #[test]
     fn parses_real_save_when_provided() {
-        let Ok(path) = std::env::var("RSR_REAL_SAVE") else { return };
+        let Ok(path) = std::env::var("RSR_REAL_SAVE") else {
+            return;
+        };
         let bytes = std::fs::read(&path).expect("read RSR_REAL_SAVE");
         let flat = parse_stats(&bytes).expect("parse real save");
         assert!(!flat.is_empty(), "no stat keys parsed");
         assert!(flat.keys().all(|k| k.split('|').count() == 4));
         for t in tag_names(&flat) {
-            assert!(!SYNTHETIC.contains(&t.as_str()), "synthetic tag {t} not filtered");
+            assert!(
+                !SYNTHETIC.contains(&t.as_str()),
+                "synthetic tag {t} not filtered"
+            );
         }
     }
 

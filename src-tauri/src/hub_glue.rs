@@ -37,7 +37,11 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(Value::Null);
-    let tag_map = matching::build_tag_map(if aliases.is_null() { None } else { Some(&aliases) });
+    let tag_map = matching::build_tag_map(if aliases.is_null() {
+        None
+    } else {
+        Some(&aliases)
+    });
 
     let log_inner = inner.clone();
     let snap_inner = inner.clone();
@@ -51,14 +55,22 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
             snap_inner.set_hub_snapshot(snap.clone());
             snap_inner.emit_state();
         })),
-        Some(here.join("learned-tags.json").to_string_lossy().into_owned()),
+        Some(
+            here.join("learned-tags.json")
+                .to_string_lossy()
+                .into_owned(),
+        ),
     ));
 
     let mut server = HubServer::new(hub.clone(), cfg.hub_port, "0.0.0.0");
     let url = server.start()?;
     inner.set_hub_snapshot(hub.snapshot());
     inner.set_hub(Some(hub));
-    Ok(HubPieces { url, port: cfg.hub_port, server })
+    Ok(HubPieces {
+        url,
+        port: cfg.hub_port,
+        server,
+    })
 }
 
 fn hub_and_slug(inner: &Arc<EngineInner>) -> Result<(Arc<Hub>, String), String> {
@@ -89,18 +101,21 @@ pub fn do_report(
             let _ = hub.rebind(&slug, station, &sid);
         }
     }
-    hub.do_report(&slug, station, &sid, winner).map_err(err_text)
+    hub.do_report(&slug, station, &sid, winner)
+        .map_err(err_text)
 }
 
 /// The station guessed the two players backwards — flip the mapping and
 /// re-push the corrected live score (the hub remembers the correction).
 pub fn do_swap(inner: &Arc<EngineInner>, station: i64, set_id: &str) -> Result<Value, String> {
     let (hub, slug) = hub_and_slug(inner)?;
-    hub.do_swap(&slug, station, &json!(set_id)).map_err(err_text)
+    hub.do_swap(&slug, station, &json!(set_id))
+        .map_err(err_text)
 }
 
 /// Remove a set from the console. start.gg is never touched.
 pub fn do_delete(inner: &Arc<EngineInner>, station: i64, set_id: &str) -> Result<Value, String> {
     let (hub, slug) = hub_and_slug(inner)?;
-    hub.do_delete(&slug, station, &json!(set_id)).map_err(err_text)
+    hub.do_delete(&slug, station, &json!(set_id))
+        .map_err(err_text)
 }

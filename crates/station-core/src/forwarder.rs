@@ -129,7 +129,10 @@ impl Forwarder {
             .and_then(|_| std::fs::rename(&tmp, &self.state_path))
             .is_err()
         {
-            (self.log)(&format!("could not write state {}", self.state_path.display()));
+            (self.log)(&format!(
+                "could not write state {}",
+                self.state_path.display()
+            ));
         }
     }
 
@@ -152,7 +155,10 @@ impl Forwarder {
         let url = format!("{}{}", self.broker, endpoint);
         if self.dry_run {
             let body = serde_json::to_string_pretty(payload).unwrap_or_default();
-            (self.log)(&format!("DRY-RUN POST {url}\n{}", &body[..body.len().min(800)]));
+            (self.log)(&format!(
+                "DRY-RUN POST {url}\n{}",
+                &body[..body.len().min(800)]
+            ));
             return true;
         }
         // An explicit User-Agent is required: Cloudflare's bot rules 403 the
@@ -194,7 +200,9 @@ impl Forwarder {
     }
 
     fn process_sets(&mut self) {
-        let Ok(entries) = std::fs::read_dir(&self.sets_dir) else { return };
+        let Ok(entries) = std::fs::read_dir(&self.sets_dir) else {
+            return;
+        };
         let mut names: Vec<String> = entries
             .flatten()
             .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
@@ -203,13 +211,19 @@ impl Forwarder {
         names.sort();
         let sent: Vec<String> = self.state["sent_sets"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         for name in names {
             if sent.contains(&name) {
                 continue;
             }
-            let Some(body) = Self::read_json(&self.sets_dir.join(&name)) else { continue };
+            let Some(body) = Self::read_json(&self.sets_dir.join(&name)) else {
+                continue;
+            };
             if self.post("/matchlogger/ingest", &self.payload(json!({ "set": body }))) {
                 (self.log)(&format!("ingested {name}"));
                 self.state["sent_sets"]
@@ -222,13 +236,20 @@ impl Forwarder {
     }
 
     fn process_current(&mut self) {
-        let Ok(raw) = std::fs::read(&self.current_path) else { return };
+        let Ok(raw) = std::fs::read(&self.current_path) else {
+            return;
+        };
         let digest = Self::hash_bytes(&raw);
         if self.state["current_hash"].as_str() == Some(digest.as_str()) {
             return; // unchanged since last heartbeat
         }
-        let Ok(body) = serde_json::from_slice::<Value>(&raw) else { return };
-        if self.post("/matchlogger/current", &self.payload(json!({ "current": body }))) {
+        let Ok(body) = serde_json::from_slice::<Value>(&raw) else {
+            return;
+        };
+        if self.post(
+            "/matchlogger/current",
+            &self.payload(json!({ "current": body })),
+        ) {
             (self.log)(&format!(
                 "heartbeat: {}",
                 body["state"].as_str().unwrap_or("?")
@@ -240,12 +261,16 @@ impl Forwarder {
 
     fn process_live(&mut self) {
         // Running per-game snapshot -> live (non-finalizing) start.gg score.
-        let Ok(raw) = std::fs::read(&self.live_path) else { return };
+        let Ok(raw) = std::fs::read(&self.live_path) else {
+            return;
+        };
         let digest = Self::hash_bytes(&raw);
         if self.state["live_hash"].as_str() == Some(digest.as_str()) {
             return;
         }
-        let Ok(body) = serde_json::from_slice::<Value>(&raw) else { return };
+        let Ok(body) = serde_json::from_slice::<Value>(&raw) else {
+            return;
+        };
         // The producer writes {"complete": true} when the set ends — nothing to push.
         if body["complete"].as_bool() != Some(true) {
             if !self.post("/matchlogger/live", &self.payload(json!({ "set": body }))) {
@@ -253,7 +278,10 @@ impl Forwarder {
             }
             (self.log)(&format!(
                 "live: {} game(s)",
-                body["matchCount"].as_i64().map(|n| n.to_string()).unwrap_or_else(|| "?".into())
+                body["matchCount"]
+                    .as_i64()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "?".into())
             ));
         }
         self.state["live_hash"] = json!(digest);
@@ -278,7 +306,10 @@ mod tests {
             normalize_slug("https://www.start.gg/tournament/foo-1/event/bar-2/brackets/12/34"),
             "tournament/foo-1/event/bar-2"
         );
-        assert_eq!(normalize_slug("tournament/a/event/b"), "tournament/a/event/b");
+        assert_eq!(
+            normalize_slug("tournament/a/event/b"),
+            "tournament/a/event/b"
+        );
         assert_eq!(normalize_slug("  plain  "), "plain");
     }
 
@@ -287,7 +318,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fwdtest_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sets")).unwrap();
-        std::fs::write(dir.join("sets/set_x.json"), r#"{"setId":"x","complete":true}"#).unwrap();
+        std::fs::write(
+            dir.join("sets/set_x.json"),
+            r#"{"setId":"x","complete":true}"#,
+        )
+        .unwrap();
         std::fs::write(dir.join("current.json"), r#"{"state":"idle"}"#).unwrap();
 
         let logged = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));

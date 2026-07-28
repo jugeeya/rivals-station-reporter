@@ -62,8 +62,16 @@ impl EngineInner {
     pub fn state(&self) -> Value {
         let cfg = self.cfg.lock().unwrap().clone();
         let (def_save, def_replays) = config::default_save_paths();
-        let save = if cfg.save.is_empty() { def_save } else { PathBuf::from(&cfg.save) };
-        let replays = if cfg.replays.is_empty() { def_replays } else { PathBuf::from(&cfg.replays) };
+        let save = if cfg.save.is_empty() {
+            def_save
+        } else {
+            PathBuf::from(&cfg.save)
+        };
+        let replays = if cfg.replays.is_empty() {
+            def_replays
+        } else {
+            PathBuf::from(&cfg.replays)
+        };
         let out_dir = self.out_dir(&cfg);
         json!({
             "config": cfg,
@@ -115,7 +123,10 @@ impl EngineInner {
 fn chrono_lite_hms() -> String {
     // Local wall-clock HH:MM:SS for the log panel, like the Python widget.
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     // chrono is available via station-core's re-export path; format locally.
     let dt = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
     let datetime: chrono::DateTime<chrono::Local> = dt.into();
@@ -157,8 +168,16 @@ fn build(inner: &Arc<EngineInner>) -> Built {
     let mut forwarder = None;
     if cfg.is_station() {
         let (def_save, def_replays) = config::default_save_paths();
-        let save = if cfg.save.is_empty() { def_save } else { PathBuf::from(&cfg.save) };
-        let replays = if cfg.replays.is_empty() { def_replays } else { PathBuf::from(&cfg.replays) };
+        let save = if cfg.save.is_empty() {
+            def_save
+        } else {
+            PathBuf::from(&cfg.save)
+        };
+        let replays = if cfg.replays.is_empty() {
+            def_replays
+        } else {
+            PathBuf::from(&cfg.replays)
+        };
         let out_dir = inner.out_dir(&cfg);
 
         let log_inner = inner.clone();
@@ -199,7 +218,11 @@ fn build(inner: &Arc<EngineInner>) -> Built {
                 &inner.out_dir(&cfg),
                 None,
                 cfg.dry_run,
-                if cfg.key.is_empty() { None } else { Some(&cfg.key) },
+                if cfg.key.is_empty() {
+                    None
+                } else {
+                    Some(&cfg.key)
+                },
                 Box::new(move |m| log_inner.log_line(m)),
             ));
         } else {
@@ -207,7 +230,11 @@ fn build(inner: &Arc<EngineInner>) -> Built {
         }
     }
 
-    Built { producer, forwarder, hub_pieces }
+    Built {
+        producer,
+        forwarder,
+        hub_pieces,
+    }
 }
 
 /// Create the engine and start its loop thread.
@@ -218,7 +245,9 @@ pub fn start(app: AppHandle, config_dir: PathBuf) -> Engine {
         config_dir,
         cfg: Mutex::new(cfg),
         rebuild: AtomicBool::new(true),
-        status: Mutex::new(json!({ "msg": "starting…", "error": false, "t": station_core::now_sec() })),
+        status: Mutex::new(
+            json!({ "msg": "starting…", "error": false, "t": station_core::now_sec() }),
+        ),
         log: Mutex::new(VecDeque::new()),
         snapshot: Mutex::new(json!({ "history": [], "live": null })),
         hub_snapshot: Mutex::new(json!({ "sets": [], "stations": {} })),
@@ -229,7 +258,11 @@ pub fn start(app: AppHandle, config_dir: PathBuf) -> Engine {
 
     let loop_inner = inner.clone();
     std::thread::spawn(move || {
-        let mut built = Built { producer: None, forwarder: None, hub_pieces: None };
+        let mut built = Built {
+            producer: None,
+            forwarder: None,
+            hub_pieces: None,
+        };
         loop {
             if loop_inner.rebuild.swap(false, Ordering::SeqCst) {
                 // Drop the old pieces first so ports/files release.

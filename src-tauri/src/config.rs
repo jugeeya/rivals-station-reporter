@@ -80,9 +80,7 @@ impl Config {
 pub fn default_save_paths() -> (PathBuf, PathBuf) {
     let base = std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs_home().join("AppData").join("Local")
-        })
+        .unwrap_or_else(|_| dirs_home().join("AppData").join("Local"))
         .join("Rivals2")
         .join("Saved");
     (

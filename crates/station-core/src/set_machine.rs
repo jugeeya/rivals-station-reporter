@@ -116,10 +116,17 @@ impl SetMachine {
     /// Atomic JSON write (tmp + rename), pretty-printed like the Python's
     /// `indent=2` — external tooling may be tailing these files.
     fn write(&self, name: &Path, obj: &Value) {
-        let path = if name.is_absolute() { name.to_path_buf() } else { self.out.join(name) };
+        let path = if name.is_absolute() {
+            name.to_path_buf()
+        } else {
+            self.out.join(name)
+        };
         let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_string_pretty(obj).unwrap_or_else(|_| "{}".into());
-        if std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
+        if std::fs::write(&tmp, body)
+            .and_then(|_| std::fs::rename(&tmp, &path))
+            .is_err()
+        {
             (self.log)(&format!("could not write {}", path.display()));
         }
     }
@@ -170,12 +177,8 @@ impl SetMachine {
                     let opp = rep
                         .players
                         .iter()
-                        .find(|p| Value::from(char_full(&p.char_code)) != mine["character"])
-                        .or_else(|| {
-                            rep.players
-                                .iter()
-                                .find(|p| Value::from(p.name.clone()) != mine["name"])
-                        });
+                        .find(|p| char_full(&p.char_code) != mine["character"])
+                        .or_else(|| rep.players.iter().find(|p| p.name.clone() != mine["name"]));
                     if let Some(opp) = opp {
                         let won = !mine["won"].as_bool().unwrap_or(false);
                         players.push(json!({
@@ -192,7 +195,7 @@ impl SetMachine {
             let mut slot: Option<usize> = None;
             if let Some(rep) = replay {
                 for (idx, rp) in rep.players.iter().enumerate() {
-                    if Value::from(char_full(&rp.char_code)) == pl["character"] {
+                    if char_full(&rp.char_code) == pl["character"] {
                         slot = Some(idx);
                         break;
                     }
@@ -275,7 +278,13 @@ impl SetMachine {
         }));
         let vs = standings
             .iter()
-            .map(|p| format!("{}({})", p["name"].as_str().unwrap_or("?"), p["character"].as_str().unwrap_or("?")))
+            .map(|p| {
+                format!(
+                    "{}({})",
+                    p["name"].as_str().unwrap_or("?"),
+                    p["character"].as_str().unwrap_or("?")
+                )
+            })
             .collect::<Vec<_>>()
             .join(" vs ");
         let scores = standings
@@ -285,7 +294,9 @@ impl SetMachine {
             .join(" ");
         (self.log)(&format!(
             "game {} | {} -> {} wins [{}]",
-            game_num.map(|g| g.to_string()).unwrap_or_else(|| "?".into()),
+            game_num
+                .map(|g| g.to_string())
+                .unwrap_or_else(|| "?".into()),
             vs,
             winner_name.as_deref().unwrap_or("?"),
             scores
@@ -322,12 +333,19 @@ impl SetMachine {
             "winnerCharacter": winner.as_ref().map(|w| w["character"].clone()).unwrap_or(Value::Null),
             "players": standings, "matches": set.matches, "source": "stats-diff",
         });
-        let fname = format!("set_{}{}.json", set.id, if complete { "" } else { "_interrupted" });
+        let fname = format!(
+            "set_{}{}.json",
+            set.id,
+            if complete { "" } else { "_interrupted" }
+        );
         self.write(&self.sets_dir.join(&fname), &report);
         (self.log)(&format!(
             "finalized {}: {} wins {} ({} games, complete={})",
             fname,
-            winner.as_ref().and_then(|w| w["name"].as_str()).unwrap_or("?"),
+            winner
+                .as_ref()
+                .and_then(|w| w["name"].as_str())
+                .unwrap_or("?"),
             standings
                 .iter()
                 .map(|s| s["wins"].to_string())
@@ -425,7 +443,10 @@ impl StatsProducer {
             ));
             p.log_armed = true;
         } else {
-            (p.machine.log)(&format!("WARNING: could not read save at {}", p.save.display()));
+            (p.machine.log)(&format!(
+                "WARNING: could not read save at {}",
+                p.save.display()
+            ));
         }
         Ok(p)
     }
@@ -449,7 +470,9 @@ impl StatsProducer {
             if !name.ends_with(".rpl") {
                 continue;
             }
-            let Some(parsed) = stats::parse_replay_name(name) else { continue };
+            let Some(parsed) = stats::parse_replay_name(name) else {
+                continue;
+            };
             if (parsed.epoch - epoch).abs() > Self::REPLAY_WINDOW_S {
                 continue;
             }
@@ -510,7 +533,9 @@ impl StatsProducer {
             self.machine.idle_check(self.idle_s);
         }
 
-        let Ok(meta) = std::fs::metadata(&self.save) else { return };
+        let Ok(meta) = std::fs::metadata(&self.save) else {
+            return;
+        };
         let Ok(mtime) = meta.modified() else { return };
         if self.mtime == Some(mtime) {
             return;
@@ -567,7 +592,9 @@ mod tests {
     use crate::stats::{diff, parse_replay_name, to_game_result};
     use std::collections::HashMap as Map;
 
-    fn snap(rows: &[(&str, &str, &str, &[(&str, f64)])]) -> Map<String, f64> {
+    type StatRow<'a> = (&'a str, &'a str, &'a str, &'a [(&'a str, f64)]);
+
+    fn snap(rows: &[StatRow]) -> Map<String, f64> {
         let cat: Map<&str, &str> = [
             ("matches", "MatchesByCharacter"),
             ("wins", "WinsByCharacter"),
@@ -596,33 +623,62 @@ mod tests {
         let g1 = snap(&[
             ("KIM", "Zet", "LOCAL", &[("matches", 1.0), ("wins", 1.0)]),
             ("KIM", "Random", "LOCAL", &[("matches", 1.0), ("wins", 1.0)]),
-            ("JUGZ!", "Fle", "LOCAL", &[("matches", 1.0), ("losses", 1.0)]),
-            ("JUGZ!", "Random", "LOCAL", &[("matches", 1.0), ("losses", 1.0)]),
+            (
+                "JUGZ!",
+                "Fle",
+                "LOCAL",
+                &[("matches", 1.0), ("losses", 1.0)],
+            ),
+            (
+                "JUGZ!",
+                "Random",
+                "LOCAL",
+                &[("matches", 1.0), ("losses", 1.0)],
+            ),
         ]);
         let g2 = snap(&[
             (
                 "JUGZ!",
                 "Gal",
                 "LOCAL",
-                &[("matches", 1.0), ("wins", 1.0), ("kos", 3.0), ("damageDealt", 83.0), ("grabSuccesses", 3.0)],
+                &[
+                    ("matches", 1.0),
+                    ("wins", 1.0),
+                    ("kos", 3.0),
+                    ("damageDealt", 83.0),
+                    ("grabSuccesses", 3.0),
+                ],
             ),
-            ("JUGZ!", "Random", "LOCAL", &[("matches", 1.0), ("wins", 1.0)]),
+            (
+                "JUGZ!",
+                "Random",
+                "LOCAL",
+                &[("matches", 1.0), ("wins", 1.0)],
+            ),
             (
                 "KIM",
                 "Zet",
                 "LOCAL",
-                &[("matches", 1.0), ("losses", 1.0), ("deaths", 3.0), ("damageTaken", 83.0)],
+                &[
+                    ("matches", 1.0),
+                    ("losses", 1.0),
+                    ("deaths", 3.0),
+                    ("damageTaken", 83.0),
+                ],
             ),
-            ("KIM", "Random", "LOCAL", &[("matches", 1.0), ("losses", 1.0)]),
+            (
+                "KIM",
+                "Random",
+                "LOCAL",
+                &[("matches", 1.0), ("losses", 1.0)],
+            ),
         ]);
         let r1 = to_game_result(diff(&Map::new(), &g1)).unwrap();
         let r2 = to_game_result(diff(&Map::new(), &g2)).unwrap();
-        let rep1 =
-            parse_replay_name("2026-07-23_19-52-44-606-Player1(Fle)-Player2(Zet)-Game1.rpl")
-                .unwrap();
-        let rep2 =
-            parse_replay_name("2026-07-23_19-56-58-454-Player1(Gal)-Player2(Zet)-Game2.rpl")
-                .unwrap();
+        let rep1 = parse_replay_name("2026-07-23_19-52-44-606-Player1(Fle)-Player2(Zet)-Game1.rpl")
+            .unwrap();
+        let rep2 = parse_replay_name("2026-07-23_19-56-58-454-Player1(Gal)-Player2(Zet)-Game2.rpl")
+            .unwrap();
 
         let dir = std::env::temp_dir().join(format!("statstest_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -641,8 +697,14 @@ mod tests {
         let players = g2rec["players"].as_array().unwrap();
         let jz = players.iter().find(|p| p["name"] == "JUGZ!").unwrap();
         let km = players.iter().find(|p| p["name"] == "KIM").unwrap();
-        assert_eq!((jz["slot"].as_i64(), km["slot"].as_i64()), (Some(0), Some(1)));
-        assert_eq!((jz["wins"].as_i64(), km["wins"].as_i64()), (Some(1), Some(1)));
+        assert_eq!(
+            (jz["slot"].as_i64(), km["slot"].as_i64()),
+            (Some(0), Some(1))
+        );
+        assert_eq!(
+            (jz["wins"].as_i64(), km["wins"].as_i64()),
+            (Some(1), Some(1))
+        );
         assert_eq!(jz["kos"].as_i64(), Some(3));
         assert_eq!(jz["damageDealt"].as_i64(), Some(83));
 
@@ -659,12 +721,22 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert!(files[0].starts_with("set_") && files[0].ends_with(".json"));
 
-        let saved: Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("sets").join(&files[0])).unwrap())
-                .unwrap();
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("sets").join(&files[0])).unwrap(),
+        )
+        .unwrap();
         for k in [
-            "setId", "complete", "startEpoch", "endEpoch", "winsRequired", "matchCount",
-            "winnerSlot", "winnerName", "winnerCharacter", "players", "matches",
+            "setId",
+            "complete",
+            "startEpoch",
+            "endEpoch",
+            "winsRequired",
+            "matchCount",
+            "winnerSlot",
+            "winnerName",
+            "winnerCharacter",
+            "players",
+            "matches",
         ] {
             assert!(saved.get(k).is_some(), "set file missing {k}");
         }

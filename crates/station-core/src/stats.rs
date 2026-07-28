@@ -224,7 +224,11 @@ pub fn to_game_result(buckets: HashMap<String, HashMap<String, f64>>) -> Option<
         .or(losers.first())
         .map(|p| p.mode.clone())
         .unwrap_or_default();
-    Some(GameResult { mode, winners, losers })
+    Some(GameResult {
+        mode,
+        winners,
+        losers,
+    })
 }
 
 /// Replay filename -> {epoch, iso, game, players:[{name, char}]}.
@@ -279,9 +283,11 @@ pub fn stamp_of(epoch: i64) -> String {
 mod tests {
     use super::*;
 
+    type StatRow<'a> = (&'a str, &'a str, &'a str, &'a [(&'a str, f64)]);
+
     /// Build the flat `{tag|char|mode|Category: value}` map the save parser
     /// produces — mirror of the Python test's `snap()` helper.
-    fn snap(rows: &[(&str, &str, &str, &[(&str, f64)])]) -> HashMap<String, f64> {
+    fn snap(rows: &[StatRow]) -> HashMap<String, f64> {
         let cat: HashMap<&str, &str> = [
             ("matches", "MatchesByCharacter"),
             ("wins", "WinsByCharacter"),
@@ -308,8 +314,18 @@ mod tests {
         snap(&[
             ("KIM", "Zet", "LOCAL", &[("matches", 1.0), ("wins", 1.0)]),
             ("KIM", "Random", "LOCAL", &[("matches", 1.0), ("wins", 1.0)]),
-            ("JUGZ!", "Fle", "LOCAL", &[("matches", 1.0), ("losses", 1.0)]),
-            ("JUGZ!", "Random", "LOCAL", &[("matches", 1.0), ("losses", 1.0)]),
+            (
+                "JUGZ!",
+                "Fle",
+                "LOCAL",
+                &[("matches", 1.0), ("losses", 1.0)],
+            ),
+            (
+                "JUGZ!",
+                "Random",
+                "LOCAL",
+                &[("matches", 1.0), ("losses", 1.0)],
+            ),
         ])
     }
 
@@ -328,7 +344,12 @@ mod tests {
                     ("grabSuccesses", 3.0),
                 ],
             ),
-            ("JUGZ!", "Random", "LOCAL", &[("matches", 1.0), ("wins", 1.0)]),
+            (
+                "JUGZ!",
+                "Random",
+                "LOCAL",
+                &[("matches", 1.0), ("wins", 1.0)],
+            ),
             (
                 "KIM",
                 "Zet",
@@ -340,7 +361,12 @@ mod tests {
                     ("damageTaken", 83.0),
                 ],
             ),
-            ("KIM", "Random", "LOCAL", &[("matches", 1.0), ("losses", 1.0)]),
+            (
+                "KIM",
+                "Random",
+                "LOCAL",
+                &[("matches", 1.0), ("losses", 1.0)],
+            ),
         ])
     }
 
@@ -395,12 +421,10 @@ mod tests {
 
     #[test]
     fn replay_names_parse() {
-        let rep1 =
-            parse_replay_name("2026-07-23_19-52-44-606-Player1(Fle)-Player2(Zet)-Game1.rpl")
-                .unwrap();
-        let rep2 =
-            parse_replay_name("2026-07-23_19-56-58-454-Player1(Gal)-Player2(Zet)-Game2.rpl")
-                .unwrap();
+        let rep1 = parse_replay_name("2026-07-23_19-52-44-606-Player1(Fle)-Player2(Zet)-Game1.rpl")
+            .unwrap();
+        let rep2 = parse_replay_name("2026-07-23_19-56-58-454-Player1(Gal)-Player2(Zet)-Game2.rpl")
+            .unwrap();
         assert_eq!((rep1.game, rep2.game), (1, 2));
         assert_eq!(rep1.players[0].char_code, "Fle");
         assert_eq!(rep1.players[1].char_code, "Zet");

@@ -59,12 +59,20 @@ pub fn report_winner(
 }
 
 #[tauri::command]
-pub fn swap_players(engine: State<'_, Engine>, station: i64, set_id: String) -> Result<Value, String> {
+pub fn swap_players(
+    engine: State<'_, Engine>,
+    station: i64,
+    set_id: String,
+) -> Result<Value, String> {
     crate::hub_glue::do_swap(&engine.0, station, &set_id)
 }
 
 #[tauri::command]
-pub fn delete_set(engine: State<'_, Engine>, station: i64, set_id: String) -> Result<Value, String> {
+pub fn delete_set(
+    engine: State<'_, Engine>,
+    station: i64,
+    set_id: String,
+) -> Result<Value, String> {
     crate::hub_glue::do_delete(&engine.0, station, &set_id)
 }
 

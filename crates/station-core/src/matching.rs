@@ -37,7 +37,7 @@ fn truthy(v: &Value) -> bool {
 }
 
 fn truthy_opt(v: Option<&Value>) -> bool {
-    v.map_or(false, truthy)
+    v.is_some_and(truthy)
 }
 
 /// Python `str()` over a JSON value: strings pass through unquoted, numbers
@@ -99,7 +99,7 @@ pub fn entrant_names(e: &Value) -> Vec<String> {
         _ => String::new(),
     };
     if full.contains('|') {
-        let bare = full.split('|').last().unwrap_or("").trim().to_string();
+        let bare = full.split('|').next_back().unwrap_or("").trim().to_string();
         if !bare.is_empty() {
             return vec![full, bare];
         }
@@ -219,7 +219,9 @@ pub fn match_winner(
                 };
             }
             if partial.is_none()
-                && aliases.iter().any(|a| nn.contains(a.as_str()) || a.contains(&nn))
+                && aliases
+                    .iter()
+                    .any(|a| nn.contains(a.as_str()) || a.contains(&nn))
             {
                 partial = Some(e);
             }
@@ -239,13 +241,19 @@ pub fn match_winner(
 /// whoever's win count ticked up that game.
 pub fn derive_games(st: &Value) -> Value {
     let empty: Vec<Value> = Vec::new();
-    let matches = st.get("matches").and_then(|v| v.as_array()).unwrap_or(&empty);
+    let matches = st
+        .get("matches")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty);
     // prev_wins is keyed by the slot's JSON serialization — Python keyed the
     // dict by the raw slot value; serialization preserves that equality.
     let mut prev_wins: HashMap<String, i64> = HashMap::new();
     let mut games: Vec<Value> = Vec::new();
     for (i, m) in matches.iter().enumerate() {
-        let mps = m.get("players").and_then(|v| v.as_array()).unwrap_or(&empty);
+        let mps = m
+            .get("players")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
         let mut winner_slot = Value::Null;
         for p in mps {
             let slot = p.get("slot").cloned().unwrap_or(Value::Null);
@@ -344,12 +352,18 @@ pub fn map_slots_to_entrants(
 ) -> Option<HashMap<i64, String>> {
     let empty: Vec<Value> = Vec::new();
     let default_st = json!({});
-    let entrants = rec.get("entrants").and_then(|v| v.as_array()).unwrap_or(&empty);
+    let entrants = rec
+        .get("entrants")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty);
     let st = match rec.get("set") {
         Some(v) if truthy(v) => v,
         _ => &default_st,
     };
-    let players = st.get("players").and_then(|v| v.as_array()).unwrap_or(&empty);
+    let players = st
+        .get("players")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty);
     if entrants.len() != 2 || players.len() != 2 {
         return None;
     }
@@ -364,8 +378,8 @@ pub fn map_slots_to_entrants(
         let other = entrants
             .iter()
             .find(|e| py_str(e.get("id").unwrap_or(&Value::Null)) != wid_s);
-        let other_slot = winner_slot
-            .and_then(|ws| slots.iter().flatten().copied().find(|&s| s != ws));
+        let other_slot =
+            winner_slot.and_then(|ws| slots.iter().flatten().copied().find(|&s| s != ws));
         let (winner_slot, other, other_slot) = (winner_slot?, other?, other_slot?);
         let mut out = HashMap::new();
         out.insert(winner_slot, wid_s);
@@ -406,7 +420,9 @@ pub fn map_slots_to_entrants(
                     let ok = if exact {
                         aliases.iter().any(|a| a == &nn)
                     } else {
-                        aliases.iter().any(|a| nn.contains(a.as_str()) || a.contains(&nn))
+                        aliases
+                            .iter()
+                            .any(|a| nn.contains(a.as_str()) || a.contains(&nn))
                     };
                     if ok {
                         hit = Some(e);
@@ -436,7 +452,10 @@ pub fn map_slots_to_entrants(
         .collect();
     for (i, s) in open_slots.iter().enumerate() {
         if i < open_entrants.len() {
-            mapping.insert(*s, py_str(open_entrants[i].get("id").unwrap_or(&Value::Null)));
+            mapping.insert(
+                *s,
+                py_str(open_entrants[i].get("id").unwrap_or(&Value::Null)),
+            );
         }
     }
     if mapping.len() != 2 {
@@ -506,7 +525,10 @@ pub fn game_data_from_games(
             }
         }
         let mut game = serde_json::Map::new();
-        game.insert("gameNum".into(), g.get("gameNum").cloned().unwrap_or(Value::Null));
+        game.insert(
+            "gameNum".into(),
+            g.get("gameNum").cloned().unwrap_or(Value::Null),
+        );
         if let Some(w) = winner_id {
             if !w.is_empty() {
                 game.insert("winnerId".into(), json!(w));
@@ -649,7 +671,11 @@ mod tests {
             .iter()
             .map(|g| g["winnerSlot"].clone())
             .collect();
-        assert_eq!(winner_slots, vec![json!(0), json!(0)], "both games won by slot 0");
+        assert_eq!(
+            winner_slots,
+            vec![json!(0), json!(0)],
+            "both games won by slot 0"
+        );
     }
 
     #[test]
@@ -667,8 +693,7 @@ mod tests {
         assert_eq!(
             smap,
             Some(live_map()),
-            "live mapping by tag: slot0=jugeeya slot1=Kimchi  [{:?}]",
-            smap
+            "live mapping by tag: slot0=jugeeya slot1=Kimchi  [{smap:?}]"
         );
     }
 
@@ -690,7 +715,11 @@ mod tests {
     fn finalizing_anchors_the_winners_slot() {
         let rec = json!({"entrants": entrants(), "set": summarize_set(&real_set())});
         let fin = map_slots_to_entrants(&rec, Some(&json!(24186345)), Some(&tags()));
-        assert_eq!(fin, Some(live_map()), "finalizing anchors the winner's slot");
+        assert_eq!(
+            fin,
+            Some(live_map()),
+            "finalizing anchors the winner's slot"
+        );
     }
 
     #[test]
@@ -721,22 +750,38 @@ mod tests {
 
     #[test]
     fn full_name_orcane_maps_exactly() {
-        assert_eq!(char_id_for(&chars(), &json!("Orcane")), Some(41), "full name 'Orcane' -> exact");
+        assert_eq!(
+            char_id_for(&chars(), &json!("Orcane")),
+            Some(41),
+            "full name 'Orcane' -> exact"
+        );
     }
 
     #[test]
     fn ran_prefers_ranno_over_random() {
-        assert_eq!(char_id_for(&chars(), &json!("Ran")), Some(44), "'Ran' prefers Ranno over Random");
+        assert_eq!(
+            char_id_for(&chars(), &json!("Ran")),
+            Some(44),
+            "'Ran' prefers Ranno over Random"
+        );
     }
 
     #[test]
     fn random_exact_matches_random() {
-        assert_eq!(char_id_for(&chars(), &json!("Random")), Some(99), "'Random' exact-matches Random");
+        assert_eq!(
+            char_id_for(&chars(), &json!("Random")),
+            Some(99),
+            "'Random' exact-matches Random"
+        );
     }
 
     #[test]
     fn unknown_character_is_none() {
-        assert_eq!(char_id_for(&chars(), &json!("Nope")), None, "unknown character -> None");
+        assert_eq!(
+            char_id_for(&chars(), &json!("Nope")),
+            None,
+            "unknown character -> None"
+        );
     }
 
     // ---- start.gg gameData (what actually gets pushed) ---------------------------
@@ -744,7 +789,11 @@ mod tests {
     #[test]
     fn game_data_covers_both_games() {
         let gd = game_data_from_games(&derive_games(&real_set()), &live_map(), &chars());
-        assert_eq!(gd.as_array().unwrap().len(), 2, "gameData covers both games");
+        assert_eq!(
+            gd.as_array().unwrap().len(),
+            2,
+            "gameData covers both games"
+        );
     }
 
     #[test]

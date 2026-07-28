@@ -168,7 +168,7 @@ fn snapshot_of(s: &HubState) -> Value {
             }
         }
     }
-    out.sort_by(|a, b| ingested(b).cmp(&ingested(a)));
+    out.sort_by_key(|b| std::cmp::Reverse(ingested(b)));
     json!({"version": s.version, "sets": out, "stations": Value::Object(s.stations.clone())})
 }
 
@@ -191,14 +191,14 @@ fn load_state(log: &dyn Fn(&str), state_path: Option<&str>, s: &mut HubState) {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
-            log(&format!("could not read hub state: {}", e));
+            log(&format!("could not read hub state: {e}"));
             return;
         }
     };
     let data: Value = match serde_json::from_str(&text) {
         Ok(v) => v,
         Err(e) => {
-            log(&format!("could not read hub state: {}", e));
+            log(&format!("could not read hub state: {e}"));
             return;
         }
     };
@@ -221,7 +221,7 @@ fn load_state(log: &dyn Fn(&str), state_path: Option<&str>, s: &mut HubState) {
         None => {
             // Python: int() raised ValueError -> the same 'could not read' log
             // (stations/sets had already been assigned, exactly as here).
-            log(&format!("could not read hub state: invalid version {}", vv));
+            log(&format!("could not read hub state: invalid version {vv}"));
             return;
         }
     }
@@ -230,7 +230,7 @@ fn load_state(log: &dyn Fn(&str), state_path: Option<&str>, s: &mut HubState) {
         .values()
         .map(|b| b.as_object().map(|o| o.len()).unwrap_or(0))
         .sum();
-    log(&format!("hub state restored ({} set(s))", count));
+    log(&format!("hub state restored ({count} set(s))"));
 }
 
 /// Event state + the start.gg side effects. Transport-agnostic: the HTTP
@@ -333,9 +333,9 @@ impl Hub {
             "sets": Value::Object(s.sets.clone()),
         });
         let body = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".to_string());
-        let tmp = format!("{}.tmp", path);
+        let tmp = format!("{path}.tmp");
         if let Err(e) = fs::write(&tmp, body).and_then(|_| fs::rename(&tmp, path)) {
-            (self.log)(&format!("could not write hub state: {}", e));
+            (self.log)(&format!("could not write hub state: {e}"));
         }
     }
 
@@ -375,7 +375,7 @@ impl Hub {
         match self.startgg.station_set(slug, station, STATION_CACHE_S) {
             Ok(v) => v,
             Err(e) => {
-                (self.log)(&format!("station lookup failed: {}", e));
+                (self.log)(&format!("station lookup failed: {e}"));
                 Value::Null
             }
         }
@@ -405,7 +405,7 @@ impl Hub {
             let prev = s
                 .stations
                 .get(slug)
-                .and_then(|m| m.get(&station.to_string()))
+                .and_then(|m| m.get(station.to_string()))
                 .cloned();
             if let Some(prev) = prev {
                 if truthy(prev.get("startgg")) {
@@ -433,7 +433,10 @@ impl Hub {
         status: &str,
     ) -> (String, Value) {
         let mut sg = Value::Null;
-        if let Some(prev_station) = s.stations.get(slug).and_then(|m| m.get(&station.to_string()))
+        if let Some(prev_station) = s
+            .stations
+            .get(slug)
+            .and_then(|m| m.get(station.to_string()))
         {
             if truthy(prev_station.get("startgg")) {
                 sg = prev_station["startgg"].clone();
@@ -452,7 +455,10 @@ impl Hub {
             .cloned()
             .unwrap_or_else(|| json!({}));
         let wm = matching::match_winner(&summary, sg.get("entrants"), Some(&s.tag_map));
-        let cand = wm.candidate_winner_entrant_id.clone().unwrap_or(Value::Null);
+        let cand = wm
+            .candidate_winner_entrant_id
+            .clone()
+            .unwrap_or(Value::Null);
 
         // Two independent reasons a set must stay off the bracket.
         let mode = mode_of(st);
@@ -461,7 +467,11 @@ impl Hub {
             let lbl = mode_label(mode.as_deref());
             reason = Some(format!(
                 "{} game",
-                if lbl.is_empty() { "non-local".to_string() } else { lbl }
+                if lbl.is_empty() {
+                    "non-local".to_string()
+                } else {
+                    lbl
+                }
             ));
         } else if truthy(Some(&sg)) && !matching::set_started(Some(&sg)) {
             // Called to this station but the TO hasn't pressed Start Match, so
@@ -504,7 +514,12 @@ impl Hub {
             });
         }
         // Preserve anything the operator already decided.
-        for k in ["reportedAt", "reportedWinnerEntrantId", "reportedGames", "reportedBy"] {
+        for k in [
+            "reportedAt",
+            "reportedWinnerEntrantId",
+            "reportedGames",
+            "reportedBy",
+        ] {
             if let Some(v) = prev.get(k) {
                 rec[k] = v.clone();
             }
@@ -551,7 +566,7 @@ impl Hub {
                 Some(v) if truthy(Some(v)) => py_str(v),
                 _ => "not reportable".to_string(),
             };
-            reason = Some(format!("{} — logged, not reported", why));
+            reason = Some(format!("{why} — logged, not reported"));
         } else if !self.startgg.enabled() {
             reason = Some("no start.gg token".to_string());
         } else if !truthy(rec.get("matchedStartggSetId")) {
@@ -565,11 +580,12 @@ impl Hub {
                         // The real client never errors here (it returns a stale
                         // or empty map instead); an error would have escaped the
                         // Python method and become the HTTP handler's 500.
-                        Err(e) => {
-                            return Err((json!({"error": format!("Hub error: {}", e)}), 500))
-                        }
+                        Err(e) => return Err((json!({"error": format!("Hub error: {}", e)}), 500)),
                     };
-                    let games_v = rec["set"].get("games").cloned().unwrap_or_else(|| json!([]));
+                    let games_v = rec["set"]
+                        .get("games")
+                        .cloned()
+                        .unwrap_or_else(|| json!([]));
                     let gd: Vec<Value> = matching::game_data_from_games(&games_v, &slot_map, &cmap)
                         .as_array()
                         .cloned()
@@ -588,18 +604,17 @@ impl Hub {
                                 live = true;
                                 games = gd.len();
                             }
-                            Err(e) => reason = Some(format!("start.gg update failed: {}", e)),
+                            Err(e) => reason = Some(format!("start.gg update failed: {e}")),
                         }
                     }
                 }
             }
         }
         if let Some(r) = &reason {
-            (self.log)(&format!("live (station {}): {}", station, r));
+            (self.log)(&format!("live (station {station}): {r}"));
         } else {
             (self.log)(&format!(
-                "live (station {}): pushed {} game(s) to start.gg",
-                station, games
+                "live (station {station}): pushed {games} game(s) to start.gg"
             ));
         }
         Ok(json!({"ok": true, "live": live, "games": games, "reason": reason}))
@@ -674,7 +689,7 @@ impl Hub {
         let sg = match self.startgg.station_set(slug, station, 0.0) {
             Ok(v) => v,
             Err(e) => {
-                (self.log)(&format!("re-check failed: {}", e));
+                (self.log)(&format!("re-check failed: {e}"));
                 return Some(rec);
             }
         };
@@ -710,8 +725,10 @@ impl Hub {
                     if r["status"] != *"reported" {
                         r["status"] = json!("matched");
                     }
-                    r["candidateWinnerEntrantId"] =
-                        wm.candidate_winner_entrant_id.clone().unwrap_or(Value::Null);
+                    r["candidateWinnerEntrantId"] = wm
+                        .candidate_winner_entrant_id
+                        .clone()
+                        .unwrap_or(Value::Null);
                     r["confidence"] = json!(wm.confidence);
                 };
                 match set_bucket(&mut s, slug).get_mut(&key) {
@@ -912,9 +929,9 @@ impl Hub {
             if let Some(lp) = &self.learned_path {
                 let body = serde_json::to_string_pretty(&Value::Object(s.learned.clone()))
                     .unwrap_or_else(|_| "{}".to_string());
-                let tmp = format!("{}.tmp", lp);
+                let tmp = format!("{lp}.tmp");
                 if let Err(e) = fs::write(&tmp, body).and_then(|_| fs::rename(&tmp, lp)) {
-                    (self.log)(&format!("could not save learned tags: {}", e));
+                    (self.log)(&format!("could not save learned tags: {e}"));
                 }
             }
             let pairs: Vec<String> = s
@@ -988,7 +1005,7 @@ impl Hub {
             })();
             match attempt {
                 Ok(v) => repushed = v,
-                Err(e) => (self.log)(&format!("swap re-push failed: {}", e)),
+                Err(e) => (self.log)(&format!("swap re-push failed: {e}")),
             }
         }
         Ok(json!({"ok": true, "swap": rec["swap"], "repushed": repushed, "record": rec}))
@@ -1200,7 +1217,7 @@ fn route_post(hub: &Hub, req: &mut tiny_http::Request, url: &str) -> (Value, u16
         Err(p) => {
             // never kill the server
             let msg = panic_message(&*p);
-            hub.log(&format!("hub error on /{}: {}", op, msg));
+            hub.log(&format!("hub error on /{op}: {msg}"));
             (json!({"error": format!("Hub error: {}", msg)}), 500)
         }
     }
@@ -1263,8 +1280,10 @@ impl HubServer {
             }
         }));
         self.srv = Some(server);
-        self.hub
-            .log(&format!("hub listening on {} (stations point here)", self.url()));
+        self.hub.log(&format!(
+            "hub listening on {} (stations point here)",
+            self.url()
+        ));
         Ok(self.url())
     }
 
@@ -1454,11 +1473,11 @@ mod tests {
         let port = free_port();
         let mut server = HubServer::new(h.clone(), port, "127.0.0.1");
         server.start().expect("hub server starts");
-        let broker = format!("http://127.0.0.1:{}", port);
+        let broker = format!("http://127.0.0.1:{port}");
         let client = reqwest::blocking::Client::new();
         let post = |path: &str, body: Value| {
             client
-                .post(format!("{}{}", broker, path))
+                .post(format!("{broker}{path}"))
                 .json(&body)
                 .send()
                 .expect("request to the hub")
@@ -1574,7 +1593,11 @@ mod tests {
         assert_eq!(rep["ok"], json!(true), "operator report succeeded");
         let reports = fake.reports();
         assert_eq!(reports.len(), 1, "reportBracketSet called exactly once");
-        assert_eq!(reports[0].1, json!("24186345"), "reported winner is jugeeya");
+        assert_eq!(
+            reports[0].1,
+            json!("24186345"),
+            "reported winner is jugeeya"
+        );
         assert_eq!(
             reports[0]
                 .2
@@ -1636,7 +1659,11 @@ mod tests {
         h.handle_current(SLUG, 1, Some(&json!({"state": "set_start"})))
             .unwrap();
         let res_live = h
-            .handle_live(SLUG, 1, &with(online.clone(), &[("complete", json!(false))]))
+            .handle_live(
+                SLUG,
+                1,
+                &with(online.clone(), &[("complete", json!(false))]),
+            )
             .unwrap();
         assert_eq!(
             fake.pushes().len(),
@@ -1727,8 +1754,7 @@ mod tests {
         let (_, code) = res2.expect_err("no token / unmatched must error");
         assert!(
             code == 409 || code == 501,
-            "no token / unmatched -> honest error, not a silent success  [{}]",
-            code
+            "no token / unmatched -> honest error, not a silent success  [{code}]"
         );
     }
 
@@ -1767,13 +1793,19 @@ mod tests {
             res_ns["reason"]
         );
         assert!(
-            res_ns["reason"].as_str().unwrap_or("").contains("not started"),
+            res_ns["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("not started"),
             "reason says the match isn't started"
         );
         h4.handle_ingest(
             SLUG,
             1,
-            &with(real_set(), &[("setId", json!("NS")), ("mode", json!("LOCAL"))]),
+            &with(
+                real_set(),
+                &[("setId", json!("NS")), ("mode", json!("LOCAL"))],
+            ),
         )
         .unwrap();
         let nrec = h4.get_set(SLUG, 1, &json!("NS")).unwrap();
@@ -1798,7 +1830,11 @@ mod tests {
             409,
             "reporting a not-started match is refused"
         );
-        assert_eq!(called.reports().len(), 0, "nothing was reported to start.gg");
+        assert_eq!(
+            called.reports().len(),
+            0,
+            "nothing was reported to start.gg"
+        );
 
         // ...and once the TO does start it, Report re-checks and goes through
         called.set_state(2);
@@ -1808,8 +1844,7 @@ mod tests {
         assert_eq!(
             rep_ok["ok"],
             json!(true),
-            "after Start Match, the same set reports fine  [{}]",
-            rep_ok
+            "after Start Match, the same set reports fine  [{rep_ok}]"
         );
         assert_eq!(
             called.reports().len(),
@@ -1867,7 +1902,10 @@ mod tests {
         h5.handle_ingest(
             SLUG,
             1,
-            &with(real_set(), &[("setId", json!("SW")), ("mode", json!("LOCAL"))]),
+            &with(
+                real_set(),
+                &[("setId", json!("SW")), ("mode", json!("LOCAL"))],
+            ),
         )
         .unwrap();
         let before_map = h5.tag_map();
@@ -1887,7 +1925,15 @@ mod tests {
             Path::new(&learned_path).exists(),
             "correction persisted to disk"
         );
-        let h6 = Hub::new(None, None, Some(tags()), None, None, None, Some(learned_path));
+        let h6 = Hub::new(
+            None,
+            None,
+            Some(tags()),
+            None,
+            None,
+            None,
+            Some(learned_path),
+        );
         assert_eq!(
             h6.tag_map().get("jugz"),
             Some(&"Kimchi".to_string()),

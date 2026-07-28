@@ -49,6 +49,53 @@ function playersLabel(r: HubRecord): string {
   return players.map((p: any) => `${p.name ?? '?'} (${p.character ?? '?'})`).join(' vs ');
 }
 
+// The start.gg side of the mapping, shown persistently (not just inside the
+// Report picker) so a bad name-match is visible at a glance: compare this
+// cell against oc-players above it. `candidateWinnerEntrantId` only ever
+// carries a "high"/"low" confidence (matching::match_winner never returns a
+// candidate with confidence "none" — see matching.rs) so a bare id check is
+// enough to know a confidence label applies.
+function matchedWinnerName(r: HubRecord): string {
+  const entrants = r.entrants ?? [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const e = entrants.find((x: any) => String(x.id) === String(r.candidateWinnerEntrantId));
+  return e?.name ?? r.set?.winnerName ?? '?';
+}
+
+function matchLabel(r: HubRecord): string {
+  // The reason itself is already shown in the round cell (oc-round) for
+  // reportable === false rows — don't repeat it here, just mark this cell
+  // as clearly absent (the reason is still one hover away, see matchTitle).
+  if (r.reportable === false) return '—';
+  if (r.candidateWinnerEntrantId) return matchedWinnerName(r);
+  const entrants = r.entrants ?? [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (entrants.length) return entrants.map((e: any) => e.name ?? '?').join(' vs ');
+  return 'unmatched';
+}
+
+// Drives the visual weight of the cell: 'high'/'low' mirror
+// matching::match_winner's own confidence label, 'absent' covers every case
+// where there's nothing (or nothing trustworthy) to show — never let a weak
+// guess read as a confirmed fact.
+function matchTier(r: HubRecord): 'high' | 'low' | 'none' | 'absent' {
+  if (r.reportable === false) return 'absent';
+  if (r.candidateWinnerEntrantId) return r.confidence === 'low' ? 'low' : 'high';
+  if ((r.entrants ?? []).length) return 'none';
+  return 'absent';
+}
+
+function matchTitle(r: HubRecord): string {
+  if (r.reportable === false) {
+    return `${r.notReportableReason || 'not a bracket set'} — not part of the bracket`;
+  }
+  if (r.candidateWinnerEntrantId) {
+    return `Suggested start.gg winner match (confidence: ${r.confidence || 'none'}) — verify before reporting`;
+  }
+  if ((r.entrants ?? []).length) return "Bracket set found, but no name match for a winner guess";
+  return 'Not matched to a start.gg set';
+}
+
 async function act(fn: () => Promise<unknown>, okMsg: string) {
   busy.value = true;
   actionMsg.value = '';
@@ -106,6 +153,11 @@ function onDelete(r: HubRecord) {
           <span class="oc-cell oc-stn">{{ r.station }}</span>
           <span class="oc-cell oc-time">{{ clock(r.set?.endEpoch ?? r.ingestedAt) }}</span>
           <span class="oc-cell oc-players" :title="playersLabel(r)">{{ playersLabel(r) }}</span>
+          <span
+            class="oc-cell oc-match"
+            :class="'oc-match--' + matchTier(r)"
+            :title="matchTitle(r)"
+          >{{ matchLabel(r) }}</span>
           <span class="oc-cell oc-score">{{ score(r) }}</span>
           <span class="oc-cell oc-round">
             {{ r.reportable === false ? (r.notReportableReason || 'not a bracket set') : (r.fullRoundText || '—') }}
@@ -238,6 +290,22 @@ function onDelete(r: HubRecord) {
 .oc-stn { flex: 0 0 1.4rem; font-weight: 700; }
 .oc-time { flex: 0 0 3rem; font-family: 'Ubuntu Sans Mono Variable', monospace; font-size: 0.75rem; color: var(--text-muted); }
 .oc-players { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+// The persistent start.gg-side mapping (station tag -> bracket entrant),
+// visible without opening the Report picker. Color + italics carry the
+// confidence so a guess never reads as a confirmed fact at a glance.
+.oc-match {
+  flex: 0 0 8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+
+  &--high { color: var(--text-success); }
+  &--low { color: var(--text-warning); font-style: italic; }
+  &--none, &--absent { color: var(--text-muted); font-style: italic; }
+}
+
 .oc-score { flex: 0 0 auto; font-weight: 700; font-variant-numeric: tabular-nums; }
 .oc-round { flex: 0 0 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
 

@@ -53,9 +53,12 @@ function log(msg: string) {
 
 // ---- fake tournament -------------------------------------------------------
 
+// `sgg` is set on some tags (JUGZ!, BRUJITA) and deliberately left off others
+// (KIM, LOOM) so both the "resolved handle" and "not in the public DB" cases
+// are reachable in the browser preview.
 const MATCHUPS = [
-  [{ tag: 'JUGZ!', char: 'Galvan' }, { tag: 'KIM', char: 'Zetterburn' }],
-  [{ tag: 'BRUJITA', char: 'Maypul' }, { tag: 'JUGZ!', char: 'Clairen' }],
+  [{ tag: 'JUGZ!', char: 'Galvan', sgg: 'jugeeya' }, { tag: 'KIM', char: 'Zetterburn' }],
+  [{ tag: 'BRUJITA', char: 'Maypul', sgg: 'brujita' }, { tag: 'JUGZ!', char: 'Clairen', sgg: 'jugeeya' }],
   [{ tag: 'LOOM', char: 'Ranno' }, { tag: 'KIM', char: 'Kragg' }],
 ];
 let matchup = 0;
@@ -77,8 +80,8 @@ function startFakeTournament() {
         mode,
         games: 1,
         players: [
-          { tag: a.tag, char: a.char, wins: 1, slot: 0, won: true },
-          { tag: b.tag, char: b.char, wins: 0, slot: 1, won: false },
+          { tag: a.tag, char: a.char, wins: 1, slot: 0, won: true, sgg: (a as any).sgg ?? null },
+          { tag: b.tag, char: b.char, wins: 0, slot: 1, won: false, sgg: (b as any).sgg ?? null },
         ],
       };
       log(`game 1 | ${a.tag}(${a.char}) vs ${b.tag}(${b.char}) -> ${a.tag} wins`);

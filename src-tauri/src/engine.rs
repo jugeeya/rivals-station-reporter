@@ -5,7 +5,7 @@
 //! pushes a full state snapshot over the `engine-state` event and answers
 //! the `get_state` command with the same JSON.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,8 +15,10 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
 use station_core::forwarder::Forwarder;
+use station_core::matching;
 use station_core::save::{check_replay_autosave, ReplayAutoSaveStatus};
 use station_core::set_machine::StatsProducer;
+use station_core::tagdb::TagDb;
 
 use crate::config::{self, Config};
 
@@ -47,6 +49,15 @@ pub struct EngineInner {
     // The running hub (operator mode), for the report/swap/delete commands.
     hub: Mutex<Option<Arc<station_core::hub::Hub>>>,
     armed: AtomicBool, // stats save readable at least once
+
+    // The public tag database (jugeeya.github.io/tags): loaded from its
+    // on-disk cache at startup (no network — see `TagDb::load`) and kept
+    // fresh by its own background thread. Owned here, not by the hub, so a
+    // pure `station` install with no hub at all still gets a resolved
+    // start.gg handle on the snapshot (see `annotate_sgg` in `state()`);
+    // `build_hub` also reads it (via `tagdb_map`) as the lowest-precedence
+    // matching layer when operator mode is running.
+    tagdb: Arc<TagDb>,
 
     // "Replay Auto Save" health check (see station_core::save). Tracked
     // separately from `status` above and re-applied as an override in
@@ -163,7 +174,7 @@ impl EngineInner {
         json!({
             "config": cfg,
             "status": status,
-            "snapshot": *self.snapshot.lock().unwrap(),
+            "snapshot": annotate_sgg(&self.snapshot.lock().unwrap(), &self.tagdb.map()),
             "hubSnapshot": *self.hub_snapshot.lock().unwrap(),
             "hubUrl": *self.hub_url.lock().unwrap(),
             "log": self.log.lock().unwrap().iter().cloned().collect::<Vec<_>>(),
@@ -198,6 +209,13 @@ impl EngineInner {
         self.hub.lock().unwrap().clone()
     }
 
+    /// The tag database's current save-tag -> start.gg-handle map. Cheap
+    /// (clones an in-memory `HashMap`); never touches the network itself —
+    /// see `station_core::tagdb::TagDb`.
+    pub fn tagdb_map(&self) -> HashMap<String, String> {
+        self.tagdb.map()
+    }
+
     fn out_dir(&self, cfg: &Config) -> PathBuf {
         if cfg.dir.is_empty() {
             self.config_dir.join("matchlogger-out")
@@ -205,6 +223,42 @@ impl EngineInner {
             PathBuf::from(&cfg.dir)
         }
     }
+}
+
+/// Attach the tag database's resolved start.gg handle (if any) to every
+/// player in a station snapshot — `sgg: Some(handle)` when the public tag
+/// database says this in-game tag belongs to `@handle`, `None` otherwise.
+/// Deliberately just that lookup: no fuzzy guessing, and nothing to do with
+/// the bracket-derived 2-entrant match the hub does elsewhere.
+///
+/// A pure function (not an `EngineInner` method) so pure `station` mode —
+/// no hub, no start.gg token, no slug — still gets this: the engine always
+/// has its own `TagDb`, and every `state()` read re-annotates from whatever
+/// map it currently holds, so a background refresh shows up immediately.
+fn annotate_sgg(snapshot: &Value, tagdb_map: &HashMap<String, String>) -> Value {
+    fn annotate_players(set: &mut Value, tagdb_map: &HashMap<String, String>) {
+        let Some(players) = set.get_mut("players").and_then(|p| p.as_array_mut()) else {
+            return;
+        };
+        for p in players {
+            let tag = p.get("tag").cloned().unwrap_or(Value::Null);
+            let handle = tagdb_map.get(&matching::norm(&tag)).cloned();
+            p["sgg"] = handle.map(Value::String).unwrap_or(Value::Null);
+        }
+    }
+
+    let mut out = snapshot.clone();
+    if let Some(history) = out.get_mut("history").and_then(|h| h.as_array_mut()) {
+        for set in history {
+            annotate_players(set, tagdb_map);
+        }
+    }
+    if let Some(live) = out.get_mut("live") {
+        if !live.is_null() {
+            annotate_players(live, tagdb_map);
+        }
+    }
+    out
 }
 
 fn chrono_lite_hms() -> String {
@@ -332,6 +386,9 @@ fn build(inner: &Arc<EngineInner>) -> Built {
 /// Create the engine and start its loop thread.
 pub fn start(app: AppHandle, config_dir: PathBuf) -> Engine {
     let cfg = config::load(&config_dir);
+    // Disk-only, never the network (see `TagDb::load`) — safe to run inline
+    // here rather than deferring it into the loop thread below.
+    let tagdb = TagDb::load(&config_dir);
     let inner = Arc::new(EngineInner {
         app,
         config_dir,
@@ -346,9 +403,17 @@ pub fn start(app: AppHandle, config_dir: PathBuf) -> Engine {
         hub_url: Mutex::new(None),
         hub: Mutex::new(None),
         armed: AtomicBool::new(false),
+        tagdb,
         replay_autosave_mtime: Mutex::new(None),
         replay_autosave_bad: Mutex::new(None),
     });
+
+    // Background refresher — its own thread, its own schedule, never the
+    // engine loop below (see `TagDb::spawn_refresh`).
+    let tagdb_log = inner.clone();
+    inner
+        .tagdb
+        .spawn_refresh(Box::new(move |m| tagdb_log.log_line(m)));
 
     let loop_inner = inner.clone();
     std::thread::spawn(move || {
@@ -384,4 +449,65 @@ pub fn start(app: AppHandle, config_dir: PathBuf) -> Engine {
     });
 
     Engine(inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A player known to the tag database gets `sgg` set to the resolved
+    /// start.gg handle; one it doesn't know gets `sgg: null` — never a
+    /// fuzzy guess, never left off the object entirely.
+    #[test]
+    fn annotate_sgg_resolves_known_tags_and_nulls_unknown_ones() {
+        let snapshot = json!({
+            "history": [{
+                "startEpoch": 1, "complete": true, "mode": "LOCAL", "games": 2,
+                "players": [
+                    {"tag": "JUGZ!", "char": "Orcane", "wins": 2, "slot": 0, "won": true},
+                    {"tag": "NOBODY", "char": "Galvan", "wins": 0, "slot": 1, "won": false},
+                ],
+            }],
+            "live": {
+                "startEpoch": 2, "complete": false, "mode": "LOCAL", "games": 1,
+                "players": [
+                    {"tag": "jugz", "char": "Orcane", "wins": 1, "slot": 0, "won": false},
+                ],
+            },
+        });
+        let tagdb_map: HashMap<String, String> = [("jugz".to_string(), "jugeeya".to_string())]
+            .into_iter()
+            .collect();
+
+        let out = annotate_sgg(&snapshot, &tagdb_map);
+
+        let hist_players = out["history"][0]["players"].as_array().unwrap();
+        assert_eq!(
+            hist_players[0]["sgg"],
+            json!("jugeeya"),
+            "a tag the database knows resolves to its start.gg handle"
+        );
+        assert_eq!(
+            hist_players[1]["sgg"],
+            Value::Null,
+            "a tag the database doesn't know is null, not a guess"
+        );
+        // The tag database normalizes the same way `matching::norm` does, so
+        // "jugz" (lowercase, live set) still matches the "JUGZ!" entry.
+        assert_eq!(
+            out["live"]["players"][0]["sgg"],
+            json!("jugeeya"),
+            "matching is case/punctuation-insensitive, same as the rest of matching.rs"
+        );
+    }
+
+    /// A `null` live set (no open set) must pass through untouched rather
+    /// than panicking — pure station mode with nothing running yet.
+    #[test]
+    fn annotate_sgg_tolerates_a_null_live_set() {
+        let snapshot = json!({ "history": [], "live": null });
+        let out = annotate_sgg(&snapshot, &HashMap::new());
+        assert_eq!(out["live"], Value::Null);
+        assert_eq!(out["history"], json!([]));
+    }
 }

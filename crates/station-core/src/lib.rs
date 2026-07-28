@@ -8,6 +8,7 @@
 //! * [`startgg`]     — token-authed start.gg client (operator only)
 //! * [`hub`]         — LAN hub state machine + `/matchlogger/*` HTTP server
 //! * [`forwarder`]   — station-side POSTs to a hub/broker with dedup state
+//! * [`tagdb`]       — the public tag database (jugeeya.github.io/tags), cached to disk
 //!
 //! Design note: records, sets, and snapshots are `serde_json::Value` (dynamic
 //! JSON) rather than typed structs. The Python original passes dicts across
@@ -23,6 +24,7 @@ pub mod set_machine;
 pub mod startgg;
 pub mod startgg_web;
 pub mod stats;
+pub mod tagdb;
 
 /// Seconds since the Unix epoch, as the Python code's `time.time()` int.
 pub fn now_sec() -> i64 {

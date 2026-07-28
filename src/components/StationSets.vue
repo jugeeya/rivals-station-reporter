@@ -21,6 +21,13 @@ function reportable(s: SnapshotSet): boolean {
 function badge(s: SnapshotSet): string {
   return reportable(s) ? '' : (s.mode ?? '').toLowerCase();
 }
+
+// Same public tag database hint as LiveSetCard — a submitted-tag -> handle
+// lookup, not a bracket match. Deliberately styled weaker than the operator
+// console's match cell; see .ss-sgg below.
+function sggTitle(tag: string, sgg: string): string {
+  return `Public tag database: "${tag}" is registered to start.gg @${sgg}. Not a bracket match — just what was submitted.`;
+}
 </script>
 
 <template>
@@ -37,6 +44,7 @@ function badge(s: SnapshotSet): string {
           <template v-for="(p, j) in s.players" :key="p.tag + j">
             <span v-if="j > 0" class="ss-vs">vs</span>
             <span class="ss-tag" :class="{ 'ss-tag--won': p.won }">{{ p.tag }}</span>
+            <span v-if="p.sgg" class="ss-sgg" :title="sggTitle(p.tag, p.sgg)">@{{ p.sgg }}</span>
             <span class="ss-char">({{ p.char }})</span>
           </template>
         </span>
@@ -108,6 +116,12 @@ function badge(s: SnapshotSet): string {
 .ss-vs { color: var(--text-muted); margin: 0 0.35em; font-size: 0.75em; }
 .ss-tag { font-weight: 600; }
 .ss-tag--won { color: var(--text-success); }
+
+// Public tag database handle guess — weaker than the operator console's
+// bracket match cell (.oc-match), so never the success/warning colors it
+// uses. Just a muted hint riding along the same line, no extra height.
+.ss-sgg { color: var(--text-muted); font-size: 0.8em; margin-left: 0.3em; }
+
 .ss-char { color: var(--text-muted); font-size: 0.8em; margin-left: 0.25em; }
 
 .ss-score {

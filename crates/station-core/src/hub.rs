@@ -254,6 +254,7 @@ impl Hub {
         key: Option<&str>,
         token: Option<String>,
         tag_map: Option<HashMap<String, String>>,
+        tagdb_map: Option<HashMap<String, String>>,
         state_path: Option<String>,
         log: Option<LogFn>,
         on_change: Option<OnChangeFn>,
@@ -268,7 +269,15 @@ impl Hub {
             Some(b) => Arc::from(b),
             None => Arc::new(|_m: &str| {}),
         };
-        let mut tag_map = tag_map.unwrap_or_default();
+        // Precedence, lowest to highest: the public tag database fills in
+        // everyone nobody has corrected yet, the hand-written players.json
+        // overrides it for anyone the operator typed in by hand, and (below)
+        // a learned correction overrides both.
+        let mut tag_map = {
+            let mut base = tagdb_map.unwrap_or_default();
+            base.extend(tag_map.unwrap_or_default());
+            base
+        };
         let mut learned: Map<String, Value> = Map::new();
         if let Some(lp) = learned_path.as_deref() {
             if Path::new(lp).exists() {
@@ -319,7 +328,8 @@ impl Hub {
         self.state.lock().unwrap().version
     }
 
-    /// The current save-tag -> start.gg-tag map (players.json + learned).
+    /// The current save-tag -> start.gg-tag map (tag database + players.json
+    /// + learned, in that precedence order).
     pub fn tag_map(&self) -> HashMap<String, String> {
         self.state.lock().unwrap().tag_map.clone()
     }
@@ -1462,6 +1472,7 @@ mod tests {
             Some(KEY),
             None,
             Some(tags()),
+            None,
             Some(state_path.clone()),
             None,
             None,
@@ -1633,6 +1644,7 @@ mod tests {
             Some(KEY),
             None,
             Some(tags()),
+            None,
             Some(state_path),
             None,
             None,
@@ -1748,7 +1760,7 @@ mod tests {
     // ---- report with no token degrades honestly --------------------------------
     #[test]
     fn report_with_no_token_degrades_honestly() {
-        let h2 = Hub::new(None, None, Some(tags()), None, None, None, None);
+        let h2 = Hub::new(None, None, Some(tags()), None, None, None, None, None);
         h2.handle_ingest(SLUG, 2, &real_set()).unwrap();
         let res2 = h2.do_report(SLUG, 2, &json!("20260724_075508"), &json!(1));
         let (_, code) = res2.expect_err("no token / unmatched must error");
@@ -1768,6 +1780,7 @@ mod tests {
             None,
             None,
             Some(tags()),
+            None,
             Some(path_str(&workdir.join("h4.json"))),
             None,
             None,
@@ -1890,6 +1903,7 @@ mod tests {
             None,
             None,
             Some(tags()),
+            None,
             Some(path_str(&workdir.join("h5.json"))),
             None,
             None,
@@ -1932,12 +1946,68 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(learned_path),
         );
         assert_eq!(
             h6.tag_map().get("jugz"),
             Some(&"Kimchi".to_string()),
             "a restarted hub still knows the correction"
+        );
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    // ---- tag database precedence: learned > players.json > tag database ---------
+    #[test]
+    fn tagdb_is_overridden_by_players_json_and_by_learned() {
+        let tagdb_map: HashMap<String, String> = [
+            ("jugz".to_string(), "someone-else".to_string()), // players.json disagrees
+            ("newtag".to_string(), "brandnew".to_string()),   // nobody else knows this one
+        ]
+        .into_iter()
+        .collect();
+
+        // players.json (tags()) overrides the tag database for a tag both know,
+        // and the tag database still fills in one players.json never mentions.
+        let h = Hub::new(
+            None,
+            None,
+            Some(tags()),
+            Some(tagdb_map.clone()),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            h.tag_map().get("jugz"),
+            Some(&"jugeeya".to_string()),
+            "players.json overrides the tag database for a tag both know"
+        );
+        assert_eq!(
+            h.tag_map().get("newtag"),
+            Some(&"brandnew".to_string()),
+            "the tag database fills in a tag nobody else knows"
+        );
+
+        // A learned correction (from a prior Switch Players) still wins over both.
+        let workdir = tmpdir("hubtest_tagdb_precedence");
+        let learned_path = path_str(&workdir.join("learned.json"));
+        fs::write(&learned_path, r#"{"JUGZ!": "operator-correction"}"#).unwrap();
+        let h2 = Hub::new(
+            None,
+            None,
+            Some(tags()),
+            Some(tagdb_map),
+            None,
+            None,
+            None,
+            Some(learned_path),
+        );
+        assert_eq!(
+            h2.tag_map().get("jugz"),
+            Some(&"operator-correction".to_string()),
+            "a learned correction still wins over both players.json and the tag database"
         );
         let _ = fs::remove_dir_all(&workdir);
     }

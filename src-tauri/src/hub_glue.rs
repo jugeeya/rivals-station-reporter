@@ -5,8 +5,10 @@
 //! `on_delete`: `players.json` (hand-written save-tag -> start.gg-tag
 //! aliases) and `learned-tags.json` (corrections the operator made) live next
 //! to the config; the hub merges learned over hand-written so a manual entry
-//! can be corrected once. Reporting rebinds a not-reportable set first — the
-//! TO may have pressed Start Match since it was recorded.
+//! can be corrected once. The engine's `TagDb` (`station_core::tagdb`) fills
+//! in a third, lowest-precedence layer below both. Reporting rebinds a
+//! not-reportable set first — the TO may have pressed Start Match since it
+//! was recorded.
 
 use std::sync::Arc;
 
@@ -49,6 +51,11 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
         Some(&cfg.key),
         (!cfg.startgg_token.is_empty()).then(|| cfg.startgg_token.clone()),
         Some(tag_map),
+        // Lowest-precedence alias source — see `Hub::new`'s doc comment for
+        // the full precedence order. The engine owns the one `TagDb` so a
+        // pure `station` install (no hub at all) can use the same map for
+        // the snapshot's `sgg` field — see `EngineInner::tagdb_map`.
+        Some(inner.tagdb_map()),
         Some(here.join("hub-state.json").to_string_lossy().into_owned()),
         Some(Box::new(move |m| log_inner.log_line(m))),
         Some(Box::new(move |snap| {

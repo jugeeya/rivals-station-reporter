@@ -16,6 +16,14 @@ const modeLabel = computed(() =>
     ? props.live.mode.toLowerCase()
     : '',
 );
+
+// The public tag database's guess at whose start.gg account typed this tag in
+// game — nothing to do with the bracket. Weaker than the operator console's
+// match cell (which means "found in this bracket"), so it must never borrow
+// that cell's success/warning colors; see .ls-sgg below.
+function sggTitle(tag: string, sgg: string): string {
+  return `Public tag database: "${tag}" is registered to start.gg @${sgg}. Not a bracket match — just what was submitted.`;
+}
 </script>
 
 <template>
@@ -32,7 +40,10 @@ const modeLabel = computed(() =>
       <div class="ls-players">
         <template v-for="(p, i) in live.players" :key="p.tag + i">
           <div class="ls-player" :class="{ 'ls-player--lead': p.won }">
-            <span class="ls-tag">{{ p.tag }}</span>
+            <div class="ls-tag-row">
+              <span class="ls-tag">{{ p.tag }}</span>
+              <span v-if="p.sgg" class="ls-sgg" :title="sggTitle(p.tag, p.sgg)">@{{ p.sgg }}</span>
+            </div>
             <span class="ls-char">{{ p.char }}</span>
           </div>
           <div v-if="i === 0" class="ls-score">
@@ -113,8 +124,18 @@ const modeLabel = computed(() =>
   gap: 0.15rem;
   min-width: 0;
 
-  &:last-child { text-align: right; }
+  &:last-child {
+    text-align: right;
+    .ls-tag-row { justify-content: flex-end; }
+  }
   &--lead .ls-tag { color: var(--text-success); }
+}
+
+.ls-tag-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4em;
+  min-width: 0;
 }
 
 .ls-tag {
@@ -124,6 +145,24 @@ const modeLabel = computed(() =>
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+// The public tag database's handle guess for this tag — a much weaker claim
+// than the operator console's bracket match cell (.oc-match), so it must
+// never borrow that cell's success/warning colors. Muted and small; a hint,
+// not a fact.
+.ls-sgg {
+  font-family: 'Ubuntu Sans Mono Variable', monospace;
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 .ls-char { font-size: 0.8rem; color: var(--text-muted); }

@@ -24,6 +24,10 @@ export interface SnapshotPlayer {
   wins: number;
   slot: number;
   won: boolean;
+  /** The public tag database's resolved start.gg handle for this tag, or
+   * null/absent when it doesn't recognize it. Just that lookup — unrelated
+   * to the hub's bracket-derived entrant matching. */
+  sgg?: string | null;
 }
 
 export interface SnapshotSet {

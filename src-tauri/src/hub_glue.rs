@@ -69,6 +69,11 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
         ),
     ));
 
+    // So `/matchlogger/health` — and therefore a station's LAN discovery scan
+    // — reports which event this hub is running, instead of a station
+    // auto-connecting to an anonymous address.
+    hub.set_event_slug(&cfg.slug);
+
     let mut server = HubServer::new(hub.clone(), cfg.hub_port, "0.0.0.0");
     let url = server.start()?;
     inner.set_hub_snapshot(hub.snapshot());

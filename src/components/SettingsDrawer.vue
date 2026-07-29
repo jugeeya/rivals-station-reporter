@@ -45,6 +45,48 @@ async function pickSave() {
   if (typeof chosen === 'string') draft.save = chosen;
 }
 
+// ---- LAN hub discovery ------------------------------------------------------
+// Sweeps the local /24 for a hub so the station doesn't need to be told the
+// operator's IP. One result auto-connects (there is only ever one operator);
+// several is unexpected — usually a stale hub still running on someone's
+// laptop — so that case asks rather than guessing.
+
+type FoundHub = { url: string; slug: string | null; startgg: boolean };
+
+const scanning = ref(false);
+const scanned = ref(false);
+const hubs = ref<FoundHub[]>([]);
+
+function hubLabel(h: FoundHub) {
+  const event = h.slug || 'no event configured';
+  return `${h.url} — ${event}${h.startgg ? '' : ', no start.gg token'}`;
+}
+
+function useHub(h: FoundHub) {
+  draft.broker = h.url;
+  hubs.value = [h];
+}
+
+async function findHubs() {
+  scanning.value = true;
+  scanned.value = false;
+  err.value = '';
+  hubs.value = [];
+  try {
+    const res = await invoke<{ hubs: FoundHub[] }>('find_hubs');
+    hubs.value = res.hubs ?? [];
+    // Exactly one: connect to it. The label below always names what was
+    // picked, so a wrong auto-connect is visible and correctable rather than
+    // a silent URL swap.
+    if (hubs.value.length === 1) draft.broker = hubs.value[0].url;
+    scanned.value = true;
+  } catch (e) {
+    err.value = String(e);
+  } finally {
+    scanning.value = false;
+  }
+}
+
 async function save() {
   saving.value = true;
   err.value = '';
@@ -89,10 +131,36 @@ async function save() {
           <input v-model="draft.slug" type="text" class="sd-input" />
         </label>
 
-        <label v-if="draft.mode === 'station'" class="sd-field">
+        <div v-if="draft.mode === 'station'" class="sd-field">
           <span>Hub / broker URL</span>
-          <input v-model="draft.broker" type="text" class="sd-input" />
-        </label>
+          <div class="sd-row">
+            <input v-model="draft.broker" type="text" class="sd-input" />
+            <button class="btn sd-find" :disabled="scanning" @click="findHubs">
+              {{ scanning ? 'Scanning…' : 'Find hub' }}
+            </button>
+          </div>
+          <p v-if="scanning" class="sd-hint">Checking every address on this network…</p>
+          <p v-else-if="scanned && hubs.length === 1" class="sd-hint sd-hint--ok">
+            Connected to {{ hubLabel(hubs[0]) }}
+          </p>
+          <p v-else-if="scanned && hubs.length === 0" class="sd-hint sd-hint--warn">
+            No hub found on this network — check the operator is running, or type the address above.
+          </p>
+          <template v-else-if="scanned && hubs.length > 1">
+            <p class="sd-hint sd-hint--warn">
+              Found {{ hubs.length }} hubs — pick the right one:
+            </p>
+            <button
+              v-for="h in hubs"
+              :key="h.url"
+              class="btn sd-hub-pick"
+              :class="{ 'sd-hub-pick--on': draft.broker === h.url }"
+              @click="useHub(h)"
+            >
+              {{ hubLabel(h) }}
+            </button>
+          </template>
+        </div>
 
         <label class="sd-field">
           <span>Shared key (must match the operator's — required to send)</span>
@@ -241,6 +309,20 @@ async function save() {
 }
 
 .sd-err { margin: 0; color: var(--text-failure); font-size: 0.8rem; }
+
+.sd-find { flex: 0 0 auto; width: auto; padding: 0.3em 0.7em; white-space: nowrap; }
+.sd-hint { margin: 0.15rem 0 0; font-size: 0.75rem; color: var(--text-muted); }
+.sd-hint--ok { color: var(--text-success); }
+.sd-hint--warn { color: var(--text-warning); }
+/* Only rendered in the unexpected multi-hub case, so it can afford to be a
+   full-width stack rather than competing for room with the URL field. */
+.sd-hub-pick {
+  width: 100%;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  text-align: left;
+}
+.sd-hub-pick--on { border-color: var(--accent); color: var(--text-success); }
 
 .sd-foot {
   padding: 0.75rem 1.25rem 1.25rem;

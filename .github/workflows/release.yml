@@ -1,8 +1,9 @@
 name: Release
 
-# Builds the installers (NSIS .exe on Windows, .app/.dmg on macOS) on EVERY
-# push to main, every PR, and every manual run — so there is always a fresh
-# downloadable build without having to cut a tag first.
+# Builds the installers (NSIS .exe on Windows, .app/.dmg on macOS, .deb/
+# .AppImage on Linux) on EVERY push to main, every PR, and every manual run —
+# so there is always a fresh downloadable build without having to cut a tag
+# first.
 #
 # Tagging only changes what happens to the output:
 #   * pushed tag v*  -> attached to a draft GitHub release named for the tag
@@ -34,6 +35,7 @@ jobs:
         include:
           - os: windows-latest
           - os: macos-latest
+          - os: ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +48,24 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
+      # Tauri v2's webview + tray/appindicator glue, plus the bits `reqwest`
+      # needs for TLS on Linux: unlike Windows (schannel) and macOS
+      # (Security.framework), `native-tls` here links against OpenSSL, so it
+      # needs the dev headers and pkg-config to find them (see the comment on
+      # the `reqwest` dependency in crates/station-core/Cargo.toml).
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            pkg-config
+
       - run: pnpm install
 
       # One place decides "is this a release run?", so the build step below
@@ -86,3 +106,5 @@ jobs:
             target/release/bundle/msi/*.msi
             target/release/bundle/dmg/*.dmg
             target/release/bundle/macos/*.app.tar.gz
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage

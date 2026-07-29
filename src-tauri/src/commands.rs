@@ -43,6 +43,29 @@ pub fn default_paths() -> Value {
     })
 }
 
+/// Sweep the local /24 for operator hubs, so a station doesn't have to be
+/// told the operator's IP by hand.
+///
+/// Runs on a blocking thread: the sweep is ~1-2s of parallel HTTP and would
+/// otherwise stall the UI. A machine that is itself the hub skips its own
+/// address — offering to connect an operator to itself is just noise.
+#[tauri::command]
+pub async fn find_hubs(engine: State<'_, Engine>) -> Result<Value, String> {
+    let (port, is_operator) = {
+        let cfg = engine.0.cfg.lock().unwrap();
+        (cfg.hub_port, cfg.is_operator())
+    };
+    let found = tauri::async_runtime::spawn_blocking(move || {
+        let skip = is_operator
+            .then(station_core::discovery::local_ipv4)
+            .flatten();
+        station_core::discovery::scan(port, skip)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(json!({ "hubs": found }))
+}
+
 // ---- operator actions (delegated to the hub) --------------------------------
 // The winner-report is the ONE action that advances the bracket; it is always
 // an explicit click in the UI, never automatic — same policy as every prior

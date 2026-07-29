@@ -212,6 +212,18 @@ const handlers: Record<string, (args: any) => any> = {
   },
   get_autostart: () => false,
   set_autostart: () => null,
+  // LAN hub discovery. A real sweep finds nothing in a browser, so this fakes
+  // the result — set `__RSR_MOCK_HUBS__` on window to 0 / 1 / 2 to exercise
+  // the not-found, auto-connect and pick-one states of SettingsDrawer.
+  find_hubs: async () => {
+    await new Promise((r) => setTimeout(r, 600)); // the real sweep takes ~1-2s
+    const n = (window as any).__RSR_MOCK_HUBS__ ?? 1;
+    const all = [
+      { url: 'http://192.168.1.42:8787', slug: 'the-hangout-47', startgg: true },
+      { url: 'http://192.168.1.99:8787', slug: null, startgg: false },
+    ];
+    return { hubs: all.slice(0, n) };
+  },
   // plugin shims used by drawers in browser mode
   'plugin:dialog|open': () => null,
   'plugin:window|close': () => null,

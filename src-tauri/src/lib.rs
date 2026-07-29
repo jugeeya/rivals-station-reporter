@@ -66,6 +66,7 @@ pub fn run() {
             commands::save_config,
             commands::resolve_event,
             commands::default_paths,
+            commands::find_hubs,
             commands::report_winner,
             commands::swap_players,
             commands::delete_set,

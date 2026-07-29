@@ -45,6 +45,13 @@ use crate::stats::{is_reportable, mode_label};
 
 pub const DEFAULT_PORT: u16 = 8787;
 
+/// Explicit app identifier reported on `/matchlogger/health` (alongside the
+/// existing `Server: RivalsHub/…` header) so a LAN scanner can confirm it
+/// found THIS app and not an unrelated service that happens to answer on the
+/// same port. See `crate::discovery`, which probes every host on the local
+/// /24 for exactly this.
+pub const APP_ID: &str = "rivals-station-reporter-hub";
+
 /// The hub's log callback (Python's `log=` keyword).
 pub type LogFn = Box<dyn Fn(&str) + Send + Sync>;
 /// Fired with a fresh [`Hub::snapshot`] after every state change.
@@ -246,6 +253,16 @@ pub struct Hub {
     pub startgg: Box<dyn StartggApi>,
     pub state_path: Option<String>,
     state: Mutex<HubState>,
+    /// The event this hub is configured for (the operator's `cfg.slug`),
+    /// reported on `/matchlogger/health` so a LAN discovery scan can show
+    /// which event it would connect a station to — separate from the
+    /// per-request `slug` every station-facing method already takes (one
+    /// `HubState` can hold buckets for several slugs, but in practice a hub
+    /// only ever runs one event at a time). Not a `Hub::new` parameter: it's
+    /// set once via `set_event_slug` right after construction, so adding it
+    /// didn't require growing that constructor's already-long argument list
+    /// or touching its call site in `hub_glue.rs`.
+    event_slug: Mutex<Option<String>>,
 }
 
 impl Hub {
@@ -316,12 +333,28 @@ impl Hub {
             startgg,
             state_path,
             state: Mutex::new(state),
+            event_slug: Mutex::new(None),
         }
     }
 
     /// Emit to the hub's log callback (Python callers used `hub.log(...)`).
     pub fn log(&self, msg: &str) {
         (self.log)(msg);
+    }
+
+    /// Record which event this hub is running (the operator's `cfg.slug`),
+    /// so `/matchlogger/health` — and therefore a LAN discovery scan — can
+    /// report it. Blank/whitespace-only clears it, matching how `key` is
+    /// normalized above.
+    pub fn set_event_slug(&self, slug: &str) {
+        let slug = slug.trim();
+        *self.event_slug.lock().unwrap() = (!slug.is_empty()).then(|| slug.to_string());
+    }
+
+    /// The event this hub is configured for, if any (e.g. a local-scoreboard
+    /// hub with no start.gg event has none).
+    pub fn event_slug(&self) -> Option<String> {
+        self.event_slug.lock().unwrap().clone()
     }
 
     pub fn version(&self) -> i64 {
@@ -1145,7 +1178,21 @@ fn route_get(hub: &Hub, url: &str) -> (Value, u16) {
                 (hub.event_view(&slug), 200)
             }
         }
-        "health" => (json!({"ok": true, "startgg": hub.startgg.enabled()}), 200),
+        // "ok" and "startgg" are unchanged from before — the web console at
+        // jugeeya.github.io/matchlogger/matchlogger.js and existing installs
+        // read those two. "app" and "slug" are additive: a LAN discovery
+        // scan (crate::discovery) uses "app" to confirm this is actually a
+        // rivals-station-reporter hub (not just anything answering on the
+        // port) and shows "slug" so an auto-connect is never a silent guess.
+        "health" => (
+            json!({
+                "ok": true,
+                "startgg": hub.startgg.enabled(),
+                "app": APP_ID,
+                "slug": hub.event_slug().unwrap_or_default(),
+            }),
+            200,
+        ),
         _ => (json!({"error": "Unknown operation."}), 404),
     }
 }

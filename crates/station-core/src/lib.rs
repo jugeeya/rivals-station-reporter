@@ -16,6 +16,7 @@
 //! the port checkable line-by-line and the hub bit-compatible with the
 //! Cloudflare broker. Typed structs live only at the edges (config).
 
+pub mod discovery;
 pub mod forwarder;
 pub mod hub;
 pub mod matching;

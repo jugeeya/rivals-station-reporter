@@ -92,7 +92,7 @@ function matchTitle(r: HubRecord): string {
   if (r.candidateWinnerEntrantId) {
     return `Suggested start.gg winner match (confidence: ${r.confidence || 'none'}) — verify before reporting`;
   }
-  if ((r.entrants ?? []).length) return "Bracket set found, but no name match for a winner guess";
+  if ((r.entrants ?? []).length) return 'Bracket set found, but no name match for a winner guess';
   return 'Not matched to a start.gg set';
 }
 

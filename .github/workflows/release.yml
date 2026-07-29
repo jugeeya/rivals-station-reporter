@@ -1,17 +1,26 @@
 name: Release
 
-# Push a tag like v0.1.0 to build the installers and attach them to a draft
-# GitHub release (NSIS .exe on Windows, .app/.dmg on macOS).
+# Builds the installers (NSIS .exe on Windows, .app/.dmg on macOS) on EVERY
+# push to main, every PR, and every manual run — so there is always a fresh
+# downloadable build without having to cut a tag first.
+#
+# Tagging only changes what happens to the output:
+#   * pushed tag v*  -> attached to a draft GitHub release named for the tag
+#   * anything else  -> uploaded as workflow artifacts on the run page
+#     (retained 14 days, not public, nothing published)
 on:
   push:
+    branches: ['main']
     tags: ['v*']
-  # Manual runs must name the tag explicitly — github.ref_name would be the
-  # branch ("main") here, which would publish a release called "main".
+  pull_request:
+  # Manual runs must name the tag explicitly to publish — github.ref_name
+  # would be the branch ("main") here, which would publish a release called
+  # "main". Leave it blank to just get a build.
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release, e.g. v0.1.0'
-        required: true
+        description: 'Tag to release, e.g. v0.1.0 (blank = build only, no release)'
+        required: false
 
 jobs:
   build:
@@ -38,11 +47,42 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install
+
+      # One place decides "is this a release run?", so the build step below
+      # stays a single invocation instead of two near-identical copies.
+      # tauri-action skips creating a release entirely when tagName is empty.
+      - name: Resolve release tag
+        id: mode
+        shell: bash
+        run: |
+          tag='${{ inputs.tag }}'
+          if [ -z "$tag" ] && [ '${{ github.ref_type }}' = 'tag' ]; then
+            tag='${{ github.ref_name }}'
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ inputs.tag || github.ref_name }}
-          releaseName: Rivals Station Reporter ${{ inputs.tag || github.ref_name }}
+          tagName: ${{ steps.mode.outputs.tag }}
+          releaseName: Rivals Station Reporter ${{ steps.mode.outputs.tag }}
           releaseBody: 'See the commit log for changes.'
           releaseDraft: true
+
+      # Untagged runs have nowhere to attach the installers, so keep them on
+      # the run page instead. Globbed rather than read from the action's
+      # artifactPaths output so this stays readable and cross-platform; the
+      # bundle dir is at the workspace root, not under src-tauri/.
+      - name: Upload installers
+        if: steps.mode.outputs.tag == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/*.app.tar.gz

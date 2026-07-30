@@ -227,6 +227,7 @@ const handlers: Record<string, (args: any) => any> = {
   // plugin shims used by drawers in browser mode
   'plugin:dialog|open': () => null,
   'plugin:window|close': () => null,
+  'plugin:app|version': () => '0.0.0-dev',
 };
 
 export function install() {

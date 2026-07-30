@@ -1,5 +1,14 @@
+<script lang="ts">
+// A plain <script> block, deliberately: everything in <script setup> is
+// compiled into setup() and re-runs on every mount, and this drawer is v-if'd
+// so it remounts each time it opens. Only a real module-scope binding can
+// remember that the update check already ran, which is what keeps opening
+// Settings repeatedly from re-hitting the update endpoint each time.
+let autoCheckedThisRun = false;
+</script>
+
 <script setup lang="ts">
-// Everything editable after setup — same fields as onboarding plus the paths
+// Everything editable after setup: same fields as onboarding plus the paths
 // and tuning knobs. Saving hot-rebuilds the engine; nothing needs a restart.
 
 import { computed, onMounted, reactive, ref } from 'vue';
@@ -20,6 +29,18 @@ onMounted(async () => {
     autostart.value = await invoke<boolean>('get_autostart');
   } catch {
     /* browser mock */
+  }
+  try {
+    const { getVersion } = await import('@tauri-apps/api/app');
+    currentVersion.value = await getVersion();
+  } catch {
+    /* browser mock */
+  }
+  // Check once per app run, so opening Settings surfaces a new release
+  // without anyone having to think to press the button.
+  if (!autoCheckedThisRun) {
+    autoCheckedThisRun = true;
+    void checkUpdate();
   }
 });
 
@@ -95,6 +116,7 @@ async function findHubs() {
 
 const updateState = ref<'idle' | 'checking' | 'none' | 'found' | 'installing'>('idle');
 const updateVersion = ref('');
+const currentVersion = ref('');
 let pendingUpdate: { downloadAndInstall: () => Promise<void> } | null = null;
 
 const setInProgress = computed(() => state.s.snapshot.live != null);
@@ -268,7 +290,7 @@ async function save() {
         </label>
 
         <div class="sd-field">
-          <span>Updates</span>
+          <span>Updates<template v-if="currentVersion"> (currently on {{ currentVersion }})</template></span>
           <div class="sd-row">
             <button
               class="btn sd-find"
@@ -286,8 +308,9 @@ async function save() {
               {{ updateState === 'installing' ? 'Installing…' : `Install ${updateVersion}` }}
             </button>
           </div>
-          <p v-if="updateState === 'none'" class="sd-hint sd-hint--ok">
-            You are on the latest version.
+          <p v-if="updateState === 'checking'" class="sd-hint">Checking for a newer version…</p>
+          <p v-else-if="updateState === 'none'" class="sd-hint sd-hint--ok">
+            {{ currentVersion ? `${currentVersion} is the latest version.` : 'You are on the latest version.' }}
           </p>
           <p v-else-if="updateState === 'found' && setInProgress" class="sd-hint sd-hint--warn">
             Version {{ updateVersion }} is available, but a set is in progress. Installing

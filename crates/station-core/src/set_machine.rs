@@ -13,13 +13,22 @@
 //! `pending` until its replay shows up (or a timeout forces it through
 //! without one), rather than being recorded on the spot with an incomplete
 //! picture.
+//!
+//! The open set and any pending game live only in memory until the set
+//! finalizes - a crash or restart before then would otherwise silently lose
+//! every game played so far (the stats-diff that produced them can't be
+//! replayed). Both are journaled to `open-set.json` in the output dir
+//! whenever either changes, and reloaded on startup; see the "Journal"
+//! section near the bottom of this file for the on-disk shape and the
+//! staleness rule that decides whether a found journal is resumed or
+//! finalized as a completed set.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::stats::{char_full, iso_of, stamp_of, GameResult, Replay};
+use crate::stats::{char_full, iso_of, stamp_of, GameResult, Replay, SidePlayer};
 use crate::{now_sec, stats};
 
 pub type LogFn = Box<dyn Fn(&str) + Send + Sync>;
@@ -53,6 +62,13 @@ pub struct SetMachine {
     /// fire at all). Nothing here is ever written to an output file, so
     /// there's no wall-clock meaning to preserve.
     last_game_at: Option<std::time::Instant>,
+    /// Wall-clock companion of `last_game_at`, set at the same moment (see
+    /// `record_game`). Unlike `last_game_at` this IS meaningful across a
+    /// restart, and exists solely so the journal has something to reconstitute
+    /// `last_game_at` from - an `Instant` from a previous process is garbage,
+    /// but "this many wall-clock seconds have passed" survives the restart
+    /// intact and can rebuild an equivalent `Instant` on the other side.
+    last_game_at_wall: Option<i64>,
 }
 
 impl SetMachine {
@@ -67,6 +83,7 @@ impl SetMachine {
             set: None,
             history: Vec::new(),
             last_game_at: None,
+            last_game_at_wall: None,
         })
     }
 
@@ -266,6 +283,7 @@ impl SetMachine {
         }
         set.matches.push(record);
         self.last_game_at = Some(std::time::Instant::now());
+        self.last_game_at_wall = Some(now_sec());
 
         let set = self.set.as_ref().unwrap();
         let standings: Vec<Value> = set.matches.last().unwrap()["players"]
@@ -364,6 +382,11 @@ impl SetMachine {
         self.history.push(Self::summ(&set, complete));
         self.write_current(&json!({"state": "idle", "epoch": at}));
         self.write_live(&json!({"complete": true}));
+        // The set is durable in sets/*.json now; the journal only ever
+        // existed to survive a crash before that happened. Remove it so a
+        // stale copy can't be resumed on a later restart (requirement: a
+        // finalized set's journal must not be resurrectable).
+        self.remove_journal();
         self.emit();
     }
 
@@ -382,6 +405,170 @@ impl SetMachine {
     /// True while a set is open with at least one game in it.
     pub fn has_open_set(&self) -> bool {
         self.set.as_ref().is_some_and(|s| !s.matches.is_empty())
+    }
+
+    fn journal_path(&self) -> PathBuf {
+        self.out.join(JOURNAL_FILE)
+    }
+
+    /// Delete the journal file, if any. Used once a set is durable on disk
+    /// (`finalize`) and defensively whenever there's nothing left worth
+    /// journaling. Never errors on a missing file - that's the common case.
+    fn remove_journal(&self) {
+        let _ = std::fs::remove_file(self.journal_path());
+    }
+
+    /// Persist the open set (plus whatever `pending` JSON the caller already
+    /// has, if any - only `StatsProducer` knows about pending games) so a
+    /// crash or restart can resume it. Uses the same atomic tmp+rename as
+    /// every other output file here (`write`), so a crash mid-write can't
+    /// leave a corrupt journal on disk. If there's nothing open and nothing
+    /// pending, the journal is removed instead of writing an empty one.
+    fn write_journal(&self, pending: Option<&Value>) {
+        match &self.set {
+            Some(set) => {
+                let journal = json!({
+                    "savedAtWall": now_sec(),
+                    "openSet": open_set_to_json(set, self.last_game_at_wall),
+                    "pending": pending,
+                });
+                self.write(Path::new(JOURNAL_FILE), &journal);
+            }
+            None => match pending {
+                Some(p) => {
+                    // No open set, but a game is still waiting on its replay
+                    // (e.g. right after a graceful shutdown raced the replay
+                    // showing up) - keep the journal so that isn't lost either.
+                    let journal = json!({
+                        "savedAtWall": now_sec(),
+                        "openSet": Value::Null,
+                        "pending": p,
+                    });
+                    self.write(Path::new(JOURNAL_FILE), &journal);
+                }
+                None => self.remove_journal(),
+            },
+        }
+    }
+
+    /// Look for a journal left by a previous run and either resume it or,
+    /// if it's too stale to plausibly be the same set, finalize it as a
+    /// completed set (the games really happened) and log which happened. A
+    /// missing, corrupt, or unparseable journal never prevents startup: it
+    /// just leaves nothing to resume, same as a fresh install.
+    fn resume_journal(&mut self, idle_s: f64) -> JournalResume {
+        let none = JournalResume { pending: None };
+        let path = self.journal_path();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return none;
+        };
+        let parsed: Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                (self.log)(&format!(
+                    "journal at {} is corrupt ({e}), ignoring it and starting clean",
+                    path.display()
+                ));
+                let _ = std::fs::remove_file(&path);
+                return none;
+            }
+        };
+        let Some(saved_at_wall) = parsed["savedAtWall"].as_i64() else {
+            (self.log)(&format!(
+                "journal at {} is missing its timestamp, ignoring it and starting clean",
+                path.display()
+            ));
+            let _ = std::fs::remove_file(&path);
+            return none;
+        };
+
+        let now_wall = now_sec();
+        let elapsed = (now_wall - saved_at_wall).max(0);
+        // `idle_s` is already this app's own definition of "this set is
+        // over" (see config.rs's `idle` field doc), so it doubles as the
+        // staleness bound here rather than inventing a second timeout. A
+        // journal older than that can't plausibly still be the set in
+        // progress - resuming it anyway would glue whatever games are
+        // played next onto a set that, by the app's own idle rule, already
+        // ended (possibly hours ago). A journal within the bound plausibly
+        // is still the same set, so it's resumed instead of dropped.
+        let stale = (elapsed as f64) > idle_s;
+
+        let open_set_val = parsed.get("openSet").filter(|v| !v.is_null());
+        let pending_val = parsed.get("pending").filter(|v| !v.is_null()).cloned();
+
+        if stale {
+            let mut finalized_games = 0;
+            match open_set_val.map(open_set_from_json) {
+                Some(Some((set, _))) if !set.matches.is_empty() => {
+                    finalized_games = set.matches.len();
+                    self.set = Some(set);
+                    // The games in it genuinely happened; only "is this
+                    // still the live set" is in question, so they're
+                    // finalized as a completed set rather than discarded.
+                    // `finalize` also removes the journal file.
+                    self.finalize(true, Some(saved_at_wall));
+                }
+                Some(None) => {
+                    (self.log)("stale journal's open-set data was corrupt, discarding it");
+                    self.remove_journal();
+                }
+                _ => self.remove_journal(),
+            }
+            (self.log)(&format!(
+                "journal at {} is {elapsed}s old (idle bound {idle_s}s): {}",
+                path.display(),
+                if finalized_games > 0 {
+                    format!("finalized {finalized_games} recovered game(s) as a completed set")
+                } else {
+                    "nothing worth recovering, discarded".to_string()
+                }
+            ));
+            // A stale pending game is dropped along with the rest of the
+            // journal: PENDING_TIMEOUT_S (90s) is already far shorter than
+            // the idle bound used above (420s default), so any pending game
+            // old enough to show up in a stale journal has already long
+            // since passed its own timeout anyway.
+            return JournalResume { pending: None };
+        }
+
+        let mut resumed_games = 0;
+        if let Some(osv) = open_set_val {
+            match open_set_from_json(osv) {
+                Some((set, last_wall)) => {
+                    resumed_games = set.matches.len();
+                    let wall = last_wall.unwrap_or(saved_at_wall);
+                    let elapsed_since = (now_wall - wall).max(0) as u64;
+                    // Reconstitute the monotonic idle timer from the
+                    // wall-clock gap since the last game: `Instant`s from
+                    // the previous process are meaningless here, but "how
+                    // long ago" survives the restart via wall clock (same
+                    // trick `pending_game_from_json` uses for a pending
+                    // game's `detected_at` below).
+                    self.last_game_at = Some(
+                        std::time::Instant::now()
+                            .checked_sub(std::time::Duration::from_secs(elapsed_since))
+                            .unwrap_or_else(std::time::Instant::now),
+                    );
+                    self.last_game_at_wall = Some(wall);
+                    self.set = Some(set);
+                }
+                None => (self.log)("resumed journal's open-set data was corrupt, ignoring it"),
+            }
+        }
+        if resumed_games > 0 || pending_val.is_some() {
+            (self.log)(&format!(
+                "resumed journal ({elapsed}s old): {resumed_games} game(s) in the open set{}",
+                if pending_val.is_some() {
+                    " plus a pending game"
+                } else {
+                    ""
+                }
+            ));
+        }
+        JournalResume {
+            pending: pending_val,
+        }
     }
 }
 
@@ -442,7 +629,19 @@ impl StatsProducer {
         log: LogFn,
         on_change: Option<OnChangeFn>,
     ) -> std::io::Result<Self> {
-        let machine = SetMachine::new(out_dir, log, on_change)?;
+        let mut machine = SetMachine::new(out_dir, log, on_change)?;
+        // Recover (or finalize) whatever a previous run left journaled
+        // before anything else touches `machine` - see `resume_journal` for
+        // the staleness rule and `set_machine`'s module doc for why this
+        // exists at all.
+        let resume = machine.resume_journal(idle_s);
+        let pending = resume.pending.as_ref().and_then(|v| {
+            let p = pending_game_from_json(v, now_sec());
+            if p.is_none() {
+                (machine.log)("resumed journal's pending-game data was corrupt, ignoring it");
+            }
+            p
+        });
         let mut p = Self {
             save: save_path.to_path_buf(),
             replays: replays_dir.to_path_buf(),
@@ -451,7 +650,7 @@ impl StatsProducer {
             machine,
             mtime: None,
             baseline: None,
-            pending: None,
+            pending,
         };
         p.baseline = p.read();
         if let Some(base) = &p.baseline {
@@ -539,6 +738,17 @@ impl StatsProducer {
         if !self.try_record_pending(&pending, timed_out) {
             self.pending = Some(pending); // still waiting
         }
+        self.write_journal();
+    }
+
+    /// Re-journal the current open set + pending game (if any) after
+    /// anything that could have changed either. Cheap (a small JSON file,
+    /// same atomic tmp+rename as every other output here), so it's simplest
+    /// to call it after every mutation point rather than diff against what
+    /// was last written.
+    fn write_journal(&self) {
+        let pending = self.pending.as_ref().map(pending_game_to_json);
+        self.machine.write_journal(pending.as_ref());
     }
 
     pub fn poll(&mut self) {
@@ -554,6 +764,7 @@ impl StatsProducer {
         // should be one set into two.
         if self.pending.is_none() {
             self.machine.idle_check(self.idle_s);
+            self.write_journal();
         }
 
         let Ok(meta) = std::fs::metadata(&self.save) else {
@@ -610,7 +821,126 @@ impl StatsProducer {
 
     pub fn shutdown(&mut self) {
         self.machine.finalize(false, None);
+        // `finalize` already removed the journal for the set that just
+        // closed; this re-journals anything it doesn't know about - a game
+        // still waiting on its replay, which a graceful shutdown does not
+        // otherwise wait for.
+        self.write_journal();
     }
+}
+
+// ---- Journal (crash/restart durability) ------------------------------------
+//
+// The open set and any pending game are journaled to `open-set.json` in the
+// output dir (see `SetMachine::write_journal` / `resume_journal` above)
+// whenever either changes, so a crash or restart mid-set resumes instead of
+// silently losing every game played so far. Everything below hand-converts
+// the private structs above to/from `serde_json::Value`, matching this
+// crate's "typed structs only at the edges" design (see the module doc in
+// `lib.rs`) rather than deriving Serialize/Deserialize on `GameResult` et al.
+
+const JOURNAL_FILE: &str = "open-set.json";
+
+/// What `resume_journal` found. `StatsProducer::new` uses `pending` to turn
+/// it back into a real `PendingGame` (only `StatsProducer` knows about
+/// pending games; `SetMachine` doesn't). `resume_journal` logs the resumed
+/// or finalized game counts itself, so they don't need to travel any further
+/// than that.
+struct JournalResume {
+    /// Pending-game JSON recovered from a resumed (non-stale) journal, still
+    /// undecoded. A stale journal never yields a pending game (see the
+    /// comment in `resume_journal`), so this is only ever set alongside a
+    /// non-stale result.
+    pending: Option<Value>,
+}
+
+fn side_player_to_json(p: &SidePlayer) -> Value {
+    json!({"tag": p.tag, "charCode": p.char_code, "mode": p.mode, "stats": p.stats})
+}
+
+fn side_player_from_json(v: &Value) -> Option<SidePlayer> {
+    Some(SidePlayer {
+        tag: v["tag"].as_str()?.to_string(),
+        char_code: v["charCode"].as_str()?.to_string(),
+        mode: v["mode"].as_str()?.to_string(),
+        stats: serde_json::from_value::<BTreeMap<String, i64>>(v["stats"].clone()).ok()?,
+    })
+}
+
+fn game_result_to_json(r: &GameResult) -> Value {
+    json!({
+        "mode": r.mode,
+        "winners": r.winners.iter().map(side_player_to_json).collect::<Vec<_>>(),
+        "losers": r.losers.iter().map(side_player_to_json).collect::<Vec<_>>(),
+    })
+}
+
+fn game_result_from_json(v: &Value) -> Option<GameResult> {
+    let mode = v["mode"].as_str()?.to_string();
+    let winners = v["winners"]
+        .as_array()?
+        .iter()
+        .map(side_player_from_json)
+        .collect::<Option<Vec<_>>>()?;
+    let losers = v["losers"]
+        .as_array()?
+        .iter()
+        .map(side_player_from_json)
+        .collect::<Option<Vec<_>>>()?;
+    Some(GameResult {
+        mode,
+        winners,
+        losers,
+    })
+}
+
+/// `last_game_at_wall` rides along with the open set's own fields (rather
+/// than as a separate top-level journal key) because the two are only ever
+/// meaningful together - there's no "last game recorded at" without an open
+/// set to have recorded a game into.
+fn open_set_to_json(s: &OpenSet, last_game_at_wall: Option<i64>) -> Value {
+    json!({
+        "id": s.id, "startEpoch": s.start_epoch, "startIso": s.start_iso,
+        "firstMatchStartIso": s.first_match_start_iso, "matches": s.matches,
+        "winsByName": s.wins_by_name, "mode": s.mode,
+        "lastGameAtWall": last_game_at_wall,
+    })
+}
+
+fn open_set_from_json(v: &Value) -> Option<(OpenSet, Option<i64>)> {
+    let set = OpenSet {
+        id: v["id"].as_str()?.to_string(),
+        start_epoch: v["startEpoch"].as_i64()?,
+        start_iso: v["startIso"].as_str()?.to_string(),
+        first_match_start_iso: v["firstMatchStartIso"].as_str().map(|s| s.to_string()),
+        matches: v["matches"].as_array()?.clone(),
+        wins_by_name: serde_json::from_value(v["winsByName"].clone()).ok()?,
+        mode: v["mode"].as_str().map(|s| s.to_string()),
+    };
+    Some((set, v["lastGameAtWall"].as_i64()))
+}
+
+/// `PendingGame::detected_at` (an `Instant`) is never journaled directly - it
+/// has no meaning across a process restart. `at` already captures the same
+/// moment in wall-clock form (see the doc comment on `detected_at`), so on
+/// resume `detected_at` is rebuilt from `at` alone, the same way
+/// `resume_journal` rebuilds `last_game_at` from `last_game_at_wall`.
+fn pending_game_to_json(p: &PendingGame) -> Value {
+    json!({"result": game_result_to_json(&p.result), "at": p.at})
+}
+
+fn pending_game_from_json(v: &Value, now_wall: i64) -> Option<PendingGame> {
+    let result = game_result_from_json(&v["result"])?;
+    let at = v["at"].as_i64()?;
+    let elapsed = (now_wall - at).max(0) as u64;
+    let detected_at = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(elapsed))
+        .unwrap_or_else(std::time::Instant::now);
+    Some(PendingGame {
+        result,
+        at,
+        detected_at,
+    })
 }
 
 #[cfg(test)]
@@ -1184,6 +1514,271 @@ mod tests {
         assert!(
             !m.has_open_set(),
             "idle_check should finalize once real elapsed time exceeds idle_s"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Journal (crash/restart durability) --------------------------------
+
+    /// A game recorded, journaled, then read back by a fresh `SetMachine`
+    /// (standing in for a process restart) should come back with the same
+    /// open set - the basic round trip the rest of the durability behaviour
+    /// builds on.
+    #[test]
+    fn journal_round_trips_an_open_set() {
+        let dir = std::env::temp_dir().join(format!("statstest_journal_rt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let g1 = snap(&[
+            ("A", "Cla", "LOCAL", &[("wins", 1.0)]),
+            ("B", "Kra", "LOCAL", &[("losses", 1.0)]),
+        ]);
+        let r = to_game_result(diff(&Map::new(), &g1)).unwrap();
+        let rep = parse_replay_name("2026-07-23_19-00-00-000-A(Cla)-B(Kra)-Game1.rpl").unwrap();
+
+        let mut m = SetMachine::new(&dir, Box::new(|_| {}), None).unwrap();
+        m.record_game(&r, Some(&rep), rep.epoch);
+        m.write_journal(None); // no pending game in this scenario
+        assert!(m.journal_path().is_file());
+
+        // A fresh SetMachine over the same out dir, as if the process had
+        // just restarted.
+        let mut m2 = SetMachine::new(&dir, Box::new(|_| {}), None).unwrap();
+        let resume = m2.resume_journal(180.0); // generous idle bound; this journal is seconds old
+        assert!(resume.pending.is_none());
+        assert!(m2.has_open_set(), "the open set should have been resumed");
+        assert_eq!(m2.set.as_ref().unwrap().matches.len(), 1);
+        assert_eq!(
+            m2.set.as_ref().unwrap().id,
+            m.set.as_ref().unwrap().id,
+            "the resumed set should be the same set, not a fresh one"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A journal within the staleness bound resumes with its monotonic
+    /// timers correctly reconstituted from the wall clock: `last_game_at`
+    /// must reflect the real elapsed time since the last game (here, ~60s),
+    /// not zero (which would fail to idle-finalize when it should) and not
+    /// some inflated value (which would finalize immediately when it
+    /// shouldn't).
+    #[test]
+    fn resume_reconstitutes_the_monotonic_idle_timer_from_wall_clock() {
+        let dir =
+            std::env::temp_dir().join(format!("statstest_journal_resume_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A journal as if the process had been killed 60s ago mid-set.
+        let past = now_sec() - 60;
+        let open_set = OpenSet {
+            id: "20260723_190000".into(),
+            start_epoch: past,
+            start_iso: iso_of(past),
+            first_match_start_iso: Some(iso_of(past)),
+            matches: vec![json!({"index": 1, "players": []})],
+            wins_by_name: Map::new(),
+            mode: Some("LOCAL".into()),
+        };
+        let journal = json!({
+            "savedAtWall": past,
+            "openSet": open_set_to_json(&open_set, Some(past)),
+            "pending": Value::Null,
+        });
+        std::fs::write(
+            dir.join("open-set.json"),
+            serde_json::to_string_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+
+        let mut m = SetMachine::new(&dir, Box::new(|_| {}), None).unwrap();
+        let resume = m.resume_journal(420.0); // default idle bound; 60s old is well inside
+        assert!(resume.pending.is_none());
+        assert!(
+            m.has_open_set(),
+            "a 60s-old journal within a 420s idle bound should resume, not finalize"
+        );
+
+        let elapsed = m.last_game_at.unwrap().elapsed().as_secs_f64();
+        assert!(
+            (59.0..90.0).contains(&elapsed),
+            "reconstituted elapsed time should be ~60s, was {elapsed}"
+        );
+
+        // Proof the 60s really carried across the restart (not reset to
+        // "just now"): idle_check with idle_s below that must fire now,
+        // where it would not have if last_game_at had come back as fresh.
+        m.idle_check(30.0);
+        assert!(
+            !m.has_open_set(),
+            "idle_check should finalize once the reconstituted elapsed time exceeds idle_s"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A journal from long before the idle bound (hours, not seconds) must
+    /// not be resumed as the live set - that would glue unrelated future
+    /// games onto a set that, by the app's own idle rule, ended long ago.
+    /// Its games did happen, though, so they're finalized as a completed set
+    /// instead of just being dropped.
+    #[test]
+    fn stale_journal_is_finalized_as_a_completed_set_not_resumed() {
+        let dir =
+            std::env::temp_dir().join(format!("statstest_journal_stale_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let past = now_sec() - 3 * 3600; // three hours ago
+        let open_set = OpenSet {
+            id: "20260723_120000".into(),
+            start_epoch: past,
+            start_iso: iso_of(past),
+            first_match_start_iso: Some(iso_of(past)),
+            matches: vec![json!({"index": 1, "players": []})],
+            wins_by_name: Map::new(),
+            mode: Some("LOCAL".into()),
+        };
+        let journal = json!({
+            "savedAtWall": past,
+            "openSet": open_set_to_json(&open_set, Some(past)),
+            "pending": Value::Null,
+        });
+        std::fs::write(
+            dir.join("open-set.json"),
+            serde_json::to_string_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+
+        let mut m = SetMachine::new(&dir, Box::new(|_| {}), None).unwrap();
+        let resume = m.resume_journal(420.0); // idle bound (7 min) far shorter than 3h
+        assert!(resume.pending.is_none());
+        assert!(
+            !m.has_open_set(),
+            "a 3-hour-old journal must not be resumed as the live set"
+        );
+
+        let files: Vec<_> = std::fs::read_dir(dir.join("sets"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(
+            files.len(),
+            1,
+            "the stale journal's games should be finalized to disk instead of dropped"
+        );
+
+        assert!(
+            !m.journal_path().is_file(),
+            "the stale journal must be removed so it can't be resurrected on a later restart"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A corrupt/truncated/unparseable journal must never prevent startup -
+    /// exercised through the real startup path (`StatsProducer::new`), which
+    /// is what actually runs on app launch.
+    #[test]
+    fn corrupt_journal_does_not_prevent_startup() {
+        let dir =
+            std::env::temp_dir().join(format!("statstest_journal_corrupt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("open-set.json"), b"{ this is not valid json [[[").unwrap();
+
+        let p = StatsProducer::new(
+            &dir.join("missing.sav"),
+            &dir.join("replays"),
+            &dir,
+            420.0,
+            Box::new(|_| {}),
+            None,
+        );
+        assert!(p.is_ok(), "a corrupt journal must never prevent startup");
+        let p = p.unwrap();
+        assert!(!p.machine.has_open_set());
+        assert!(
+            !dir.join("open-set.json").is_file(),
+            "the corrupt journal should be cleaned up rather than left to fail again next time"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Finalizing a set normally (not via a stale-journal recovery) removes
+    /// the journal - a later restart must not find and resurrect it.
+    #[test]
+    fn journal_removed_on_normal_finalize() {
+        let dir =
+            std::env::temp_dir().join(format!("statstest_journal_cleanup_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let g1 = snap(&[
+            ("A", "Cla", "LOCAL", &[("wins", 1.0)]),
+            ("B", "Kra", "LOCAL", &[("losses", 1.0)]),
+        ]);
+        let r = to_game_result(diff(&Map::new(), &g1)).unwrap();
+        let rep = parse_replay_name("2026-07-23_19-00-00-000-A(Cla)-B(Kra)-Game1.rpl").unwrap();
+
+        let mut m = SetMachine::new(&dir, Box::new(|_| {}), None).unwrap();
+        m.record_game(&r, Some(&rep), rep.epoch);
+        m.write_journal(None);
+        assert!(
+            m.journal_path().is_file(),
+            "sanity check: journal exists before finalize"
+        );
+
+        m.finalize(true, Some(rep.epoch + 5));
+        assert!(
+            !m.journal_path().is_file(),
+            "finalize must remove the journal"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pending game (detected, but still waiting on its replay) survives a
+    /// restart too, via the same journal - and its monotonic
+    /// `PENDING_TIMEOUT_S` timer is correctly reconstituted from wall clock,
+    /// so it doesn't immediately get forced through as unmatched right after
+    /// resuming.
+    #[test]
+    fn pending_game_survives_the_journal_round_trip() {
+        let g_online = snap(&[("ME", "Fle", "ONLINE", &[("wins", 1.0)])]);
+        let r = to_game_result(diff(&Map::new(), &g_online)).unwrap();
+
+        let dir =
+            std::env::temp_dir().join(format!("statstest_journal_pending_{}", std::process::id()));
+        let replays = dir.join("replays");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&replays).unwrap();
+
+        let mut p = producer(&dir, &replays, 420.0);
+        p.pending = Some(PendingGame {
+            result: r,
+            at: now_sec(),
+            detected_at: std::time::Instant::now(),
+        });
+        p.write_journal();
+        assert!(p.machine.journal_path().is_file());
+
+        // A brand-new StatsProducer over the same out dir, as if the process
+        // had just restarted.
+        let p2 = producer(&dir, &replays, 420.0);
+        assert!(
+            p2.pending.is_some(),
+            "the pending game should have been resumed from the journal"
+        );
+        let pending = p2.pending.as_ref().unwrap();
+        assert_eq!(pending.result.winners[0].tag, "ME");
+        assert_eq!(pending.at, p.pending.as_ref().unwrap().at);
+        // Reconstituted from "just now", not from zero and not already past
+        // PENDING_TIMEOUT_S - either would make it resolve incorrectly on
+        // the very next poll.
+        assert!(
+            pending.detected_at.elapsed().as_secs_f64() < 5.0,
+            "detected_at should reconstitute to ~now, not drift or reset oddly"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

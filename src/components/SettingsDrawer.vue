@@ -137,8 +137,21 @@ async function checkUpdate() {
       updateState.value = 'none';
     }
   } catch (e) {
-    err.value = String(e);
-    updateState.value = 'idle';
+    // A GitHub release is assembled by several jobs finishing independently;
+    // if one platform hasn't uploaded yet the manifest briefly lacks it and
+    // the updater plugin throws this exact message. Not something a click
+    // can fix, so show it as "nothing to report yet" rather than an alarming
+    // raw error. release.yml keeps the release itself a draft until every
+    // platform has uploaded specifically to make this rare; this is a
+    // fallback for whatever narrow window is left (e.g. GitHub's own
+    // propagation), not the primary defense.
+    const msg = String(e);
+    if (/fallback platform/i.test(msg)) {
+      updateState.value = 'none';
+    } else {
+      err.value = msg;
+      updateState.value = 'idle';
+    }
   }
 }
 

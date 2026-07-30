@@ -6,9 +6,21 @@ name: Release
 # first.
 #
 # Tagging only changes what happens to the output:
-#   * pushed tag v*  -> attached to a draft GitHub release named for the tag
+#   * pushed tag v*  -> a draft release while the three platform jobs upload,
+#     published only once all three have finished (see publish-release below)
 #   * anything else  -> uploaded as workflow artifacts on the run page
 #     (retained 14 days, not public, nothing published)
+#
+# Why the release starts as a draft even though tagging is meant to ship:
+# the three OS jobs run in parallel and each merges its own platform entries
+# into the release as it finishes, so if they were published immediately
+# there would be a window (windows-latest is routinely last, and can trail
+# by a couple of minutes) where latest.json is live but missing a platform.
+# An installed app checking for updates in that window gets "none of the
+# fallback platforms were found in the response" for no reason a user can
+# act on. Drafts don't appear at /releases/latest, so the updater keeps
+# seeing the previous complete release for the whole build, then the new one
+# appears atomically once publish-release flips it.
 on:
   push:
     branches: ['main']
@@ -104,11 +116,11 @@ jobs:
           tagName: ${{ steps.mode.outputs.tag }}
           releaseName: Rivals Station Reporter ${{ steps.mode.outputs.tag }}
           releaseBody: 'See the commit log for changes.'
-          # Published, not draft: the updater resolves /releases/latest, and a
-          # draft is not "latest" to anyone, so a drafted release would never
-          # reach a station. Tagging is therefore the act of shipping; untagged
-          # pushes still only produce workflow artifacts.
-          releaseDraft: false
+          # Stays a draft here; publish-release (below, needs: build) flips it
+          # live once all three platform jobs have merged in, so the release
+          # is never visible at /releases/latest with only some platforms
+          # present. See the header comment for why that window matters.
+          releaseDraft: true
 
       # Untagged runs have nowhere to attach the installers, so keep them on
       # the run page instead. Globbed rather than read from the action's
@@ -128,3 +140,31 @@ jobs:
             target/release/bundle/macos/*.app.tar.gz
             target/release/bundle/deb/*.deb
             target/release/bundle/appimage/*.AppImage
+
+  # Runs only for a real release (needs a resolved tag), and only after every
+  # platform in the build matrix has succeeded (needs: build waits on the
+  # whole matrix, not just one leg, so one failed platform blocks publishing
+  # rather than shipping an incomplete release). Flips the draft the build
+  # job created live in a single call, once, so the release only ever
+  # appears at /releases/latest with every platform already present.
+  publish-release:
+    needs: build
+    if: github.ref_type == 'tag' || inputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve release tag
+        id: mode
+        shell: bash
+        run: |
+          tag='${{ inputs.tag }}'
+          if [ -z "$tag" ] && [ '${{ github.ref_type }}' = 'tag' ]; then
+            tag='${{ github.ref_name }}'
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit '${{ steps.mode.outputs.tag }}' --draft=false --repo '${{ github.repository }}'

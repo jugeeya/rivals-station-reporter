@@ -1,0 +1,17 @@
+# Normalize every text file to LF in the repository.
+#
+# Without this, tooling run on Windows quietly rewrites files with CRLF
+# (cargo rewrites Cargo.toml on every build; Python's write_text translates
+# newlines by default), which turns a one-line edit into a whole-file diff and
+# buries the actual change. Checkout still uses LF here, which is what the
+# existing files already had.
+* text=auto eol=lf
+
+# Binary assets: never touch these.
+*.png binary
+*.ico binary
+*.icns binary
+*.woff2 binary
+*.zip binary
+*.sav binary
+*.rpl binary

@@ -31,6 +31,7 @@ import {
   FAKE_NOW_MS,
   stationIdle,
   stationLive,
+  stationFinished,
   operatorConsole,
   settingsBase,
 } from './fixtures.mjs';
@@ -181,6 +182,15 @@ async function main() {
   try {
     const written = [];
 
+    // Operator console first: it's the headline screenshot (the multi-station
+    // view the README leads with), so it's also the first one captured.
+    written.push(
+      await captureOne(browser, 'operator-console', operatorConsole, {
+        onReady: (page) =>
+          page.locator('.oc-row', { hasText: 'Winners Quarter-Final' }).waitFor({ state: 'visible' }),
+      }),
+    );
+
     written.push(
       await captureOne(browser, 'station-idle', stationIdle, {
         onReady: (page) => page.locator('.ls-idle-text').waitFor({ state: 'visible' }),
@@ -194,9 +204,8 @@ async function main() {
     );
 
     written.push(
-      await captureOne(browser, 'operator-console', operatorConsole, {
-        onReady: (page) =>
-          page.locator('.oc-row', { hasText: 'Winners Quarter-Final' }).waitFor({ state: 'visible' }),
+      await captureOne(browser, 'station-finished', stationFinished, {
+        onReady: (page) => page.locator('.ss-row', { hasText: 'LOOM' }).waitFor({ state: 'visible' }),
       }),
     );
 

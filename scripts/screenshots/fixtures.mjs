@@ -130,6 +130,46 @@ export const stationLive = {
   health: HEALTH,
 };
 
+// ---- station-finished.png ---------------------------------------------------
+// Station 3, right after its set just ended: same LOOM/KIM set the operator
+// console's "finished, awaiting report" row shows for station 3, from this
+// station's own point of view. No hub configured here (matches idle/live:
+// each station fixture is a lone station, the multi-station picture is
+// operator-console.png), so there's nothing for this PC to know about
+// "reportable" or "awaiting report" -- that status lives on the operator's
+// hub record, not the station snapshot. The station only ever sees "here is
+// what just finished."
+
+export const stationFinished = {
+  config: baseConfig({ station: 3 }),
+  status: { msg: 'finalized set_1804355880.json: LOOM wins (4 games, complete=true)', error: false, t: FAKE_NOW_S },
+  snapshot: {
+    live: null,
+    history: [
+      {
+        startEpoch: FAKE_NOW_S - 1320,
+        complete: true,
+        mode: null,
+        games: 4,
+        players: [
+          { tag: 'LOOM', char: 'Zetterburn', wins: 3, slot: 0, won: true },
+          { tag: 'KIM', char: 'Kragg', wins: 1, slot: 1, won: false },
+        ],
+      },
+    ],
+  },
+  hubSnapshot: { sets: [], stations: {} },
+  hubUrl: null,
+  log: [
+    '18:24:00  game 1 | LOOM(Ranno) vs KIM(Kragg) -> LOOM wins',
+    '18:28:00  game 2 | score 1-1',
+    '18:33:00  game 3 | score 2-1',
+    '18:39:00  game 4 | score 3-1',
+    '18:39:00  finalized set_1804355880.json: LOOM wins (4 games, complete=true)',
+  ],
+  health: HEALTH,
+};
+
 // ---- operator-console.png ---------------------------------------------------
 // Three stations reporting to one operator's hub. Every set is best of 5
 // (winsRequired: 3) with Start Match already pressed on start.gg

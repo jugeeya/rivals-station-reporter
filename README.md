@@ -33,9 +33,18 @@ and never touch the bracket.
 
 ## Screenshots
 
-Sample data below, not a live event: a station waiting between sets, a
-station mid-set, the operator console watching three stations at once, and
-Settings open. Regenerate these with `pnpm screenshots` (see Development).
+Sample data below, not a live event: the operator console watching three
+stations at once, then one station through the three stages a set actually
+goes through (waiting, mid-set, just finished), then Settings open.
+Regenerate these with `pnpm screenshots` (see Development).
+
+![Operator console, three stations](docs/screenshots/operator-console.png)
+
+The operator console watching three stations at once: live sets grouped
+separately from finished-and-unreported ones, elapsed time against an
+absolute clock, best-of shown next to the score, a per-game character strip
+with the winner marked, and the tag-to-entrant mapping the hub would actually
+report, per player.
 
 ![Station, idle between sets](docs/screenshots/station-idle.png)
 
@@ -48,13 +57,12 @@ greyed out since it never reaches the bracket).
 A station mid-set: live score, both tags, current characters, and the
 online/ranked note when it applies.
 
-![Operator console, three stations](docs/screenshots/operator-console.png)
+![Station, set just finished](docs/screenshots/station-finished.png)
 
-The operator console watching three stations at once: live sets grouped
-separately from finished-and-unreported ones, elapsed time against an
-absolute clock, best-of shown next to the score, a per-game character strip
-with the winner marked, and the tag-to-entrant mapping the hub would actually
-report, per player.
+The same station right after a set ends: this is station 3's LOOM/KIM set
+from the operator screenshot above, seen from its own PC. A station only
+ever knows "this just finished"; whether it's still awaiting report is state
+the operator's hub tracks, not something a station has any way to know.
 
 ![Settings drawer open](docs/screenshots/settings.png)
 

@@ -91,6 +91,16 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
         with:
+          # Updater artifacts are off in the base config and switched on only
+          # here, for tagged builds. `createUpdaterArtifacts` makes the signing
+          # key mandatory: a build that cannot read the secret does not skip
+          # signing, it fails outright with a key-decode error. Enabling it
+          # globally therefore breaks every build without secret access, which
+          # notably includes pull requests from forks, where the failure looks
+          # nothing like the contributor's actual change.
+          # Path is relative to the working directory the action builds from
+          # (the repo root), not to src-tauri, despite the file living there.
+          args: ${{ steps.mode.outputs.tag != '' && '--config src-tauri/tauri.release.conf.json' || '' }}
           tagName: ${{ steps.mode.outputs.tag }}
           releaseName: Rivals Station Reporter ${{ steps.mode.outputs.tag }}
           releaseBody: 'See the commit log for changes.'

@@ -8,6 +8,16 @@
 // render (idle, live, finished, online/ranked, operator console) is reachable
 // without a game PC. The engine store polls get_state() in mock mode
 // (window.__RSR_MOCK__), so no event plumbing is needed here.
+//
+// A screenshot harness needs the opposite of the fake tournament: an exact,
+// unmoving state instead of a scripted timer. `window.__RSR_SEED__(state)`
+// replaces the whole mock EngineState in one shot and permanently disables
+// the ticker (see `seeded` below) so nothing changes state out from under a
+// capture. It's also readable as `window.__RSR_SEED_DATA__` set *before* this
+// module runs (e.g. via Playwright's `addInitScript`), so the very first
+// `get_state()` the app makes already returns the seeded fixture -- no
+// default-state flash before the real content appears. `pnpm dev` never sets
+// that global, so the scripted tournament below is untouched.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -63,9 +73,13 @@ const MATCHUPS = [
 ];
 let matchup = 0;
 let ticker: number | null = null;
+// Set by applySeed() (see below) and checked here so a seeded fixture can
+// never start ticking, even if something later calls save_config with
+// configured: true.
+let seeded = false;
 
 function startFakeTournament() {
-  if (ticker != null) return;
+  if (seeded || ticker != null) return;
   ticker = window.setInterval(() => {
     if (!state.config.configured || state.config.mode === 'operator') return;
     const live = state.snapshot.live;
@@ -149,6 +163,24 @@ function seedHub() {
       },
     ],
   };
+}
+
+// ---- deterministic seeding (screenshot harness) ----------------------------
+
+/** Replace the whole mock EngineState and permanently stop the ticker. Safe
+ *  to call more than once (e.g. re-seeding between captures in one page). */
+function applySeed(next: unknown) {
+  if (ticker != null) {
+    window.clearInterval(ticker);
+    ticker = null;
+  }
+  seeded = true;
+  const clone =
+    typeof structuredClone === 'function'
+      ? structuredClone(next)
+      : JSON.parse(JSON.stringify(next));
+  for (const k of Object.keys(state)) delete state[k];
+  Object.assign(state, clone);
 }
 
 // ---- invoke fixtures ---------------------------------------------------------
@@ -235,6 +267,7 @@ export function install() {
   if (w.__TAURI_INTERNALS__) return; // real app — never interfere
 
   w.__RSR_MOCK__ = true;
+  w.__RSR_SEED__ = applySeed;
   w.__TAURI_INTERNALS__ = {
     metadata: {
       currentWindow: { label: 'main' },
@@ -249,4 +282,10 @@ export function install() {
       return h(args ?? {});
     },
   };
+
+  // A capture harness stashes the fixture here via `addInitScript` (run
+  // before this module executes), so it can be applied synchronously right
+  // now -- the very first `get_state()` the app makes already returns the
+  // seeded fixture instead of a flash of default state.
+  if (w.__RSR_SEED_DATA__) applySeed(w.__RSR_SEED_DATA__);
 }

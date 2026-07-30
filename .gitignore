@@ -9,3 +9,11 @@ dist/
 # Tauri generates these per-platform on build
 /src-tauri/gen/schemas/windows-schema.json
 /src-tauri/gen/schemas/linux-schema.json
+
+# Screenshot harness (scripts/screenshots/capture.mjs): the dev server's log
+# and Playwright's own caches/output. The PNGs it writes to docs/screenshots/
+# are tracked.
+/scripts/screenshots/.tmp/
+/test-results/
+/playwright-report/
+/blob-report/

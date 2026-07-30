@@ -31,6 +31,17 @@ old Python stations interoperate with a Rust hub (and vice versa) during
 migration. Online/ranked ladder games are detected via the save's game mode
 and never touch the bracket.
 
+## Screenshots
+
+Sample data below, not a live event: a station waiting between sets, a
+station mid-set, the operator console watching three stations at once, and
+Settings open. Regenerate these with `pnpm screenshots` (see Development).
+
+| | |
+| --- | --- |
+| ![Station, idle between sets](docs/screenshots/station-idle.png) A station between sets: health checks green, waiting for the next game, two finished sets already logged (one local, one online ladder game that's greyed out since it never reaches the bracket). | ![Station, set in progress](docs/screenshots/station-live.png) A station mid-set: live score, both tags, current characters, and the online/ranked note when it applies. |
+| ![Operator console, three stations](docs/screenshots/operator-console.png) The operator console: three stations at once, each set's bracket round and best-guess start.gg match, Report/Switch/Delete per row. | ![Settings drawer open](docs/screenshots/settings.png) Settings: mode, event, hub/broker, paths, and update check, all editable without restarting. |
+
 ## Install
 
 Grab the installer from the latest GitHub release (Windows NSIS `.exe`;
@@ -60,6 +71,25 @@ All logic lives in `crates/station-core` (no Tauri dependency) — 1:1 ports of
 the Python modules with their tests. `src-tauri` is a thin shell: an engine
 thread that owns the producer/forwarder/hub and pushes state to the UI over
 one event.
+
+### Screenshots
+
+`pnpm screenshots` boots the same browser-mock UI as `pnpm dev`, but seeds an
+exact fixture state instead of letting the scripted fake tournament run, and
+writes PNGs to `docs/screenshots/`. It starts the dev server itself if one
+isn't already listening on :1420, and shuts down anything it started when
+it's done.
+
+```sh
+pnpm screenshots:setup   # once: installs the Chromium build Playwright needs
+pnpm screenshots
+```
+
+The fixtures live in `scripts/screenshots/fixtures.mjs`; the capture script
+(viewport, frozen clock, disabled animations, PNG output) is
+`scripts/screenshots/capture.mjs`. See `src/dev/browserMock.ts`'s
+`window.__RSR_SEED__` / `__RSR_SEED_DATA__` for how a fixture reaches the UI
+without the real Tauri backend.
 
 To check save-parsing parity against a real save:
 

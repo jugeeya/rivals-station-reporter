@@ -32,6 +32,17 @@ fn replay_autosave_warning(raw: &str) -> String {
     )
 }
 
+/// Wording shared by the "station clock disagrees with the hub" warning -
+/// same reasoning as `replay_autosave_warning` above.
+fn clock_skew_warning(skew_s: i64) -> String {
+    let direction = if skew_s >= 0 { "ahead of" } else { "behind" };
+    format!(
+        "This station's clock is {}s {direction} the hub's - replay matching and idle/timeout \
+         detection will misbehave until the system clock is corrected",
+        skew_s.abs()
+    )
+}
+
 const LOG_LINES: usize = 200;
 
 pub struct Engine(pub Arc<EngineInner>);
@@ -64,6 +75,22 @@ pub struct EngineInner {
     // `state()` — see the comment on `check_replay_autosave` for why.
     replay_autosave_mtime: Mutex<Option<SystemTime>>,
     replay_autosave_bad: Mutex<Option<(String, i64)>>, // (raw enum value, first-seen t)
+
+    // Station-clock-vs-hub-clock warning (see `check_clock_skew` and
+    // `Forwarder::clock_skew_check`). Same separated-latch shape as
+    // `replay_autosave_bad` and for the same reason (status/log_line are
+    // clobbered by ordinary operation). Unlike `replay_autosave_bad`'s raw
+    // enum value, a measured skew jitters a little tick to tick even while
+    // still genuinely bad, so `check_clock_skew` only logs on the "was
+    // fine, now bad"/"was bad, now fine" transitions, not on every wobble.
+    clock_skew_bad: Mutex<Option<(String, i64)>>, // (message, first-seen t)
+
+    // Hub/broker connectivity warning (see `check_forward_health` and
+    // `Forwarder::forward_status`). Same shape and same anti-jitter
+    // reasoning as `clock_skew_bad` (the failure kind can flip between
+    // calls, e.g. unreachable while the hub restarts, then a bad key once
+    // it's back up with different config).
+    forward_bad: Mutex<Option<(String, i64)>>, // (message, first-seen t)
 }
 
 impl EngineInner {
@@ -145,6 +172,76 @@ impl EngineInner {
         }
     }
 
+    /// Re-latch the clock-skew warning from the forwarder's latest probe of
+    /// the hub's clock (`Forwarder::clock_skew_check`, called once per loop
+    /// tick alongside this). Same separated-latch mechanism as
+    /// `check_replay_autosave` and for the same reason.
+    ///
+    /// `skew_s` is `None` whenever the forwarder has nothing confirmed to
+    /// report either way (dry run, no hub reachable, or a hub/broker too old
+    /// to answer with its own clock) - that is deliberately treated as "no
+    /// news", not "confirmed fine": a transient probe failure must not
+    /// silently clear a real warning that's still true. A station with no
+    /// hub configured at all never even reaches this method - see the
+    /// `else` branch in the engine loop that calls `clear_forward_warnings`
+    /// instead when there's no forwarder to ask.
+    pub fn check_clock_skew(&self, skew_s: Option<i64>) {
+        let Some(skew_s) = skew_s else { return };
+        let mut bad = self.clock_skew_bad.lock().unwrap();
+        if skew_s.abs() > Forwarder::CLOCK_SKEW_WARN_S {
+            let msg = clock_skew_warning(skew_s);
+            let was_bad = bad.is_some();
+            let first_seen = bad.as_ref().map(|(_, t)| *t).unwrap_or_else(Self::now);
+            *bad = Some((msg.clone(), first_seen));
+            drop(bad);
+            if !was_bad {
+                self.log_line(&format!("WARNING: {msg}"));
+            }
+        } else {
+            let was_bad = bad.take().is_some();
+            drop(bad);
+            if was_bad {
+                self.log_line("Station clock is back in sync with the hub.");
+            }
+        }
+    }
+
+    /// Re-latch the hub/broker connectivity warning from the forwarder's
+    /// consecutive-failure tracking (`Forwarder::forward_status`). Same
+    /// mechanism as `check_clock_skew` above, including "no reading yet"
+    /// (`None`, e.g. dry run or too few failures to be sure) leaving any
+    /// existing latch untouched rather than clearing it.
+    pub fn check_forward_health(&self, status: Option<String>) {
+        let mut bad = self.forward_bad.lock().unwrap();
+        match status {
+            Some(msg) => {
+                let was_bad = bad.is_some();
+                let first_seen = bad.as_ref().map(|(_, t)| *t).unwrap_or_else(Self::now);
+                *bad = Some((msg.clone(), first_seen));
+                drop(bad);
+                if !was_bad {
+                    self.log_line(&format!("WARNING: {msg}"));
+                }
+            }
+            None => {
+                let was_bad = bad.take().is_some();
+                drop(bad);
+                if was_bad {
+                    self.log_line("Hub/broker connection recovered.");
+                }
+            }
+        }
+    }
+
+    /// Called on every tick where there is no forwarder at all (no
+    /// hub/broker configured, or station mode is off): there is nothing to
+    /// compare a clock against or fail to reach, so a warning latched under
+    /// a previous configuration must not linger forever.
+    pub fn clear_forward_warnings(&self) {
+        *self.clock_skew_bad.lock().unwrap() = None;
+        *self.forward_bad.lock().unwrap() = None;
+    }
+
     /// The one JSON blob the UI renders from.
     pub fn state(&self) -> Value {
         let cfg = self.cfg.lock().unwrap().clone();
@@ -160,16 +257,35 @@ impl EngineInner {
             PathBuf::from(&cfg.replays)
         };
         let out_dir = self.out_dir(&cfg);
-        // A confirmed-bad Replay Auto Save setting overrides whatever the
-        // normal status flow last wrote — see `check_replay_autosave` for
-        // why this can't just be another `set_status` call.
-        let status = match &*self.replay_autosave_bad.lock().unwrap() {
-            Some((raw, first_seen_t)) => json!({
+        // A confirmed-bad health latch overrides whatever the normal status
+        // flow last wrote; see `check_replay_autosave` for why this can't
+        // just be another `set_status` call. Priority when more than one is
+        // active: Replay Auto Save misconfigured means NOTHING is being
+        // recorded at all (the most severe failure this app can detect);
+        // clock skew corrupts matching/timeouts but games are still being
+        // recorded; a forwarder outage means games are still recorded and
+        // matched locally, just not yet sent anywhere, so it's shown last.
+        let status = match (
+            &*self.replay_autosave_bad.lock().unwrap(),
+            &*self.clock_skew_bad.lock().unwrap(),
+            &*self.forward_bad.lock().unwrap(),
+        ) {
+            (Some((raw, first_seen_t)), _, _) => json!({
                 "msg": replay_autosave_warning(raw),
                 "error": true,
                 "t": first_seen_t,
             }),
-            None => self.status.lock().unwrap().clone(),
+            (_, Some((msg, first_seen_t)), _) => json!({
+                "msg": msg,
+                "error": true,
+                "t": first_seen_t,
+            }),
+            (_, _, Some((msg, first_seen_t))) => json!({
+                "msg": msg,
+                "error": true,
+                "t": first_seen_t,
+            }),
+            _ => self.status.lock().unwrap().clone(),
         };
         json!({
             "config": cfg,
@@ -372,7 +488,7 @@ fn build(inner: &Arc<EngineInner>) -> Built {
                 Box::new(move |m| log_inner.log_line(m)),
             ));
         } else {
-            inner.log_line("local-only: no event/broker configured — nothing is sent");
+            inner.log_line("local-only: no event/broker configured, nothing is sent");
         }
     }
 
@@ -406,6 +522,8 @@ pub fn start(app: AppHandle, config_dir: PathBuf) -> Engine {
         tagdb,
         replay_autosave_mtime: Mutex::new(None),
         replay_autosave_bad: Mutex::new(None),
+        clock_skew_bad: Mutex::new(None),
+        forward_bad: Mutex::new(None),
     });
 
     // Background refresher — its own thread, its own schedule, never the
@@ -438,6 +556,16 @@ pub fn start(app: AppHandle, config_dir: PathBuf) -> Engine {
             }
             if let Some(f) = &mut built.forwarder {
                 f.tick();
+                // `forward_status` is free (in-memory counters); the clock
+                // probe throttles its own network hit internally (see
+                // `Forwarder::clock_skew_check`), so both are cheap to call
+                // every tick.
+                loop_inner.check_forward_health(f.forward_status());
+                loop_inner.check_clock_skew(f.clock_skew_check());
+            } else {
+                // No hub/broker configured at all (or station mode is off)
+                // - nothing to compare a clock against or fail to reach.
+                loop_inner.clear_forward_warnings();
             }
             // mtime-gated, so this is a no-op stat() call on almost every
             // tick — only re-parses the settings file when it changes.

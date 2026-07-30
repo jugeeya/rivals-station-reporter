@@ -13,7 +13,10 @@ html, body, #app {
 
 body {
   background-color: var(--color-bg);
-  font-family: 'Inter Variable', sans-serif;
+  // Space Grotesk carries the app's character; Inter sits behind it purely as
+  // glyph cover, since player tags are user-entered and Space Grotesk's range
+  // is much narrower than Inter's.
+  font-family: 'Space Grotesk Variable', 'Inter Variable', sans-serif;
 }
 
 .titlebar {

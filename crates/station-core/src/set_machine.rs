@@ -45,7 +45,14 @@ pub struct SetMachine {
     on_change: Option<OnChangeFn>,
     set: Option<OpenSet>,
     history: Vec<Value>,
-    last_game_at: i64,
+    /// When the last game was recorded, for `idle_check`'s elapsed-time math
+    /// only - a `std::time::Instant`, not a wall-clock epoch, so an NTP step
+    /// or a manual clock change mid-set can't corrupt the idle timer (a
+    /// forward jump would otherwise falsely finalize an open set early; a
+    /// backward jump would make the delta negative and idle would never
+    /// fire at all). Nothing here is ever written to an output file, so
+    /// there's no wall-clock meaning to preserve.
+    last_game_at: Option<std::time::Instant>,
 }
 
 impl SetMachine {
@@ -59,7 +66,7 @@ impl SetMachine {
             on_change,
             set: None,
             history: Vec::new(),
-            last_game_at: 0,
+            last_game_at: None,
         })
     }
 
@@ -258,7 +265,7 @@ impl SetMachine {
             set.first_match_start_iso = Some(iso_of(end_epoch));
         }
         set.matches.push(record);
-        self.last_game_at = now_sec();
+        self.last_game_at = Some(std::time::Instant::now());
 
         let set = self.set.as_ref().unwrap();
         let standings: Vec<Value> = set.matches.last().unwrap()["players"]
@@ -361,10 +368,12 @@ impl SetMachine {
     }
 
     pub fn idle_check(&mut self, idle_s: f64) {
-        if self.set.is_some()
-            && self.last_game_at > 0
-            && (now_sec() - self.last_game_at) as f64 > idle_s
-        {
+        // Monotonic elapsed time, not a wall-clock delta - see the comment
+        // on `last_game_at`.
+        let idle_elapsed = self
+            .last_game_at
+            .is_some_and(|t| t.elapsed().as_secs_f64() > idle_s);
+        if self.set.is_some() && idle_elapsed {
             (self.log)("idle timeout - finalizing open set");
             self.finalize(true, None);
         }
@@ -381,10 +390,21 @@ impl SetMachine {
 /// `poll()`). Held until the replay shows up or `PENDING_TIMEOUT_S` elapses.
 struct PendingGame {
     result: GameResult,
-    /// The epoch the game was detected at — used both as the replay-lookup
-    /// anchor and, if nothing else, the timestamp it's eventually recorded
-    /// under.
+    /// The (wall-clock) epoch the game was detected at - used both as the
+    /// replay-lookup anchor (replay filenames encode real local wall-clock
+    /// time, so this has to be real wall-clock time too to compare against
+    /// them) and, if nothing else, the timestamp it's eventually recorded
+    /// under. Left exactly as wall-clock for both those reasons; see
+    /// `detected_at` for the timeout math this used to also be used for.
     at: i64,
+    /// Monotonic capture of the same moment, used ONLY by the
+    /// `PENDING_TIMEOUT_S` safety-valve check in `resolve_pending`. Kept
+    /// separate from `at` rather than replacing it: `at` still has to be a
+    /// real wall-clock epoch for replay matching and for the recorded
+    /// timestamp above, but the "has this been pending too long" question
+    /// must not be corrupted by an NTP step or manual clock change while a
+    /// game is in flight (that could force it through early, or never).
+    detected_at: std::time::Instant,
 }
 
 /// Wires the save/replays to the SetMachine. Call `poll()` each tick.
@@ -494,7 +514,7 @@ impl StatsProducer {
         }
         if force {
             (self.machine.log)(&format!(
-                "no replay matched game at {} within {}s — recording without opponent/GameN (unmatched)",
+                "no replay matched game at {} within {}s, recording without opponent/GameN (unmatched)",
                 pending.at,
                 Self::PENDING_TIMEOUT_S
             ));
@@ -512,7 +532,10 @@ impl StatsProducer {
         let Some(pending) = self.pending.take() else {
             return;
         };
-        let timed_out = now_sec() - pending.at > Self::PENDING_TIMEOUT_S;
+        // Monotonic elapsed time, not a wall-clock delta - see the comment
+        // on `PendingGame::detected_at`.
+        let timed_out = pending.detected_at.elapsed()
+            > std::time::Duration::from_secs(Self::PENDING_TIMEOUT_S as u64);
         if !self.try_record_pending(&pending, timed_out) {
             self.pending = Some(pending); // still waiting
         }
@@ -575,7 +598,11 @@ impl StatsProducer {
             // neither game is silently dropped.
             self.try_record_pending(&prev, true);
         }
-        self.pending = Some(PendingGame { result, at });
+        self.pending = Some(PendingGame {
+            result,
+            at,
+            detected_at: std::time::Instant::now(),
+        });
         // Try to resolve the fresh pending game immediately in case its
         // replay is already sitting on disk (e.g. after a slow poll tick).
         self.resolve_pending();
@@ -852,6 +879,7 @@ mod tests {
         p.pending = Some(PendingGame {
             result: r,
             at: now_sec(),
+            detected_at: std::time::Instant::now(),
         });
 
         p.poll();
@@ -886,6 +914,7 @@ mod tests {
         p.pending = Some(PendingGame {
             result: r,
             at: rep.epoch,
+            detected_at: std::time::Instant::now(),
         });
 
         p.poll(); // replay still missing -> stays pending
@@ -926,7 +955,12 @@ mod tests {
 
         let mut p = producer(&dir, &replays, 180.0);
         let at = now_sec() - StatsProducer::PENDING_TIMEOUT_S - 1;
-        p.pending = Some(PendingGame { result: r, at });
+        p.pending = Some(PendingGame {
+            result: r,
+            at,
+            detected_at: std::time::Instant::now()
+                - std::time::Duration::from_secs(StatsProducer::PENDING_TIMEOUT_S as u64 + 1),
+        });
 
         p.poll(); // no replay, but past the timeout -> forced through
 
@@ -958,13 +992,15 @@ mod tests {
         // idle_s tiny enough that it would fire immediately if not guarded.
         let mut p = producer(&dir, &replays, 0.001);
         p.machine.record_game(&r, Some(&rep), rep.epoch);
-        p.machine.last_game_at = now_sec() - 10; // well past idle_s
+        p.machine.last_game_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(10)); // well past idle_s
 
         // A second game's diff just landed but its replay hasn't yet.
         let r2 = to_game_result(diff(&Map::new(), &g1)).unwrap();
         p.pending = Some(PendingGame {
             result: r2,
             at: now_sec(),
+            detected_at: std::time::Instant::now(),
         });
 
         p.poll(); // idle_s has clearly elapsed, but a game is pending
@@ -1002,6 +1038,7 @@ mod tests {
         p.pending = Some(PendingGame {
             result: r1,
             at: now_sec() - 5,
+            detected_at: std::time::Instant::now(),
         });
         // Directly exercises poll()'s "flush the old pending game first"
         // branch by taking the existing pending game and forcing it through
@@ -1011,6 +1048,7 @@ mod tests {
         p.pending = Some(PendingGame {
             result: r2,
             at: now_sec(),
+            detected_at: std::time::Instant::now(),
         });
 
         assert!(p.machine.has_open_set());
@@ -1023,6 +1061,129 @@ mod tests {
         assert!(
             p.pending.is_some(),
             "the second game is now the one pending"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A clock that has stepped forward (NTP resync, manual correction) must
+    /// not force a pending game through early: `at` (wall clock) looks like
+    /// it happened long ago, but `detected_at` (monotonic, injected here to
+    /// stand in for "the clock jumped after this was captured") shows only
+    /// an instant has really elapsed, so the safety valve must stay quiet.
+    #[test]
+    fn pending_timeout_ignores_a_forward_wall_clock_jump() {
+        let g1 = snap(&[
+            ("A", "Cla", "LOCAL", &[("wins", 1.0)]),
+            ("B", "Kra", "LOCAL", &[("losses", 1.0)]),
+        ]);
+        let r = to_game_result(diff(&Map::new(), &g1)).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("statstest_pend6_{}", std::process::id()));
+        let replays = dir.join("replays"); // left empty - replay never lands
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&replays).unwrap();
+
+        let mut p = producer(&dir, &replays, 180.0);
+        p.pending = Some(PendingGame {
+            result: r,
+            // Wall clock says this happened ages ago (as if the system
+            // clock had jumped forward well past PENDING_TIMEOUT_S since).
+            at: now_sec() - StatsProducer::PENDING_TIMEOUT_S * 100,
+            // But real elapsed time (monotonic) is "just now".
+            detected_at: std::time::Instant::now(),
+        });
+
+        p.poll();
+
+        assert!(
+            p.pending.is_some(),
+            "monotonic elapsed time is tiny, so the timeout must not have fired \
+             even though the wall-clock delta alone would say otherwise"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A clock that has stepped backward must not hide a real timeout: `at`
+    /// (wall clock) looks like it's in the future relative to "now" (as a
+    /// naive `now_sec() - at` would go negative and never exceed the
+    /// timeout), but `detected_at` (monotonic) correctly shows the game has
+    /// really been pending longer than PENDING_TIMEOUT_S, so it must still
+    /// be forced through rather than held forever.
+    #[test]
+    fn pending_timeout_still_fires_after_a_backward_wall_clock_jump() {
+        let g1 = snap(&[
+            ("A", "Cla", "LOCAL", &[("wins", 1.0)]),
+            ("B", "Kra", "LOCAL", &[("losses", 1.0)]),
+        ]);
+        let r = to_game_result(diff(&Map::new(), &g1)).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("statstest_pend7_{}", std::process::id()));
+        let replays = dir.join("replays"); // left empty - replay never lands
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&replays).unwrap();
+
+        let mut p = producer(&dir, &replays, 180.0);
+        p.pending = Some(PendingGame {
+            result: r,
+            // Wall clock looks like it's in the future (as if the system
+            // clock had jumped backward after this was captured) - a naive
+            // `now_sec() - at` here is negative and would never time out.
+            at: now_sec() + 10_000,
+            // But real elapsed time (monotonic) is genuinely well past
+            // PENDING_TIMEOUT_S.
+            detected_at: std::time::Instant::now()
+                - std::time::Duration::from_secs(StatsProducer::PENDING_TIMEOUT_S as u64 + 1),
+        });
+
+        p.poll();
+
+        assert!(
+            p.pending.is_none(),
+            "monotonic elapsed time genuinely exceeds the timeout, so it must \
+             fire despite the wall clock appearing to be in the future"
+        );
+        assert!(p.machine.has_open_set(), "the game was still recorded");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Same wall-clock-jump immunity, for the idle timer: `last_game_at` is
+    /// monotonic, so it cannot be fooled by feeding it a stale-looking
+    /// instant the way the old `now_sec()`-based version could be by an
+    /// actual clock jump.
+    #[test]
+    fn idle_check_uses_monotonic_elapsed_time() {
+        let dir = std::env::temp_dir().join(format!("statstest_idle_mono_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = SetMachine::new(&dir, Box::new(|_| {}), None).unwrap();
+        let g1 = snap(&[
+            ("A", "Cla", "LOCAL", &[("wins", 1.0)]),
+            ("B", "Kra", "LOCAL", &[("losses", 1.0)]),
+        ]);
+        let r = to_game_result(diff(&Map::new(), &g1)).unwrap();
+        let rep = parse_replay_name("2026-07-23_19-00-00-000-A(Cla)-B(Kra)-Game1.rpl").unwrap();
+        m.record_game(&r, Some(&rep), rep.epoch);
+
+        // idle_s generous enough that the file writes record_game() just did
+        // can't possibly have eaten it, but the deliberate backward-shifted
+        // check below is still comfortably past it; a fresh Instant (elapsed
+        // well under a second) must NOT exceed this.
+        m.idle_check(5.0);
+        assert!(
+            m.has_open_set(),
+            "an Instant captured moments ago should not read as idle-elapsed yet"
+        );
+
+        // Now push last_game_at genuinely backward via the monotonic clock
+        // (not a wall-clock trick) and confirm idle_check does fire once
+        // real elapsed time exceeds idle_s.
+        m.last_game_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        m.idle_check(0.001);
+        assert!(
+            !m.has_open_set(),
+            "idle_check should finalize once real elapsed time exceeds idle_s"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

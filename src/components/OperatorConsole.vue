@@ -32,7 +32,7 @@ function key(r: HubRecord): string {
 }
 
 function clock(epoch?: number): string {
-  if (!epoch) return '—';
+  if (!epoch) return '·';
   const d = new Date(epoch * 1000);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
@@ -66,7 +66,7 @@ function matchLabel(r: HubRecord): string {
   // The reason itself is already shown in the round cell (oc-round) for
   // reportable === false rows — don't repeat it here, just mark this cell
   // as clearly absent (the reason is still one hover away, see matchTitle).
-  if (r.reportable === false) return '—';
+  if (r.reportable === false) return '·';
   if (r.candidateWinnerEntrantId) return matchedWinnerName(r);
   const entrants = r.entrants ?? [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -87,10 +87,10 @@ function matchTier(r: HubRecord): 'high' | 'low' | 'none' | 'absent' {
 
 function matchTitle(r: HubRecord): string {
   if (r.reportable === false) {
-    return `${r.notReportableReason || 'not a bracket set'} — not part of the bracket`;
+    return `${r.notReportableReason || 'not a bracket set'}: not part of the bracket`;
   }
   if (r.candidateWinnerEntrantId) {
-    return `Suggested start.gg winner match (confidence: ${r.confidence || 'none'}) — verify before reporting`;
+    return `Suggested start.gg winner match (confidence: ${r.confidence || 'none'}). Verify before reporting`;
   }
   if ((r.entrants ?? []).length) return 'Bracket set found, but no name match for a winner guess';
   return 'Not matched to a start.gg set';
@@ -119,7 +119,7 @@ function onReportPick(r: HubRecord, entrantId: unknown) {
 function onSwap(r: HubRecord) {
   act(
     () => swapPlayers(Number(r.station), String(r.id)),
-    'Players switched — remembered for future sets.',
+    'Players switched. Remembered for future sets.',
   );
 }
 
@@ -160,7 +160,7 @@ function onDelete(r: HubRecord) {
           >{{ matchLabel(r) }}</span>
           <span class="oc-cell oc-score">{{ score(r) }}</span>
           <span class="oc-cell oc-round">
-            {{ r.reportable === false ? (r.notReportableReason || 'not a bracket set') : (r.fullRoundText || '—') }}
+            {{ r.reportable === false ? (r.notReportableReason || 'not a bracket set') : (r.fullRoundText || '·') }}
           </span>
           <span class="oc-cell oc-status" :class="'oc-status--' + (r.status || 'recorded')">{{ r.status || 'recorded' }}</span>
         </div>
@@ -173,7 +173,7 @@ function onDelete(r: HubRecord) {
               class="btn oc-btn"
               :class="{ 'oc-btn--suggested': String(e.id) === String(r.candidateWinnerEntrantId) }"
               :disabled="busy"
-              :title="String(e.id) === String(r.candidateWinnerEntrantId) ? 'Suggested by name match — check before confirming' : ''"
+              :title="String(e.id) === String(r.candidateWinnerEntrantId) ? 'Suggested by name match. Check before confirming' : ''"
               @click="onReportPick(r, e.id)"
             >
               <AppIcon v-if="String(e.id) === String(r.candidateWinnerEntrantId)" name="star" :size="13" />
@@ -195,7 +195,7 @@ function onDelete(r: HubRecord) {
             <button
               class="icon-btn"
               :disabled="busy || r.reportable === false"
-              title="The station guessed who's who backwards — flip it (characters and live score follow)"
+              title="The station guessed who's who backwards. Flip it (characters and live score follow)"
               @click="onSwap(r)"
             >
               <AppIcon name="swap" :size="15" />

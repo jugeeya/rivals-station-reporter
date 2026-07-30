@@ -43,7 +43,7 @@ pub fn event_summary(url_or_slug: &str) -> Result<Value, String> {
         .map_err(|_| "start.gg returned invalid JSON".to_string())?;
     let ev = &out["data"]["event"];
     if ev.is_null() {
-        return Err("No event at that URL — check the link.".into());
+        return Err("No event at that URL. Check the link.".into());
     }
     Ok(json!({
         "slug": slug,

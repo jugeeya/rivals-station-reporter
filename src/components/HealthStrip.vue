@@ -25,14 +25,14 @@ const chips = computed<Chip[]>(() => {
         ? `Watching ${s.health.savePath}`
         : s.health.saveExists
           ? 'Save found but not read yet'
-          : 'Save not found — has Rivals 2 been run on this PC? Fix the path in Settings.',
+          : 'Save not found. Has Rivals 2 been run on this PC? Fix the path in Settings.',
     });
     out.push({
       label: 'Replays',
       ok: s.health.replaysExists,
       detail: s.health.replaysExists
         ? s.health.replaysPath
-        : 'Replays folder not found — timestamps and slots degrade without it.',
+        : 'Replays folder not found. Timestamps and slots degrade without it.',
     });
     out.push({
       label: 'Sending',
@@ -40,22 +40,22 @@ const chips = computed<Chip[]>(() => {
       warn: !cfg.slug,
       detail: cfg.slug
         ? `Reporting to ${s.hubUrl ?? cfg.broker}`
-        : 'No event configured — local scoreboard only, nothing is sent.',
+        : 'No event configured. Local scoreboard only, nothing is sent.',
     });
   }
   if (cfg.mode !== 'station') {
     out.push({
       label: 'Hub',
       ok: !!s.hubUrl,
-      detail: s.hubUrl ? `Serving ${s.hubUrl}` : 'Hub not running — check the log.',
+      detail: s.hubUrl ? `Serving ${s.hubUrl}` : 'Hub not running. Check the log.',
     });
     out.push({
       label: 'start.gg',
       ok: !!cfg.startgg_token,
       warn: !cfg.startgg_token,
       detail: cfg.startgg_token
-        ? 'Token configured — live scores and reports go to the bracket.'
-        : 'No API token — sets are tracked but nothing reaches start.gg.',
+        ? 'Token configured. Live scores and reports go to the bracket.'
+        : 'No API token. Sets are tracked but nothing reaches start.gg.',
     });
   }
   return out;

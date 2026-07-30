@@ -26,7 +26,7 @@ function badge(s: SnapshotSet): string {
 // lookup, not a bracket match. Deliberately styled weaker than the operator
 // console's match cell; see .ss-sgg below.
 function sggTitle(tag: string, sgg: string): string {
-  return `Public tag database: "${tag}" is registered to start.gg @${sgg}. Not a bracket match — just what was submitted.`;
+  return `Public tag database: "${tag}" is registered to start.gg @${sgg}. Not a bracket match, just what was submitted.`;
 }
 </script>
 
@@ -49,7 +49,7 @@ function sggTitle(tag: string, sgg: string): string {
           </template>
         </span>
         <span class="ss-score">{{ s.players.map((p) => p.wins).join('–') }}</span>
-        <span v-if="badge(s)" class="ss-badge" title="Ladder game — never reported to the bracket">{{ badge(s) }}</span>
+        <span v-if="badge(s)" class="ss-badge" title="Ladder game, never reported to the bracket">{{ badge(s) }}</span>
       </li>
     </ul>
   </div>

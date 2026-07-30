@@ -22,7 +22,7 @@ const modeLabel = computed(() =>
 // match cell (which means "found in this bracket"), so it must never borrow
 // that cell's success/warning colors; see .ls-sgg below.
 function sggTitle(tag: string, sgg: string): string {
-  return `Public tag database: "${tag}" is registered to start.gg @${sgg}. Not a bracket match — just what was submitted.`;
+  return `Public tag database: "${tag}" is registered to start.gg @${sgg}. Not a bracket match, just what was submitted.`;
 }
 </script>
 
@@ -32,8 +32,8 @@ function sggTitle(tag: string, sgg: string): string {
       <div class="ls-head">
         <span class="ls-pulse" aria-hidden="true"></span>
         <span class="ls-label">Now playing</span>
-        <span v-if="modeLabel" class="ls-mode" :title="'A ' + modeLabel + ' ladder game — never reported to the bracket'">
-          {{ modeLabel }} — not a bracket set
+        <span v-if="modeLabel" class="ls-mode" :title="'A ' + modeLabel + ' ladder game, never reported to the bracket'">
+          {{ modeLabel }}: not a bracket set
         </span>
         <span class="ls-games">{{ live.games }} game{{ live.games === 1 ? '' : 's' }}</span>
       </div>

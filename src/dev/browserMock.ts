@@ -199,7 +199,7 @@ const handlers: Record<string, (args: any) => any> = {
     if (rec?.set?.players) {
       rec.set.players.forEach((p: any) => (p.slot = p.slot === 0 ? 1 : 0));
       rec.set.players.reverse();
-      log('switched players — remembered for future sets and re-pushed');
+      log('switched players, remembered for future sets and re-pushed');
     }
     return { ok: true, repushed: true };
   },

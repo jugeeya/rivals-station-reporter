@@ -636,7 +636,7 @@ impl Hub {
                 Some(v) if truthy(Some(v)) => py_str(v),
                 _ => "not reportable".to_string(),
             };
-            reason = Some(format!("{why} — logged, not reported"));
+            reason = Some(format!("{why}; logged, not reported"));
         } else if !self.startgg.enabled() {
             reason = Some("no start.gg token".to_string());
         } else if !truthy(rec.get("matchedStartggSetId")) {
@@ -1214,12 +1214,18 @@ fn route_get(hub: &Hub, url: &str) -> (Value, u16) {
         // scan (crate::discovery) uses "app" to confirm this is actually a
         // rivals-station-reporter hub (not just anything answering on the
         // port) and shows "slug" so an auto-connect is never a silent guess.
+        // "serverTime" is also additive: the station's forwarder polls this
+        // endpoint (crate::forwarder::Forwarder::clock_skew_check) to catch
+        // a station system clock that has drifted from the hub's, since
+        // replay matching and idle/pending timeouts all depend on wall
+        // clock agreement between the two machines.
         "health" => (
             json!({
                 "ok": true,
                 "startgg": hub.startgg.enabled(),
                 "app": APP_ID,
                 "slug": hub.event_slug().unwrap_or_default(),
+                "serverTime": now_sec(),
             }),
             200,
         ),

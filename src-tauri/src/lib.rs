@@ -41,7 +41,7 @@ pub fn run() {
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("window icon").clone())
                 .menu(&menu)
-                .tooltip("Rivals Station Reporter — reporting keeps running here")
+                .tooltip("Rivals Station Reporter: reporting keeps running here")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
                         if let Some(win) = app.get_webview_window("main") {

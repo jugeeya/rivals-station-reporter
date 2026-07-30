@@ -59,7 +59,7 @@ const hubs = ref<FoundHub[]>([]);
 
 function hubLabel(h: FoundHub) {
   const event = h.slug || 'no event configured';
-  return `${h.url} — ${event}${h.startgg ? '' : ', no start.gg token'}`;
+  return `${h.url} · ${event}${h.startgg ? '' : ', no start.gg token'}`;
 }
 
 function useHub(h: FoundHub) {
@@ -115,8 +115,8 @@ async function save() {
         <label class="sd-field">
           <span>Mode</span>
           <select v-model="draft.mode" class="sd-input">
-            <option value="station">station — report this PC's games</option>
-            <option value="operator">operator — run the hub + console</option>
+            <option value="station">station: report this PC's games</option>
+            <option value="operator">operator: run the hub + console</option>
             <option value="both">both</option>
           </select>
         </label>
@@ -144,11 +144,11 @@ async function save() {
             Connected to {{ hubLabel(hubs[0]) }}
           </p>
           <p v-else-if="scanned && hubs.length === 0" class="sd-hint sd-hint--warn">
-            No hub found on this network — check the operator is running, or type the address above.
+            No hub found on this network. Check the operator is running, or type the address above.
           </p>
           <template v-else-if="scanned && hubs.length > 1">
             <p class="sd-hint sd-hint--warn">
-              Found {{ hubs.length }} hubs — pick the right one:
+              Found {{ hubs.length }} hubs. Pick the right one:
             </p>
             <button
               v-for="h in hubs"
@@ -163,7 +163,7 @@ async function save() {
         </div>
 
         <label class="sd-field">
-          <span>Shared key (must match the operator's — required to send)</span>
+          <span>Shared key (must match the operator's; required to send)</span>
           <input v-model="draft.key" type="password" class="sd-input" autocomplete="off" />
         </label>
 
@@ -207,13 +207,18 @@ async function save() {
             <input v-model.number="draft.hub_port" type="number" min="1" max="65535" class="sd-input sd-input--num" />
           </label>
           <label class="sd-check">
-            <input v-model="draft.dry_run" type="checkbox" />
-            <span>Dry run — log what would be sent instead of sending it</span>
+            <input v-model="draft.dry_run" type="checkbox" class="sd-checkbox" />
+            <span>Dry run: log what would be sent instead of sending it</span>
           </label>
         </details>
 
         <label class="sd-check">
-          <input type="checkbox" :checked="autostart" @change="toggleAutostart" />
+          <input
+            type="checkbox"
+            class="sd-checkbox"
+            :checked="autostart"
+            @change="toggleAutostart"
+          />
           <span>Start with Windows (applies immediately)</span>
         </label>
 
@@ -262,19 +267,24 @@ async function save() {
 .sd-body {
   flex: 1;
   overflow-y: auto;
-  padding: 0.5rem 1.25rem;
+  padding: 0.75rem 1.25rem 1rem;
   display: flex;
   flex-direction: column;
-  gap: 0.8rem;
+  // Has to clearly beat .sd-field's own 0.4rem label-to-input gap, or each
+  // label reads as belonging to the field above it instead of below.
+  gap: 1.3rem;
 }
 
 .sd-field {
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
+  gap: 0.4rem;
   font-size: 0.8rem;
 
-  > span { color: var(--text-muted); }
+  > span {
+    color: var(--text-muted);
+    line-height: 1.35;
+  }
 }
 
 .sd-row { display: flex; gap: 0.35rem; }
@@ -297,17 +307,75 @@ async function save() {
 
 .sd-check {
   display: flex;
-  align-items: center;
-  gap: 0.5rem;
+  // Not `center`: these labels wrap to two lines at this drawer width, and
+  // centring then floats the box against the middle of the text block.
+  align-items: flex-start;
+  gap: 0.55rem;
   font-size: 0.8rem;
+  line-height: 1.35;
   color: var(--text-muted);
+  cursor: pointer;
+
+  > span { padding-top: 0.05rem; }
+}
+
+// The native control ignores the dark theme and renders as a stock white
+// Windows checkbox, which is the one unstyled thing left in the drawer.
+.sd-checkbox {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 0.25em;
+  background: rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  display: grid;
+  place-content: center;
+  transition: background 0.12s ease, border-color 0.12s ease;
+
+  // Drawn rather than a glyph so it scales with the box and needs no font.
+  &::before {
+    content: '';
+    width: 0.55rem;
+    height: 0.3rem;
+    border-left: 2px solid var(--color-bg);
+    border-bottom: 2px solid var(--color-bg);
+    transform: rotate(-45deg) translate(0.03rem, -0.04rem);
+    opacity: 0;
+  }
+
+  &:hover { border-color: rgba(255, 255, 255, 0.25); }
+
+  // Longhand, not the `background` shorthand: only the colour should change
+  // here, and the shorthand would also reset background-image/position.
+  &:checked {
+    background-color: var(--text-success);
+    border-color: var(--text-success);
+
+    &::before { opacity: 1; }
+  }
+
+  &:focus-visible {
+    outline: 2px solid rgba(99, 102, 241, 0.6);
+    outline-offset: 1px;
+  }
 }
 
 .sd-advanced {
-  summary { cursor: pointer; font-size: 0.8rem; color: var(--text-muted); }
   display: flex;
   flex-direction: column;
-  gap: 0.8rem;
+  gap: 1.3rem;
+
+  summary {
+    cursor: pointer;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    // `gap` alone leaves the disclosure arrow sitting tight on the first
+    // field once the section is open.
+    margin-bottom: 0.15rem;
+  }
 }
 
 .sd-err { margin: 0; color: var(--text-failure); font-size: 0.8rem; }

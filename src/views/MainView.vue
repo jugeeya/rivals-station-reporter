@@ -78,7 +78,7 @@ async function copyHubUrl() {
           {{ state.s.status.msg }}
         </span>
         <span class="mv-ago">· {{ statusAgo }}</span>
-        <span class="mv-event">{{ cfg.slug || 'no event — local scoreboard' }}</span>
+        <span class="mv-event">{{ cfg.slug || 'no event, local scoreboard' }}</span>
       </footer>
     </div>
 

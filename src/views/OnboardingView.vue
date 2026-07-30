@@ -26,7 +26,7 @@ const MODES = [
   {
     id: 'both' as const,
     title: 'Both',
-    desc: 'One PC doing both jobs — plays games and runs the hub.',
+    desc: 'One PC doing both jobs: plays games and runs the hub.',
     icons: ['gamepad', 'rows'],
   },
 ];
@@ -127,7 +127,7 @@ async function finish() {
         </div>
 
         <div class="ob-field">
-          <label>start.gg event <span class="ob-opt">(optional — without one it's a local scoreboard)</span></label>
+          <label>start.gg event <span class="ob-opt">(optional; without one it's a local scoreboard)</span></label>
           <div class="ob-row">
             <input
               v-model="eventUrl"
@@ -142,7 +142,7 @@ async function finish() {
           </div>
           <p v-if="eventInfo" class="ob-help ob-help--ok">
             <AppIcon name="check" :size="13" />
-            {{ eventInfo.tournament }} — {{ eventInfo.name }}
+            {{ eventInfo.tournament }} · {{ eventInfo.name }}
             <template v-if="eventInfo.entrants != null"> · {{ eventInfo.entrants }} entrants</template>
           </p>
           <p v-else-if="eventError" class="ob-help ob-help--err">{{ eventError }}</p>
@@ -151,16 +151,16 @@ async function finish() {
         <div v-if="mode === 'station'" class="ob-field">
           <label>Hub / broker URL</label>
           <input v-model="brokerUrl" type="text" class="ob-input" placeholder="http://192.168.…:8787 (from the operator's screen)" />
-          <p class="ob-help">Shown big on the operator's screen — or leave the cloud broker default.</p>
+          <p class="ob-help">Shown big on the operator's screen, or leave the cloud broker default.</p>
         </div>
 
         <div class="ob-field">
-          <label>Shared key <span class="ob-opt">(required to send — ask whoever runs the event)</span></label>
+          <label>Shared key <span class="ob-opt">(required to send; ask whoever runs the event)</span></label>
           <input v-model="key" type="password" class="ob-input" autocomplete="off" />
         </div>
 
         <div v-if="isOperator" class="ob-field">
-          <label>start.gg API token <span class="ob-opt">(operator only — stays on this machine)</span></label>
+          <label>start.gg API token <span class="ob-opt">(operator only; stays on this machine)</span></label>
           <input v-model="token" type="password" class="ob-input" autocomplete="off" />
         </div>
 
@@ -178,7 +178,7 @@ async function finish() {
             <span class="ob-detect-path" :title="paths.replays">{{ paths.replays }}</span>
           </div>
           <p v-if="!paths.saveExists" class="ob-help ob-help--warn">
-            Save not found — has Rivals 2 been run on this PC? (Paths can be changed later in Settings.)
+            Save not found. Has Rivals 2 been run on this PC? (Paths can be changed later in Settings.)
           </p>
         </div>
 

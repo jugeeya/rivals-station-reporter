@@ -2,7 +2,7 @@
 // Everything editable after setup — same fields as onboarding plus the paths
 // and tuning knobs. Saving hot-rebuilds the engine; nothing needs a restart.
 
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { invoke } from '@tauri-apps/api/core';
 import { state, saveConfig } from '../lib/engine';
@@ -84,6 +84,51 @@ async function findHubs() {
     err.value = String(e);
   } finally {
     scanning.value = false;
+  }
+}
+
+// ---- updates -----------------------------------------------------------------
+// Checking is automatic-safe, installing is not: this app runs live during
+// brackets and relaunching mid-set would drop the window (and, before the
+// journal existed, the set with it). So the check is one click and the install
+// is a second, explicitly blocked while a set is open.
+
+const updateState = ref<'idle' | 'checking' | 'none' | 'found' | 'installing'>('idle');
+const updateVersion = ref('');
+let pendingUpdate: { downloadAndInstall: () => Promise<void> } | null = null;
+
+const setInProgress = computed(() => state.s.snapshot.live != null);
+
+async function checkUpdate() {
+  updateState.value = 'checking';
+  err.value = '';
+  try {
+    const { check } = await import('@tauri-apps/plugin-updater');
+    const up = await check();
+    if (up) {
+      pendingUpdate = up;
+      updateVersion.value = up.version;
+      updateState.value = 'found';
+    } else {
+      updateState.value = 'none';
+    }
+  } catch (e) {
+    err.value = String(e);
+    updateState.value = 'idle';
+  }
+}
+
+async function installUpdate() {
+  if (!pendingUpdate) return;
+  updateState.value = 'installing';
+  err.value = '';
+  try {
+    await pendingUpdate.downloadAndInstall();
+    const { relaunch } = await import('@tauri-apps/plugin-process');
+    await relaunch();
+  } catch (e) {
+    err.value = String(e);
+    updateState.value = 'found';
   }
 }
 
@@ -221,6 +266,40 @@ async function save() {
           />
           <span>Start with Windows (applies immediately)</span>
         </label>
+
+        <div class="sd-field">
+          <span>Updates</span>
+          <div class="sd-row">
+            <button
+              class="btn sd-find"
+              :disabled="updateState === 'checking' || updateState === 'installing'"
+              @click="checkUpdate"
+            >
+              {{ updateState === 'checking' ? 'Checking…' : 'Check for updates' }}
+            </button>
+            <button
+              v-if="updateState === 'found' || updateState === 'installing'"
+              class="btn btn-primary sd-find"
+              :disabled="setInProgress || updateState === 'installing'"
+              @click="installUpdate"
+            >
+              {{ updateState === 'installing' ? 'Installing…' : `Install ${updateVersion}` }}
+            </button>
+          </div>
+          <p v-if="updateState === 'none'" class="sd-hint sd-hint--ok">
+            You are on the latest version.
+          </p>
+          <p v-else-if="updateState === 'found' && setInProgress" class="sd-hint sd-hint--warn">
+            Version {{ updateVersion }} is available, but a set is in progress. Installing
+            restarts the app, so finish the set first.
+          </p>
+          <p v-else-if="updateState === 'found'" class="sd-hint sd-hint--ok">
+            Version {{ updateVersion }} is available. Installing restarts the app.
+          </p>
+          <p v-else-if="updateState === 'installing'" class="sd-hint">
+            Downloading and installing, the app will restart itself.
+          </p>
+        </div>
 
         <p v-if="err" class="sd-err">{{ err }}</p>
       </div>

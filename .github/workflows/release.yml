@@ -84,11 +84,21 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the update artifacts. Installed stations refuse an update
+          # whose signature does not verify against the public key baked into
+          # tauri.conf.json, so without this secret a tagged build produces a
+          # latest.json nothing will accept.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
         with:
           tagName: ${{ steps.mode.outputs.tag }}
           releaseName: Rivals Station Reporter ${{ steps.mode.outputs.tag }}
           releaseBody: 'See the commit log for changes.'
-          releaseDraft: true
+          # Published, not draft: the updater resolves /releases/latest, and a
+          # draft is not "latest" to anyone, so a drafted release would never
+          # reach a station. Tagging is therefore the act of shipping; untagged
+          # pushes still only produce workflow artifacts.
+          releaseDraft: false
 
       # Untagged runs have nowhere to attach the installers, so keep them on
       # the run page instead. Globbed rather than read from the action's

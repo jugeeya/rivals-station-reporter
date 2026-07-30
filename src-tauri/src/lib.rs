@@ -27,6 +27,11 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // Updating N station PCs by hand mid-bracket is the thing this is
+        // meant to avoid. `process` is what lets the app relaunch itself once
+        // an update has been installed.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let config_dir = app.path().app_config_dir().expect("app config dir");
             let engine = engine::start(app.handle().clone(), config_dir);

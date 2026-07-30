@@ -178,6 +178,40 @@ struct HubState {
 /// A hub with no slug configured (`None`) is left unscoped rather than
 /// filtered to nothing — it has nothing to scope *to*, and a
 /// local-scoreboard-only hub still needs to show its sets.
+/// The slot to entrant pairing as `[{slot, entrantId, entrantName}]`, for the
+/// console to render per player. `Null` when there is nothing to pair against
+/// (no bracket set bound, or not two of each), which the UI shows as unknown
+/// rather than inventing a guess.
+fn slot_entrants(
+    summary: &Value,
+    entrants: Option<&Value>,
+    tag_map: &HashMap<String, String>,
+) -> Value {
+    let Some(entrants) = entrants.filter(|e| truthy(Some(e))) else {
+        return Value::Null;
+    };
+    let probe = json!({ "set": summary, "entrants": entrants });
+    let Some(map) = matching::map_slots_to_entrants(&probe, None, Some(tag_map)) else {
+        return Value::Null;
+    };
+    let by_id = |id: &str| -> Value {
+        entrants
+            .as_array()
+            .and_then(|es| {
+                es.iter()
+                    .find(|e| e["id"].to_string().trim_matches('"') == id)
+            })
+            .and_then(|e| e.get("name").cloned())
+            .unwrap_or(Value::Null)
+    };
+    let mut rows: Vec<Value> = map
+        .iter()
+        .map(|(slot, eid)| json!({"slot": slot, "entrantId": eid, "entrantName": by_id(eid)}))
+        .collect();
+    rows.sort_by_key(|r| r["slot"].as_i64().unwrap_or(0));
+    json!(rows)
+}
+
 fn snapshot_of(s: &HubState, event_slug: Option<&str>) -> Value {
     let buckets = |m: &Map<String, Value>| -> Vec<Value> {
         match event_slug {
@@ -566,6 +600,14 @@ impl Hub {
             "startggState": sg.get("state"),
             "reportable": reason.is_none(),
             "notReportableReason": reason.clone(),
+            // Which in-game slot the hub believes is which bracket entrant.
+            // The console cannot work this out for itself: its only other
+            // handle is candidateWinnerEntrantId, which needs a set winner,
+            // so a set still in progress would show every player as unknown
+            // even though the pairing is already known here. Same call the
+            // report path uses, so what the operator sees is what would be
+            // sent.
+            "slotEntrants": slot_entrants(&summary, sg.get("entrants"), &s.tag_map),
         });
         // Not a tournament game, or the match isn't underway yet: keep the
         // record (the operator still wants to see it) but don't let it borrow
@@ -1404,6 +1446,48 @@ mod tests {
 
     const SLUG: &str = "tournament/the-hangout-4-1/event/rivals-of-aether-ii-singles";
     const KEY: &str = "thehangout2026!";
+
+    /// A set still being played resolves its slot to entrant pairing.
+    ///
+    /// This is the case the console could not derive for itself: with no set
+    /// winner there is no candidateWinnerEntrantId to anchor on, so before
+    /// this every player in a live set displayed as unknown even though the
+    /// hub already knew the pairing well enough to report it.
+    #[test]
+    fn slot_entrants_resolve_for_a_set_with_no_winner_yet() {
+        let summary = json!({
+            "complete": false, "winnerName": Value::Null,
+            "players": [
+                {"slot": 0, "name": "BRUJITA", "character": "Maypul", "wins": 2},
+                {"slot": 1, "name": "JUGZ!", "character": "Clairen", "wins": 1},
+            ],
+        });
+        let entrants = json!([{"id": "E3", "name": "Brujita"}, {"id": "E1", "name": "jugeeya"}]);
+        let tag_map = matching::build_tag_map(Some(&json!({"JUGZ!": "jugeeya"})));
+
+        let got = slot_entrants(&summary, Some(&entrants), &tag_map);
+        assert_eq!(
+            got,
+            json!([
+                {"slot": 0, "entrantId": "E3", "entrantName": "Brujita"},
+                {"slot": 1, "entrantId": "E1", "entrantName": "jugeeya"},
+            ]),
+            "both slots pair, ordered by slot"
+        );
+    }
+
+    /// No bracket set bound means nothing to pair against. Null rather than a
+    /// fabricated pairing, so the console can say it does not know.
+    #[test]
+    fn slot_entrants_are_null_without_entrants() {
+        let summary = json!({"players": [{"slot": 0, "name": "A"}, {"slot": 1, "name": "B"}]});
+        let tag_map = HashMap::new();
+        assert_eq!(slot_entrants(&summary, None, &tag_map), Value::Null);
+        assert_eq!(
+            slot_entrants(&summary, Some(&json!([])), &tag_map),
+            Value::Null
+        );
+    }
 
     /// The real set, as the station writes it (REAL_SET in test_hub.py).
     fn real_set() -> Value {

@@ -132,10 +132,30 @@ export function matchTitle(r: HubRecord): string {
  * other slot is forced onto the other entrant -- the same anchoring
  * `map_slots_to_entrants` does when finalizing a report (matching.rs L336+),
  * not a guess invented here. */
+/** One entry of the hub's `slotEntrants`: which bracket entrant it believes
+ *  an in-game slot is. Sent by `slot_entrants` in hub.rs. */
+interface SlotEntrant {
+  slot: number;
+  entrantId: string;
+  entrantName: string | null;
+}
+
 export function mappingRows(r: HubRecord): MappingRow[] | null {
   const ps = players(r);
   const es = entrants(r);
   if (ps.length !== 2) return null;
+  // The hub's own pairing, when it sent one. Preferred over anything derived
+  // here because it comes from the same call the report path uses, and
+  // because it exists for live sets, which the winner-anchored fallback below
+  // cannot resolve at all.
+  const sent = r.slotEntrants as SlotEntrant[] | undefined;
+  if (Array.isArray(sent) && sent.length) {
+    const bySlot = new Map(sent.map((m) => [m.slot, m]));
+    return ps.map((p) => ({
+      tag: p.name ?? '?',
+      entrant: bySlot.get(p.slot as number)?.entrantName ?? null,
+    }));
+  }
   if (es.length === 2 && r.candidateWinnerEntrantId != null) {
     const winnerSlot = r.set?.winnerSlot;
     const winnerEntrant = es.find((e) => String(e.id) === String(r.candidateWinnerEntrantId));

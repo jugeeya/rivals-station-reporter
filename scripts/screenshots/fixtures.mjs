@@ -175,6 +175,10 @@ const station1Record = {
     { id: 'E1', name: 'jugeeya' },
     { id: 'E2', name: 'Kimchi' },
   ],
+  slotEntrants: [
+    { slot: 0, entrantId: 'E1', entrantName: 'jugeeya' },
+    { slot: 1, entrantId: 'E2', entrantName: 'Kimchi' },
+  ],
   candidateWinnerEntrantId: null,
   confidence: 'none',
   status: 'live',
@@ -215,6 +219,10 @@ const station2Record = {
   entrants: [
     { id: 'E3', name: 'Brujita' },
     { id: 'E1', name: 'jugeeya' },
+  ],
+  slotEntrants: [
+    { slot: 0, entrantId: 'E3', entrantName: 'Brujita' },
+    { slot: 1, entrantId: 'E1', entrantName: 'jugeeya' },
   ],
   candidateWinnerEntrantId: null,
   confidence: 'none',
@@ -262,6 +270,10 @@ const station3Record = {
   entrants: [
     { id: 'E4', name: 'Loom' },
     { id: 'E2', name: 'Kimchi' },
+  ],
+  slotEntrants: [
+    { slot: 0, entrantId: 'E4', entrantName: 'Loom' },
+    { slot: 1, entrantId: 'E2', entrantName: 'Kimchi' },
   ],
   candidateWinnerEntrantId: 'E4',
   confidence: 'high',

@@ -1,6 +1,6 @@
 [package]
 name = "rivals-station-reporter"
-version = "0.4.2"
+version = "0.4.3"
 description = "Rivals Station Reporter: watches Rivals 2 on a tournament station and reports sets live"
 edition = "2021"
 

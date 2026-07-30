@@ -37,10 +37,29 @@ Sample data below, not a live event: a station waiting between sets, a
 station mid-set, the operator console watching three stations at once, and
 Settings open. Regenerate these with `pnpm screenshots` (see Development).
 
-| | |
-| --- | --- |
-| ![Station, idle between sets](docs/screenshots/station-idle.png) A station between sets: health checks green, waiting for the next game, two finished sets already logged (one local, one online ladder game that's greyed out since it never reaches the bracket). | ![Station, set in progress](docs/screenshots/station-live.png) A station mid-set: live score, both tags, current characters, and the online/ranked note when it applies. |
-| ![Operator console, three stations](docs/screenshots/operator-console.png) The operator console: three stations at once, each set's bracket round and best-guess start.gg match, Report/Switch/Delete per row. | ![Settings drawer open](docs/screenshots/settings.png) Settings: mode, event, hub/broker, paths, and update check, all editable without restarting. |
+![Station, idle between sets](docs/screenshots/station-idle.png)
+
+A station between sets: health checks green, waiting for the next game, two
+finished sets already logged (one local, one online ladder game that's
+greyed out since it never reaches the bracket).
+
+![Station, set in progress](docs/screenshots/station-live.png)
+
+A station mid-set: live score, both tags, current characters, and the
+online/ranked note when it applies.
+
+![Operator console, three stations](docs/screenshots/operator-console.png)
+
+The operator console watching three stations at once: live sets grouped
+separately from finished-and-unreported ones, elapsed time against an
+absolute clock, best-of shown next to the score, a per-game character strip
+with the winner marked, and the tag-to-entrant mapping the hub would actually
+report, per player.
+
+![Settings drawer open](docs/screenshots/settings.png)
+
+Settings: mode, event, hub/broker (with LAN auto-discovery), paths, and the
+update checker, all editable without restarting.
 
 ## Install
 

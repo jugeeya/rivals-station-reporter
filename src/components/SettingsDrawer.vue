@@ -109,10 +109,12 @@ async function findHubs() {
 }
 
 // ---- updates -----------------------------------------------------------------
-// Checking is automatic-safe, installing is not: this app runs live during
-// brackets and relaunching mid-set would drop the window (and, before the
-// journal existed, the set with it). So the check is one click and the install
-// is a second, explicitly blocked while a set is open.
+// Installing relaunches the app, which was previously refused while a set was
+// open because the in-progress set only existed in memory and would have been
+// lost. The open set is journalled to disk now and resumes on startup, well
+// inside the staleness bound, so a mid-set update is safe and the block is
+// gone. Installing is still a deliberate second click rather than automatic:
+// dropping the window unannounced during a bracket is its own problem.
 
 const updateState = ref<'idle' | 'checking' | 'none' | 'found' | 'installing'>('idle');
 const updateVersion = ref('');
@@ -302,7 +304,7 @@ async function save() {
             <button
               v-if="updateState === 'found' || updateState === 'installing'"
               class="btn btn-primary sd-find"
-              :disabled="setInProgress || updateState === 'installing'"
+              :disabled="updateState === 'installing'"
               @click="installUpdate"
             >
               {{ updateState === 'installing' ? 'Installing…' : `Install ${updateVersion}` }}
@@ -312,9 +314,9 @@ async function save() {
           <p v-else-if="updateState === 'none'" class="sd-hint sd-hint--ok">
             {{ currentVersion ? `${currentVersion} is the latest version.` : 'You are on the latest version.' }}
           </p>
-          <p v-else-if="updateState === 'found' && setInProgress" class="sd-hint sd-hint--warn">
-            Version {{ updateVersion }} is available, but a set is in progress. Installing
-            restarts the app, so finish the set first.
+          <p v-else-if="updateState === 'found' && setInProgress" class="sd-hint sd-hint--ok">
+            Version {{ updateVersion }} is available. A set is in progress; installing restarts
+            the app but the set is journalled and resumes.
           </p>
           <p v-else-if="updateState === 'found'" class="sd-hint sd-hint--ok">
             Version {{ updateVersion }} is available. Installing restarts the app.

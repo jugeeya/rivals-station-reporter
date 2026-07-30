@@ -166,17 +166,44 @@ struct HubState {
 /// Everything the operator UI renders, newest set first. (A free function so
 /// `_touch` can build it while already holding the lock — Python's RLock made
 /// the reentrant `self.snapshot()` call safe there.)
-fn snapshot_of(s: &HubState) -> Value {
+///
+/// Scoped to `event_slug`, the event this hub is configured for. Both maps
+/// are keyed by slug and `hub-state.json` is never pruned, so without this an
+/// install reused across events shows every set it has ever seen mixed into
+/// the current bracket's console. `stations` additionally has to be flattened
+/// out of its slug bucket: the UI keys it by station number, so handing it
+/// the raw `{slug: {station: rec}}` map made it render slugs where station
+/// numbers belong.
+///
+/// A hub with no slug configured (`None`) is left unscoped rather than
+/// filtered to nothing — it has nothing to scope *to*, and a
+/// local-scoreboard-only hub still needs to show its sets.
+fn snapshot_of(s: &HubState, event_slug: Option<&str>) -> Value {
+    let buckets = |m: &Map<String, Value>| -> Vec<Value> {
+        match event_slug {
+            Some(slug) => m.get(slug).cloned().into_iter().collect(),
+            None => m.values().cloned().collect(),
+        }
+    };
+
     let mut out: Vec<Value> = Vec::new();
-    for bucket in s.sets.values() {
+    for bucket in buckets(&s.sets) {
         if let Some(b) = bucket.as_object() {
-            for rec in b.values() {
-                out.push(rec.clone());
-            }
+            out.extend(b.values().cloned());
         }
     }
     out.sort_by_key(|b| std::cmp::Reverse(ingested(b)));
-    json!({"version": s.version, "sets": out, "stations": Value::Object(s.stations.clone())})
+
+    let mut stations = Map::new();
+    for bucket in buckets(&s.stations) {
+        if let Some(b) = bucket.as_object() {
+            for (station, rec) in b {
+                stations.insert(station.clone(), rec.clone());
+            }
+        }
+    }
+
+    json!({"version": s.version, "sets": out, "stations": Value::Object(stations)})
 }
 
 /// Python `Hub._set_bucket`: `self.sets.setdefault(slug, {})`.
@@ -386,7 +413,7 @@ impl Hub {
         s.version += 1;
         self.save(s);
         if let Some(cb) = &self.on_change {
-            let snap = snapshot_of(s);
+            let snap = snapshot_of(s, self.event_slug().as_deref());
             // Python: try/except pass — an operator-UI error never stops the hub.
             let _ = catch_unwind(AssertUnwindSafe(|| cb(&snap)));
         }
@@ -707,8 +734,11 @@ impl Hub {
 
     /// Everything the operator UI renders, newest set first.
     pub fn snapshot(&self) -> Value {
+        // `event_slug` is a separate mutex from `state`, so taking it while
+        // holding the state lock can't deadlock against `touch` doing the same.
+        let slug = self.event_slug();
         let s = self.state.lock().unwrap();
-        snapshot_of(&s)
+        snapshot_of(&s, slug.as_deref())
     }
 
     pub fn get_set(&self, slug: &str, station: i64, set_id: &Value) -> Option<Value> {
@@ -1552,11 +1582,13 @@ mod tests {
         assert!(r.status().is_success());
         let snap = h.snapshot();
         assert!(
-            !snap["stations"][SLUG]["1"].is_null(),
+            // Keyed by station number, not by slug: the snapshot is already
+            // scoped to one event, and the console indexes stations by number.
+            !snap["stations"]["1"].is_null(),
             "station heartbeat reached the hub"
         );
         assert_eq!(
-            snap["stations"][SLUG]["1"]["startgg"]["setId"],
+            snap["stations"]["1"]["startgg"]["setId"],
             json!(105639152),
             "set_start pre-bound the start.gg set + entrants"
         );
@@ -1702,6 +1734,31 @@ mod tests {
             1,
             "state survives a hub restart"
         );
+
+        // ---- the console is scoped to the event this hub is running ----------
+        // hub-state.json accumulates every event an install has ever run and is
+        // never pruned, so an unscoped console showed last week's bracket mixed
+        // into this week's.
+        h.handle_ingest("some-other-event", 9, &real_set()).unwrap();
+        let all = h.snapshot()["sets"].as_array().unwrap().len();
+        h.set_event_slug(SLUG);
+        let scoped = h.snapshot();
+        assert_eq!(
+            scoped["sets"].as_array().unwrap().len(),
+            all - 1,
+            "the other event's set is not in this event's console"
+        );
+        assert!(
+            scoped["stations"]["9"].is_null() && !scoped["stations"]["1"].is_null(),
+            "stations are scoped to this event too, and keyed by number"
+        );
+        h.set_event_slug("");
+        assert_eq!(
+            h.snapshot()["sets"].as_array().unwrap().len(),
+            all,
+            "a hub with no event configured has nothing to scope to, so shows everything"
+        );
+        h.set_event_slug(SLUG);
 
         // ---- key gate --------------------------------------------------------
         assert!(

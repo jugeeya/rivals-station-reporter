@@ -456,6 +456,11 @@ button:focus-visible {
   --surface:        rgba(179, 179, 179, 0.10);
   --surface-hover:  rgba(255, 255, 255, 0.15);
   --surface-inset:  rgba(0, 0, 0, 0.28);
+  // `--surface` composited over `--color-bg`, as an opaque colour: identical
+  // on screen, but for anything that has to OCCLUDE what's behind it rather
+  // than tint it. A 10%-opacity panel laid over the app's own content reads
+  // as a rendering glitch, not as a translucency effect.
+  --surface-solid:  #1e1d32;
 
   // Accent
   --accent:         rgba(99, 102, 241, 0.80);

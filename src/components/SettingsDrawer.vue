@@ -242,7 +242,9 @@ async function save() {
 .sd {
   width: min(26rem, 92vw);
   height: 100%;
-  background: var(--surface);
+  // Opaque: this sits over live app content, and the translucent --surface
+  // let the console's set rows and buttons show through the fields.
+  background: var(--surface-solid);
   border-left: 1px solid var(--line);
   display: flex;
   flex-direction: column;

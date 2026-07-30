@@ -99,7 +99,13 @@ pub fn default_settings_path() -> PathBuf {
 /// game runs under Proton there; its "AppData" is a Windows-shaped tree
 /// inside a Proton compatibility prefix keyed by this ID, not a real user
 /// profile.
-const RIVALS2_APPID: &str = "217000";
+///
+/// Verified against a real Steam install's appmanifest_2217000.acf, which
+/// names it "Rivals of Aether II". This was briefly 217000, one digit short,
+/// copied from the tag tool's setup docs; that pointed at a compatdata folder
+/// that never exists, so Linux and Steam Deck detection silently found
+/// nothing and fell back to the "not found" path.
+const RIVALS2_APPID: &str = "2217000";
 
 fn rivals2_saved_dir() -> PathBuf {
     // `if cfg!(...)` rather than `#[cfg(...)]` on this fn: both branches stay
@@ -380,11 +386,14 @@ mod linux_saved_dir_tests {
     fn candidates_probe_the_default_root_before_any_libraryfolders_entries() {
         let home = PathBuf::from("/home/deck");
         let candidates = linux_saved_dir_candidates(&home);
+        // Built from RIVALS2_APPID rather than a literal: a hardcoded id here
+        // would happily agree with a wrong one in production, which is exactly
+        // how the earlier 217000 typo survived its own test.
         assert_eq!(
             candidates[0],
-            PathBuf::from(
-                "/home/deck/.local/share/Steam/steamapps/compatdata/217000/pfx/drive_c/users/steamuser/AppData/Local/Rivals2/Saved"
-            )
+            PathBuf::from(format!(
+                "/home/deck/.local/share/Steam/steamapps/compatdata/{RIVALS2_APPID}/pfx/drive_c/users/steamuser/AppData/Local/Rivals2/Saved"
+            ))
         );
     }
 
@@ -409,7 +418,7 @@ mod linux_saved_dir_tests {
         let saved_dir = sdcard
             .join("steamapps")
             .join("compatdata")
-            .join("217000")
+            .join(RIVALS2_APPID)
             .join("pfx")
             .join("drive_c")
             .join("users")

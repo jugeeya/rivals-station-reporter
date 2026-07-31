@@ -5,11 +5,18 @@ name: Release
 # so there is always a fresh downloadable build without having to cut a tag
 # first.
 #
-# Tagging only changes what happens to the output:
+# What triggered the run decides where the output goes:
 #   * pushed tag v*  -> a draft release while the three platform jobs upload,
 #     published only once all three have finished (see publish-release below)
-#   * anything else  -> uploaded as workflow artifacts on the run page
-#     (retained 14 days, not public, nothing published)
+#   * push to main   -> the rolling "beta" PRE-release: prepare-beta deletes
+#     and recreates the beta release at this commit, then the platform jobs
+#     upload installers into it. Prereleases never appear at
+#     /releases/latest, so the installed apps' updater (which reads
+#     releases/latest/download/latest.json) never sees beta builds — and no
+#     updater artifacts are built for them anyway (base config, no signing
+#     needed).
+#   * PRs / manual runs with no tag -> uploaded as workflow artifacts on the
+#     run page (retained 14 days, not public, nothing published)
 #
 # Why the release starts as a draft even though tagging is meant to ship:
 # the three OS jobs run in parallel and each merges its own platform entries
@@ -35,8 +42,47 @@ on:
         description: 'Tag to release, e.g. v0.1.0 (blank = build only, no release)'
         required: false
 
+# One run at a time per ref: two quick pushes to main would otherwise race
+# each other at the beta release (delete/recreate/upload interleaving).
+# Superseded runs are cancelled — the newer commit's build replaces them.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Rolling beta: move the `beta` tag to this commit and start from an empty
+  # release, so it never mixes this build's installers with a previous
+  # build's (asset names carry the version, so a version bump would
+  # otherwise leave both generations listed side by side). Deleting is safe
+  # for the same reason the whole channel is: it's a prerelease, invisible
+  # to /releases/latest and the updater. Running BEFORE the build matrix
+  # also means the release already exists when three tauri-action jobs go
+  # looking for it, so they never race each other to create it.
+  prepare-beta:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Reset the beta release to this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete beta -y --cleanup-tag --repo '${{ github.repository }}' || true
+          gh release create beta \
+            --target '${{ github.sha }}' \
+            --prerelease \
+            --title 'Rivals Station Reporter beta (rolling)' \
+            --notes 'Rolling pre-release, rebuilt on every push to main (currently ${{ github.sha }}). Grab installers here to try what has landed since the last real release; installed apps never auto-update to these.' \
+            --repo '${{ github.repository }}'
+
   build:
+    # Waits on prepare-beta when it ran (push to main); for tags, PRs and
+    # manual runs that job is skipped, and `!cancelled()` + accepting the
+    # 'skipped' result lets the build proceed anyway — a bare `needs` would
+    # skip the whole matrix along with it.
+    needs: prepare-beta
+    if: ${{ !cancelled() && (needs.prepare-beta.result == 'success' || needs.prepare-beta.result == 'skipped') }}
     # tauri-action creates the release, which the default read-only GITHUB_TOKEN
     # can't do — without this the build succeeds and then 403s at the upload.
     permissions:
@@ -80,18 +126,26 @@ jobs:
 
       - run: pnpm install
 
-      # One place decides "is this a release run?", so the build step below
-      # stays a single invocation instead of two near-identical copies.
-      # tauri-action skips creating a release entirely when tagName is empty.
+      # One place decides what kind of run this is, so the build step below
+      # stays a single invocation instead of three near-identical copies.
+      # `tag` is what tauri-action targets ('' = no release, just artifacts);
+      # `beta` marks the rolling prerelease so the real-release extras
+      # (updater artifacts, draft-then-publish) stay off for it.
       - name: Resolve release tag
         id: mode
         shell: bash
         run: |
           tag='${{ inputs.tag }}'
+          beta=''
           if [ -z "$tag" ] && [ '${{ github.ref_type }}' = 'tag' ]; then
             tag='${{ github.ref_name }}'
           fi
+          if [ -z "$tag" ] && [ '${{ github.event_name }}' = 'push' ] && [ '${{ github.ref }}' = 'refs/heads/main' ]; then
+            tag='beta'
+            beta='true'
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "beta=$beta" >> "$GITHUB_OUTPUT"
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -104,26 +158,34 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
         with:
           # Updater artifacts are off in the base config and switched on only
-          # here, for tagged builds. `createUpdaterArtifacts` makes the signing
-          # key mandatory: a build that cannot read the secret does not skip
-          # signing, it fails outright with a key-decode error. Enabling it
-          # globally therefore breaks every build without secret access, which
-          # notably includes pull requests from forks, where the failure looks
-          # nothing like the contributor's actual change.
+          # here, for REAL tagged builds — not beta: beta installers are for
+          # trying by hand, never for the updater, so they need no signing.
+          # `createUpdaterArtifacts` makes the signing key mandatory: a build
+          # that cannot read the secret does not skip signing, it fails
+          # outright with a key-decode error. Enabling it globally therefore
+          # breaks every build without secret access, which notably includes
+          # pull requests from forks, where the failure looks nothing like
+          # the contributor's actual change.
           # Path is relative to the working directory the action builds from
           # (the repo root), not to src-tauri, despite the file living there.
-          args: ${{ steps.mode.outputs.tag != '' && '--config src-tauri/tauri.release.conf.json' || '' }}
+          args: ${{ steps.mode.outputs.tag != '' && steps.mode.outputs.beta == '' && '--config src-tauri/tauri.release.conf.json' || '' }}
           tagName: ${{ steps.mode.outputs.tag }}
-          releaseName: Rivals Station Reporter ${{ steps.mode.outputs.tag }}
+          releaseName: ${{ steps.mode.outputs.beta != '' && 'Rivals Station Reporter beta (rolling)' || format('Rivals Station Reporter {0}', steps.mode.outputs.tag) }}
           releaseBody: 'See the commit log for changes.'
-          # Stays a draft here; publish-release (below, needs: build) flips it
-          # live once all three platform jobs have merged in, so the release
-          # is never visible at /releases/latest with only some platforms
-          # present. See the header comment for why that window matters.
-          releaseDraft: true
+          # Real tags stay a draft here; publish-release (below, needs: build)
+          # flips it live once all three platform jobs have merged in, so the
+          # release is never visible at /releases/latest with only some
+          # platforms present (see the header comment for why that window
+          # matters). Beta skips the dance: prepare-beta already created it
+          # published-as-prerelease — invisible to /releases/latest by
+          # definition — so a partial-platforms window is harmless there, and
+          # tauri-action just uploads into the existing release.
+          releaseDraft: ${{ steps.mode.outputs.beta == '' }}
+          prerelease: ${{ steps.mode.outputs.beta != '' }}
 
-      # Untagged runs have nowhere to attach the installers, so keep them on
-      # the run page instead. Globbed rather than read from the action's
+      # PRs and tag-less manual runs have nowhere to attach the installers
+      # (pushes to main now go to the beta release instead), so keep them on
+      # the run page. Globbed rather than read from the action's
       # artifactPaths output so this stays readable and cross-platform; the
       # bundle dir is at the workspace root, not under src-tauri/.
       - name: Upload installers

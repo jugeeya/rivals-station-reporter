@@ -1923,7 +1923,29 @@ impl HubServer {
             return Ok(self.url());
         }
         let addr = format!("{}:{}", self.bind, self.port);
-        let listener = Self::bind(&addr)?;
+        // SO_REUSEADDR (see `bind` above) covers the OS-level TIME_WAIT
+        // delay, but NOT a listener fd that is still momentarily alive:
+        // tiny_http's own internal accept thread holds the previous socket,
+        // and `Server`'s drop/unblock only SIGNALS that thread, never joins
+        // it -- so a back-to-back stop -> start (a config-driven rebuild, or
+        // the restart test) can reach this bind a few milliseconds before
+        // the old fd is actually closed, which on Linux is EADDRINUSE no
+        // matter what socket options the new bind sets. That window is
+        // milliseconds, so a short bounded retry closes it; a port held by
+        // some OTHER process still fails, just ~2s later.
+        let listener = {
+            let mut attempt = 0;
+            loop {
+                match Self::bind(&addr) {
+                    Ok(l) => break l,
+                    Err(_) if attempt < 20 => {
+                        attempt += 1;
+                        thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
         let server = tiny_http::Server::from_listener(listener, None).map_err(|e| e.to_string())?;
         let server = Arc::new(server);
         let hub = self.hub.clone();

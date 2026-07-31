@@ -159,7 +159,11 @@ fn ingested(r: &Value) -> i64 {
 /// when a real match starts could not be confirmed live (see startgg.rs's
 /// STATION_SET_QUERY doc). `sg` is the raw `Startgg::station_set` value (or
 /// `Value::Null`/anything falsy, which yields `Value::Null` here too).
-fn preferred_started_at(sg: &Value) -> Value {
+///
+/// `pub(crate)` so `startgg.rs`'s `parse_available_sets` can reuse this
+/// exact fallback for the Current Sets panel's "playing now" rows instead
+/// of duplicating the logic.
+pub(crate) fn preferred_started_at(sg: &Value) -> Value {
     match sg.get("startedAt") {
         Some(v) if truthy(Some(v)) => v.clone(),
         _ => match sg.get("startAt") {
@@ -167,6 +171,28 @@ fn preferred_started_at(sg: &Value) -> Value {
             _ => Value::Null,
         },
     }
+}
+
+/// Resolve a station's plain number to start.gg's opaque id, against a
+/// fresh `available_sets` read -- shared by `Hub::do_start_match` and
+/// `Hub::do_reassign_station`, neither of which ever trusts a raw id
+/// supplied by the frontend, only a plain number cross-checked here.
+fn resolve_station_id(data: &Value, num: i64) -> Result<Value, (Value, u16)> {
+    let stations = data
+        .get("stations")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    stations
+        .iter()
+        .find(|s| s.get("number").and_then(|n| n.as_i64()) == Some(num))
+        .map(|s| s.get("id").cloned().unwrap_or(Value::Null))
+        .ok_or_else(|| {
+            (
+                json!({"error": format!("Station {} not found on start.gg.", num)}),
+                404,
+            )
+        })
 }
 
 // -- Hub ------------------------------------------------------------------------
@@ -1158,9 +1184,9 @@ impl Hub {
         }
     }
 
-    /// Sets available to start (both entrants determined, not yet begun)
-    /// plus the event's stations -- for the operator's Start Match panel.
-    /// Read-only, like `event_view`.
+    /// Sets for the operator's Current Sets panel -- both entrants
+    /// determined, either playing now (state 2) or startable (state 1/6) --
+    /// plus the event's stations. Read-only, like `event_view`.
     pub fn available_sets(&self, slug: &str) -> Result<Value, (Value, u16)> {
         if !self.startgg.enabled() {
             return Err((
@@ -1176,8 +1202,8 @@ impl Hub {
     /// Start a match on start.gg -- explicit operator action, same standing
     /// as `do_report`'s Report button (the mutation this calls,
     /// `markSetInProgress`, is "the TO's call" the rest of this app
-    /// deliberately never invokes on its own). Optionally assigns a station
-    /// first, as one user-facing action.
+    /// deliberately never invokes on its own). Optionally (re)assigns a
+    /// station first, as one user-facing action.
     ///
     /// The station number is never trusted blindly from the frontend: it is
     /// resolved to start.gg's opaque station id server-side, against a fresh
@@ -1185,13 +1211,17 @@ impl Hub {
     /// never trusts a client-supplied slot/entrant pairing without
     /// cross-checking.
     ///
-    /// Edge case, decided here: if the target set already has a DIFFERENT
-    /// station assigned than the one requested, this refuses (409) rather
-    /// than silently reassigning it. Reassigning a set out from under
-    /// whichever other station it's bound to is a bigger, more surprising
-    /// side effect than "start this set" asked for -- an operator who
-    /// genuinely wants to move a set to a different station can do that on
-    /// start.gg directly. If it already has the SAME station requested,
+    /// Per direct user instruction, this supersedes a prior session's more
+    /// conservative decision here: a `station_number` naming a DIFFERENT
+    /// station than the one already assigned used to be refused outright
+    /// (409), on the reasoning that reassigning a set out from under
+    /// whichever station it's bound to was a bigger, more surprising side
+    /// effect than "start this set" asked for. The operator has since said
+    /// explicitly that changing a set's station from inside this app is
+    /// wanted, so that refusal is gone: whenever the requested station
+    /// differs from the current one (whether the set currently has none, or
+    /// a different one), `assign_station` (re)assigns it before
+    /// `start_match` runs. If it already has the SAME station requested,
     /// assigning is simply skipped (nothing to do) and `start_match` still
     /// runs.
     ///
@@ -1237,48 +1267,20 @@ impl Hub {
         let current_station = target.get("station").and_then(|v| v.as_i64());
 
         if let Some(num) = station_number {
-            match current_station {
-                Some(existing) if existing == num => {
-                    // Already assigned to the requested station -- nothing
-                    // to assign; fall through to start_match below.
-                }
-                Some(_other) => {
+            if current_station != Some(num) {
+                let station_id = resolve_station_id(&data, num)?;
+                if let Err(e) = self.startgg.assign_station(set_id, &station_id) {
                     return Err((
-                        json!({
-                            "error": "This set is already assigned to a different station. Reassign it on start.gg directly if you meant to move it."
-                        }),
-                        409,
+                        json!({"error": format!("start.gg station assignment failed: {}", e)}),
+                        502,
                     ));
                 }
-                None => {
-                    let stations = data
-                        .get("stations")
-                        .and_then(|v| v.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    let station = stations
-                        .iter()
-                        .find(|s| s.get("number").and_then(|n| n.as_i64()) == Some(num));
-                    let station_id = match station {
-                        Some(s) => s.get("id").cloned().unwrap_or(Value::Null),
-                        None => {
-                            return Err((
-                                json!({"error": format!("Station {} not found on start.gg.", num)}),
-                                404,
-                            ))
-                        }
-                    };
-                    if let Err(e) = self.startgg.assign_station(set_id, &station_id) {
-                        return Err((
-                            json!({"error": format!("start.gg station assignment failed: {}", e)}),
-                            502,
-                        ));
-                    }
-                    (self.log)(&format!(
-                        "assigned set {set_id_s} to station {num} on start.gg"
-                    ));
-                }
+                (self.log)(&format!(
+                    "assigned set {set_id_s} to station {num} on start.gg"
+                ));
             }
+            // else: already assigned to the requested station -- nothing to
+            // assign; fall through to start_match below.
         }
 
         if let Err(e) = self.startgg.start_match(set_id) {
@@ -1288,6 +1290,58 @@ impl Hub {
             ));
         }
         (self.log)(&format!("started match for set {set_id_s} on start.gg"));
+        Ok(json!({"ok": true, "setId": set_id, "stationAssigned": station_number}))
+    }
+
+    /// Change a set's station on start.gg without starting it -- for a set
+    /// that's already playing (state 2, "playing now" in the Current Sets
+    /// panel), where there's no "start" action to also fire alongside a
+    /// station change. Shares `do_start_match`'s security property: the
+    /// station number is resolved to start.gg's opaque id server-side
+    /// against a fresh `available_sets` read, never trusted as a raw id
+    /// from the frontend. Only ever calls `assign_station` -- never
+    /// `start_match`.
+    pub fn do_reassign_station(
+        &self,
+        slug: &str,
+        set_id: &Value,
+        station_number: i64,
+    ) -> Result<Value, (Value, u16)> {
+        if !self.startgg.enabled() {
+            return Err((
+                json!({"error": "No start.gg token configured on the hub."}),
+                501,
+            ));
+        }
+        let data = self
+            .startgg
+            .available_sets(slug)
+            .map_err(|e| (json!({"error": format!("start.gg error: {}", e)}), 502))?;
+        let sets = data
+            .get("sets")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let set_id_s = py_str(set_id);
+        let found = sets
+            .iter()
+            .any(|s| py_str(s.get("id").unwrap_or(&Value::Null)) == set_id_s);
+        if !found {
+            return Err((
+                json!({"error": "Set not found or not available to start."}),
+                404,
+            ));
+        }
+        let station_id = resolve_station_id(&data, station_number)?;
+        if let Err(e) = self.startgg.assign_station(set_id, &station_id) {
+            return Err((
+                json!({"error": format!("start.gg station assignment failed: {}", e)}),
+                502,
+            ));
+        }
+        (self.log)(&format!(
+            "assigned set {set_id_s} to station {station_number} on start.gg"
+        ));
         Ok(json!({"ok": true, "setId": set_id, "stationAssigned": station_number}))
     }
 
@@ -3253,11 +3307,12 @@ mod tests {
     }
 
     #[test]
-    fn do_start_match_with_a_different_station_already_assigned_refuses() {
-        // Documented decision: a set already bound to a DIFFERENT station
-        // than requested is refused rather than silently reassigned --
-        // reassigning it out from under whichever station it's bound to is
-        // a bigger side effect than "start this set" asked for.
+    fn do_start_match_with_a_different_station_already_assigned_reassigns_then_starts() {
+        // Supersedes the prior session's refuse-409 decision, per direct
+        // user instruction: requesting a different station than the one
+        // already assigned now (re)assigns it -- resolved to the new
+        // station's opaque id, never the raw number -- and then starts,
+        // instead of refusing outright.
         let fake = FakeStartgg::new();
         fake.set_available_sets(json!({
             "sets": [set_with_station("S1", json!(1))],
@@ -3266,13 +3321,19 @@ mod tests {
         let mut h = Hub::new(None, None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
-        let err = h
+        let res = h
             .do_start_match(SLUG, &json!("S1"), Some(2))
-            .expect_err("a set on a different station must not be silently reassigned");
-        assert_eq!(err.1, 409);
-        assert!(
-            fake.assign_calls().is_empty() && fake.start_calls().is_empty(),
-            "refused before touching start.gg at all"
+            .expect("a set already on a different station can be moved and started");
+        assert_eq!(res["ok"], json!(true));
+        assert_eq!(
+            fake.assign_calls(),
+            vec![(json!("S1"), json!("opaque-st-2"))],
+            "reassigned to station 2's resolved opaque id, not the raw number"
+        );
+        assert_eq!(
+            fake.start_calls(),
+            vec![json!("S1")],
+            "start_match runs after the reassignment succeeds"
         );
     }
 
@@ -3319,6 +3380,122 @@ mod tests {
     fn do_start_match_requires_a_start_gg_token() {
         let h = Hub::new(None, None, None, None, None, None, None, None);
         let err = h.do_start_match(SLUG, &json!("S1"), None).unwrap_err();
+        assert_eq!(err.1, 501);
+    }
+
+    // ---- Current Sets: do_reassign_station ---------------------------------
+    // Changes a set's station without starting it -- for a set that's
+    // already playing, where there's no "start" action to also fire.
+
+    #[test]
+    fn do_reassign_station_assigns_when_none_set() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("S1", Value::Null)],
+            "stations": stations_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let res = h
+            .do_reassign_station(SLUG, &json!("S1"), 2)
+            .expect("assigning a station to a set with none succeeds");
+        assert_eq!(res["ok"], json!(true));
+        assert_eq!(res["stationAssigned"], json!(2));
+        assert_eq!(
+            fake.assign_calls(),
+            vec![(json!("S1"), json!("opaque-st-2"))],
+            "station number 2 resolved to its opaque id, not passed as the raw number"
+        );
+        assert!(
+            fake.start_calls().is_empty(),
+            "do_reassign_station never calls start_match"
+        );
+    }
+
+    #[test]
+    fn do_reassign_station_reassigns_when_a_different_one_is_set() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("S1", json!(1))],
+            "stations": stations_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let res = h
+            .do_reassign_station(SLUG, &json!("S1"), 2)
+            .expect("moving a set already on station 1 to station 2 succeeds");
+        assert_eq!(res["ok"], json!(true));
+        assert_eq!(
+            fake.assign_calls(),
+            vec![(json!("S1"), json!("opaque-st-2"))],
+            "resolved to the NEW station's opaque id, not the old one"
+        );
+        assert!(fake.start_calls().is_empty());
+    }
+
+    #[test]
+    fn do_reassign_station_resolves_the_station_number_securely() {
+        // A raw/opaque-looking id passed as the "number" must not be trusted
+        // directly -- it has to match an actual station's plain `number`
+        // from a fresh available_sets read, same as do_start_match.
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("S1", Value::Null)],
+            "stations": stations_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let err = h
+            .do_reassign_station(SLUG, &json!("S1"), 99)
+            .expect_err("station 99 doesn't exist on this event");
+        assert_eq!(err.1, 404);
+        assert!(
+            fake.assign_calls().is_empty(),
+            "an unresolvable station number must never reach assign_station"
+        );
+    }
+
+    #[test]
+    fn do_reassign_station_unknown_set_id_is_refused() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("S1", Value::Null)],
+            "stations": stations_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let err = h
+            .do_reassign_station(SLUG, &json!("NOPE"), 2)
+            .expect_err("a set not in the available list must not be reassigned blindly");
+        assert_eq!(err.1, 404);
+        assert!(fake.assign_calls().is_empty());
+    }
+
+    #[test]
+    fn do_reassign_station_a_failed_assignment_surfaces_as_an_error() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("S1", Value::Null)],
+            "stations": stations_list(),
+        }));
+        fake.fail_assign_station();
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let err = h
+            .do_reassign_station(SLUG, &json!("S1"), 2)
+            .expect_err("a failed assignment must surface as an error");
+        assert_eq!(err.1, 502);
+    }
+
+    #[test]
+    fn do_reassign_station_requires_a_start_gg_token() {
+        let h = Hub::new(None, None, None, None, None, None, None, None);
+        let err = h.do_reassign_station(SLUG, &json!("S1"), 2).unwrap_err();
         assert_eq!(err.1, 501);
     }
 }

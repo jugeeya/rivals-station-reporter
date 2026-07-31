@@ -87,17 +87,22 @@ const SET_GAMES_QUERY: &str = "query($setId:ID!){ set(id:$setId){ games{ orderNu
 // write rather than attempt one against a set someone already finalized
 // through start.gg's own page.
 const SET_STATE_QUERY: &str = "query($setId:ID!){ set(id:$setId){ state } }";
-// Sets available to start (state 1 = created, 6 = called-not-started; state
-// 2/ongoing and 3/completed are deliberately excluded -- those aren't
-// "available to start" anymore), plus the event's stations in the same
-// round trip: the Start Match panel needs both, and fetching stations
-// separately for every render would be a second full request for data that
-// changes only when a TO adds/removes a physical setup. `Stations.id` is an
-// opaque GraphQL id; `Stations.number` is the plain integer (1, 2, 3...)
-// this app already uses for its own station numbering (`cfg.station`) --
-// assigning a set to "station 2" means resolving that number to this id
-// first, never passing the number itself to `assignStation`.
-const AVAILABLE_SETS_QUERY: &str = "query($slug:String!){ event(slug:$slug){\n                 sets(page:1, perPage:60, sortType:STANDARD, filters:{state:[1,6]}){\n                   nodes{ id state fullRoundText station{ number }\n                     slots{ entrant{ id name } } } }\n                 stations(query:{perPage:32}){ nodes{ id number enabled } } } }";
+// Sets for the Current Sets panel: state 1 = created, 6 = called-not-started
+// ("startable"), plus state 2 = ongoing ("playing now" -- genuinely in
+// progress on the bracket right now, across the whole event, independent of
+// whether any of this app's own stations happen to be tracking it). State
+// 3/completed is deliberately excluded -- that's neither startable nor
+// playing. Plus the event's stations in the same round trip: the panel needs
+// both, and fetching stations separately for every render would be a second
+// full request for data that changes only when a TO adds/removes a physical
+// setup. `Stations.id` is an opaque GraphQL id; `Stations.number` is the
+// plain integer (1, 2, 3...) this app already uses for its own station
+// numbering (`cfg.station`) -- assigning a set to "station 2" means
+// resolving that number to this id first, never passing the number itself to
+// `assignStation`. `startedAt`/`startAt`/`totalGames` let "playing now" rows
+// show elapsed time and best-of the same way the operator console already
+// does for its own live sets (see `preferred_started_at` in hub.rs).
+const AVAILABLE_SETS_QUERY: &str = "query($slug:String!){ event(slug:$slug){\n                 sets(page:1, perPage:60, sortType:STANDARD, filters:{state:[1,2,6]}){\n                   nodes{ id state fullRoundText startedAt startAt totalGames station{ number }\n                     slots{ entrant{ id name } } } }\n                 stations(query:{perPage:32}){ nodes{ id number enabled } } } }";
 // `assignStation`'s own required args, confirmed against the live schema:
 // just the set and the station's opaque id.
 const ASSIGN_STATION_MUTATION: &str =
@@ -377,15 +382,26 @@ impl Startgg {
         )
     }
 
-    /// Sets available to start on this event, plus its stations.
+    /// Sets for the Current Sets panel (playing now + startable) on this
+    /// event, plus its stations.
     ///
-    /// Returns `{ "sets": [{id, fullRoundText, station, entrants}], "stations":
-    /// [{id, number}] }`. `station` is the plain station number (or `Null` if
-    /// unassigned); `entrants` is always exactly two `{id, name}` objects --
-    /// a set with either slot still undetermined (waiting on a prior round,
-    /// e.g. `slots: [{entrant: null}, {entrant: null}]` for a not-yet-seeded
-    /// Grand Final) is left out entirely, never included with a null/missing
-    /// entrant. `stations[].id` is the opaque id `assign_station` needs;
+    /// Returns `{ "sets": [{id, state, fullRoundText, station, entrants,
+    /// startggStartedAt, startggTotalGames}], "stations": [{id, number}] }`.
+    /// `state` is start.gg's raw `Set.state` (2 = ongoing/"playing now"; 1 or
+    /// 6 = "startable" -- see `matching::STARTGG_STATE_ONGOING`), left for
+    /// the caller to classify. `station` is the plain station number (or
+    /// `Null` if unassigned); `entrants` is always exactly two `{id, name}`
+    /// objects -- a set with either slot still undetermined (waiting on a
+    /// prior round, e.g. `slots: [{entrant: null}, {entrant: null}]` for a
+    /// not-yet-seeded Grand Final) is left out entirely, never included with
+    /// a null/missing entrant (an ongoing set always has both slots
+    /// determined already, so this filter never excludes a genuinely playing
+    /// set). `startggStartedAt`/`startggTotalGames` mirror the field names
+    /// `hub.rs`'s `record_for` already uses for the same start.gg data, so a
+    /// "playing now" row can reuse the console's own elapsed-time/best-of
+    /// formatting unchanged; `startggStartedAt` is resolved via
+    /// `preferred_started_at` the same way the operator console's own live
+    /// sets are. `stations[].id` is the opaque id `assign_station` needs;
     /// `stations[].number` is the plain integer this app's own station
     /// numbering already uses.
     pub fn available_sets(&self, slug: &str) -> Result<Value, StartggError> {
@@ -552,6 +568,7 @@ fn parse_available_sets(data: &Value) -> Value {
         }
         sets.push(json!({
             "id": n.get("id").cloned().unwrap_or(Value::Null),
+            "state": n.get("state").cloned().unwrap_or(Value::Null),
             "fullRoundText": or_empty_string(n.get("fullRoundText")),
             "station": n
                 .get("station")
@@ -559,6 +576,10 @@ fn parse_available_sets(data: &Value) -> Value {
                 .cloned()
                 .unwrap_or(Value::Null),
             "entrants": entrants,
+            // Reuses hub.rs's preferred_started_at rather than duplicating
+            // the startedAt-over-startAt fallback logic here.
+            "startggStartedAt": crate::hub::preferred_started_at(n),
+            "startggTotalGames": n.get("totalGames").cloned().unwrap_or(Value::Null),
         }));
     }
     let station_nodes = data
@@ -810,6 +831,100 @@ mod tests {
         });
         let out = parse_available_sets(&data);
         assert_eq!(out["sets"][0]["station"], Value::Null);
+    }
+
+    /// `AVAILABLE_SETS_QUERY`'s filter changed from `state:[1,6]` to
+    /// `state:[1,2,6]` so an ongoing (state 2, "playing now") set is even
+    /// fetched at all -- but that filter lives in the GraphQL query string,
+    /// not the parser, so a unit test can't exercise it (there's no live
+    /// server here to send the query to). What this test CAN confirm is the
+    /// parser's own half of the change: given a state-2 node with both
+    /// entrants determined (as an ongoing set always has), the parser keeps
+    /// it and carries its `state` through -- before this change such a node
+    /// would never have reached the parser in the first place (the old query
+    /// string would have excluded it), so this is new coverage, not a
+    /// regression check.
+    #[test]
+    fn parse_available_sets_keeps_an_ongoing_state_2_set() {
+        let data = json!({
+            "event": {
+                "sets": { "nodes": [
+                    {
+                        "id": "set-5", "state": 2, "fullRoundText": "Winners Semi-Final",
+                        "station": {"number": 3},
+                        "slots": [
+                            {"entrant": {"id": "E1", "name": "jugeeya"}},
+                            {"entrant": {"id": "E2", "name": "Kimchi"}},
+                        ],
+                    },
+                ]},
+                "stations": { "nodes": [] },
+            }
+        });
+        let out = parse_available_sets(&data);
+        let sets = out["sets"].as_array().unwrap();
+        assert_eq!(
+            sets.len(),
+            1,
+            "the state-2 set is kept, not filtered out  [{sets:?}]"
+        );
+        assert_eq!(sets[0]["id"], json!("set-5"));
+        assert_eq!(sets[0]["state"], json!(2));
+    }
+
+    /// `startggStartedAt`/`startggTotalGames` appear on parsed sets when
+    /// present, named to match `hub.rs`'s `record_for` (the operator
+    /// console's own live-set fields) so the Current Sets panel can reuse
+    /// the exact same elapsed-time/best-of formatting. `startggStartedAt`
+    /// goes through `preferred_started_at` (reused from hub.rs, not
+    /// reimplemented) -- this node has both `startedAt` and `startAt`, so
+    /// `startedAt` wins.
+    #[test]
+    fn parse_available_sets_carries_startgg_started_at_and_total_games() {
+        let data = json!({
+            "event": {
+                "sets": { "nodes": [
+                    {
+                        "id": "set-6", "state": 2, "fullRoundText": "Winners Final",
+                        "startedAt": 1784879708i64, "startAt": 1784879700i64, "totalGames": 5,
+                        "station": {"number": 1},
+                        "slots": [
+                            {"entrant": {"id": "E1", "name": "jugeeya"}},
+                            {"entrant": {"id": "E2", "name": "Kimchi"}},
+                        ],
+                    },
+                ]},
+                "stations": { "nodes": [] },
+            }
+        });
+        let out = parse_available_sets(&data);
+        assert_eq!(out["sets"][0]["startggStartedAt"], json!(1784879708i64));
+        assert_eq!(out["sets"][0]["startggTotalGames"], json!(5));
+    }
+
+    /// A node missing these fields entirely parses as null for each, not a
+    /// missing key or a panic -- same guarantee `parse_station_set` already
+    /// gives (see `parse_station_set_defaults_missing_started_at_fields_to_null`).
+    #[test]
+    fn parse_available_sets_defaults_missing_startgg_fields_to_null() {
+        let data = json!({
+            "event": {
+                "sets": { "nodes": [
+                    {
+                        "id": "set-7", "state": 1, "fullRoundText": "Losers Round 1",
+                        "station": Value::Null,
+                        "slots": [
+                            {"entrant": {"id": "E1", "name": "jugeeya"}},
+                            {"entrant": {"id": "E2", "name": "Kimchi"}},
+                        ],
+                    },
+                ]},
+                "stations": { "nodes": [] },
+            }
+        });
+        let out = parse_available_sets(&data);
+        assert_eq!(out["sets"][0]["startggStartedAt"], Value::Null);
+        assert_eq!(out["sets"][0]["startggTotalGames"], Value::Null);
     }
 
     /// `parse_station_set` carries `startedAt`/`startAt`/`totalGames` straight

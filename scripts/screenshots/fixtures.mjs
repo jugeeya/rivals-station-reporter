@@ -382,11 +382,13 @@ export const settingsBase = stationIdle;
 
 // ---- available-sets.png -------------------------------------------------------
 // The Start Match panel, expanded: reuses the operator console backdrop
-// (same three stations already reporting) with a mix of sets waiting to
-// start -- one already assigned a station, one with none (exercises the
-// inline station picker) -- mirroring the real shapes confirmed live
-// against start.gg's API: a ready set has `entrant:{id,name}` on both
-// slots; `browserMock.ts`'s own `availableSetsData` fixture is the browser
+// (same three stations already reporting): one set start.gg shows as
+// actually playing (state 2, with startggStartedAt/startggTotalGames so the
+// panel's elapsed-time/best-of display has something real to show) and two
+// startable sets -- one already assigned a station, one with none (exercises
+// the inline station picker) -- mirroring the real shapes confirmed live
+// against start.gg's API: a ready set has `entrant:{id,name}` on both slots.
+// `browserMock.ts`'s own `availableSetsData` fixture is the browser
 // dev-mode equivalent of this same shape. `availableSets` here is not part
 // of EngineState in the real app either (it's `list_available_sets`, a
 // separate query) -- capture.mjs's seeding passes it through to
@@ -397,7 +399,20 @@ export const availableSets = {
   availableSets: {
     sets: [
       {
+        id: 'sgg-set-300',
+        state: 2,
+        fullRoundText: 'Winners Quarter-Final',
+        station: 1,
+        entrants: [
+          { id: 'E1', name: 'jugeeya' },
+          { id: 'E4', name: 'Kimchi' },
+        ],
+        startggStartedAt: FAKE_NOW_S - 12 * 60,
+        startggTotalGames: 5,
+      },
+      {
         id: 'sgg-set-301',
+        state: 1,
         fullRoundText: 'Winners Round 1',
         station: 2,
         entrants: [
@@ -407,6 +422,7 @@ export const availableSets = {
       },
       {
         id: 'sgg-set-302',
+        state: 1,
         fullRoundText: 'Losers Round 2',
         station: null,
         entrants: [

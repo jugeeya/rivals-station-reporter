@@ -118,14 +118,16 @@ function startFakeTournament() {
   }, 4000);
 }
 
-// ---- Start Match (available sets) fixtures -----------------------------------
+// ---- Current Sets (available sets) fixtures ----------------------------------
 // A separate query path from hubSnapshot (mirrors the real
-// Startgg::available_sets/list_available_sets): sets waiting to start on the
-// bracket, not sets already ingested from a station. Kept outside `state`
-// since the real command isn't part of engine-state either -- the UI fetches
-// it on its own (see AvailableSets.vue). One set with a station already
-// assigned, one with none (exercises the inline picker), and three stations
-// to pick from.
+// Startgg::available_sets/list_available_sets): everything start.gg's own
+// bracket shows right now, not just sets already ingested from a station.
+// Kept outside `state` since the real command isn't part of engine-state
+// either -- the UI fetches it on its own (see CurrentSets.vue). One set
+// already playing (state 2, with startggStartedAt/startggTotalGames so the
+// elapsed-time/best-of display has something real to show), one startable
+// set with a station already assigned, one startable set with none
+// (exercises the inline picker), and three stations to pick from.
 
 let availableSetsData: any = { sets: [], stations: [] };
 
@@ -133,7 +135,20 @@ function seedAvailableSets() {
   availableSetsData = {
     sets: [
       {
+        id: 'sgg-set-300',
+        state: 2,
+        fullRoundText: 'Winners Quarter-Final',
+        station: 1,
+        entrants: [
+          { id: 'E1', name: 'jugeeya' },
+          { id: 'E4', name: 'Kimchi' },
+        ],
+        startggStartedAt: now() - 12 * 60,
+        startggTotalGames: 5,
+      },
+      {
         id: 'sgg-set-301',
+        state: 1,
         fullRoundText: 'Winners Round 1',
         station: 2,
         entrants: [
@@ -143,6 +158,7 @@ function seedAvailableSets() {
       },
       {
         id: 'sgg-set-302',
+        state: 1,
         fullRoundText: 'Losers Round 2',
         station: null,
         entrants: [
@@ -292,14 +308,25 @@ const handlers: Record<string, (args: any) => any> = {
   start_match: (a) => {
     const set = availableSetsData.sets.find((s: any) => String(s.id) === String(a.setId));
     if (!set) throw 'Set not found or not available to start.';
-    if (a.stationNumber != null && set.station != null && set.station !== a.stationNumber) {
-      throw 'This set is already assigned to a different station. Reassign it on start.gg directly if you meant to move it.';
+    // Mirrors do_start_match: a different station than the one already
+    // assigned reassigns (no refusal) unless it already matches, in which
+    // case nothing needs to change before starting.
+    if (a.stationNumber != null && set.station !== a.stationNumber) {
+      set.station = a.stationNumber;
     }
-    if (a.stationNumber != null && set.station == null) set.station = a.stationNumber;
-    // Starting the match means it's no longer "available to start".
+    // Starting the match means it's no longer "available to start" (it
+    // moves into "playing now" for real; the mock just drops it since this
+    // fixture data isn't meant to simulate a whole bracket).
     availableSetsData.sets = availableSetsData.sets.filter((s: any) => s !== set);
     log(`started match for set ${a.setId} on start.gg`);
     return { ok: true, setId: a.setId, stationAssigned: a.stationNumber ?? null };
+  },
+  reassign_station: (a) => {
+    const set = availableSetsData.sets.find((s: any) => String(s.id) === String(a.setId));
+    if (!set) throw 'Set not found or not available to start.';
+    set.station = a.stationNumber;
+    log(`assigned set ${a.setId} to station ${a.stationNumber} on start.gg`);
+    return { ok: true, setId: a.setId, stationAssigned: a.stationNumber };
   },
   get_autostart: () => false,
   set_autostart: () => null,

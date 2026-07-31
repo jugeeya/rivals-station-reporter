@@ -77,6 +77,7 @@ pub fn run() {
             commands::delete_set,
             commands::list_available_sets,
             commands::start_match,
+            commands::reassign_station,
             commands::set_autostart,
             commands::get_autostart,
         ])

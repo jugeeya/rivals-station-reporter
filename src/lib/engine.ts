@@ -88,14 +88,20 @@ export function deleteSet(station: number, setId: string) {
   return invoke('delete_set', { station, setId });
 }
 
-// Start Match: sets available to start (both entrants determined, not yet
-// begun) plus the event's stations, and starting one -- optionally assigning
-// a station first as part of the same click. Same standing as reportWinner:
-// markSetInProgress is only ever reached through this explicit action.
+// Current Sets: both entrants determined, either playing now (state 2) or
+// startable (state 1/6), plus the event's stations. Starting a startable set
+// optionally (re)assigns a station first as part of the same click; a
+// playing-now set can only have its station changed (reassignStation), never
+// started again. Same standing as reportWinner: markSetInProgress and
+// assignStation are only ever reached through these explicit actions.
 export function listAvailableSets(): Promise<AvailableSetsResponse> {
   return invoke('list_available_sets');
 }
 
 export function startMatch(setId: string, stationNumber?: number | null) {
   return invoke('start_match', { setId, stationNumber: stationNumber ?? null });
+}
+
+export function reassignStation(setId: string, stationNumber: number) {
+  return invoke('reassign_station', { setId, stationNumber });
 }

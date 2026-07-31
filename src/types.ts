@@ -86,15 +86,23 @@ export interface AvailableSetEntrant {
   name: string;
 }
 
-/** A start.gg set with both entrants determined, not yet started -- what
- *  the Start Match panel lists. Mirrors `Startgg::available_sets`'s
- *  normalized shape (crates/station-core/src/startgg.rs). */
+/** A start.gg set with both entrants determined -- either playing now
+ *  (state 2) or startable (state 1/6), what the Current Sets panel lists.
+ *  Mirrors `Startgg::available_sets`'s normalized shape
+ *  (crates/station-core/src/startgg.rs). `state` is start.gg's raw
+ *  `Set.state`; `startggStartedAt`/`startggTotalGames` are only meaningful
+ *  for a playing-now set and are named to match the operator console's own
+ *  live-set fields (see HubRecord) so the same operatorFormat.ts helpers
+ *  apply unchanged. */
 export interface AvailableSet {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   id: any;
+  state: number | null;
   fullRoundText: string;
   station: number | null;
   entrants: AvailableSetEntrant[];
+  startggStartedAt?: number | null;
+  startggTotalGames?: number | null;
 }
 
 /** An event station, as `available_sets` reports it: the plain number this

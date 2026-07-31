@@ -194,12 +194,10 @@ async function main() {
 
     written.push(
       await captureOne(browser, 'available-sets', availableSets, {
-        onReady: async (page) => {
-          await page.locator('.as-summary', { hasText: 'Start Match' }).click();
-          await page
-            .locator('.as-row', { hasText: 'Winners Round 1' })
-            .waitFor({ state: 'visible' });
-        },
+        // The panel is open by default now, no click needed to expand it
+        // (and clicking the summary would toggle it closed).
+        onReady: (page) =>
+          page.locator('.as-row', { hasText: 'Winners Round 1' }).waitFor({ state: 'visible' }),
       }),
     );
 

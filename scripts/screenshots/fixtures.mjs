@@ -222,6 +222,9 @@ const station1Record = {
   candidateWinnerEntrantId: null,
   confidence: 'none',
   status: 'live',
+  // No games yet -> handle_live never even pushes (gd is empty), so
+  // "pending" is the honest state here, same as the real app.
+  liveConfirmed: false,
   swap: false,
   mode: null,
   startggState: 2,
@@ -267,6 +270,8 @@ const station2Record = {
   candidateWinnerEntrantId: null,
   confidence: 'none',
   status: 'live',
+  // Games recorded and pushed, and start.gg's read-back matched.
+  liveConfirmed: true,
   swap: false,
   mode: null,
   startggState: 2,

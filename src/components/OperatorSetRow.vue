@@ -43,6 +43,16 @@ const gameList = computed(() => games(props.record));
 const mapping = computed(() => mappingRows(props.record));
 const statusText = computed(() => String(props.record.status || 'recorded'));
 
+// updateBracketSet's own response never says whether the game data actually
+// landed, so the hub reads the set back from start.gg and compares (see
+// hub.rs's handle_live/live_push_confirmed). This is that comparison's
+// result, not just "the push request didn't error."
+const confirmTitle = computed(() =>
+  props.record.liveConfirmed
+    ? 'This score is confirmed on start.gg: the last push was read back and matches.'
+    : 'Pushed to start.gg, not yet confirmed. start.gg may just not have caught up; the next update re-checks.',
+);
+
 const rowClasses = computed(() => ({
   'oc-row--grey': props.record.reportable === false,
   'oc-row--live': props.record.status === 'live',
@@ -63,6 +73,14 @@ const rowClasses = computed(() => ({
       <span class="oc-cell oc-score">
         {{ score(record) }}
         <span v-if="bestOf(record)" class="oc-bestof">{{ bestOf(record) }}</span>
+        <AppIcon
+          v-if="record.status === 'live'"
+          name="check"
+          :size="12"
+          class="oc-confirm"
+          :class="{ 'oc-confirm--pending': !record.liveConfirmed }"
+          :title="confirmTitle"
+        />
       </span>
       <span class="oc-cell oc-status" :class="'oc-status--' + statusText">
         <span class="oc-status-dot" aria-hidden="true"></span>{{ statusText }}
@@ -216,6 +234,17 @@ const rowClasses = computed(() => ({
   font-weight: 400;
   color: var(--text-muted);
   white-space: nowrap;
+}
+
+// Solid green once start.gg's own copy of the score has been read back and
+// matches; dimmed while that hasn't happened yet (not an error state, just
+// not settled -- the next live update re-checks).
+.oc-confirm {
+  color: var(--text-success);
+  flex: 0 0 auto;
+}
+.oc-confirm--pending {
+  opacity: 0.35;
 }
 
 .oc-status {

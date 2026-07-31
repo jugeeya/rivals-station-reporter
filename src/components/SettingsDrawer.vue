@@ -13,6 +13,7 @@ let autoCheckedThisRun = false;
 
 import { computed, onMounted, reactive, ref } from 'vue';
 import AppIcon from './AppIcon.vue';
+import NumberStepper from './NumberStepper.vue';
 import { invoke } from '@tauri-apps/api/core';
 import { state, saveConfig } from '../lib/engine';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -217,7 +218,7 @@ async function save() {
 
         <label v-if="draft.mode !== 'operator'" class="sd-field">
           <span>Station number</span>
-          <input v-model.number="draft.station" type="number" min="0" max="99" class="sd-input sd-input--num" />
+          <NumberStepper v-model="draft.station" :min="0" :max="99" />
         </label>
 
         <label class="sd-field">
@@ -294,11 +295,11 @@ async function save() {
           </div>
           <label class="sd-field">
             <span>Idle seconds before an open set finalizes</span>
-            <input v-model.number="draft.idle" type="number" min="30" class="sd-input sd-input--num" />
+            <NumberStepper v-model="draft.idle" :min="30" />
           </label>
           <label v-if="draft.mode !== 'station'" class="sd-field">
             <span>Hub port</span>
-            <input v-model.number="draft.hub_port" type="number" min="1" max="65535" class="sd-input sd-input--num" />
+            <NumberStepper v-model="draft.hub_port" :min="1" :max="65535" />
           </label>
           <label class="sd-check">
             <input v-model="draft.dry_run" type="checkbox" class="sd-checkbox" />
@@ -431,7 +432,6 @@ async function save() {
 
   &::placeholder { color: rgba(255, 255, 255, 0.3); }
   &:focus-visible { outline: 2px solid rgba(99, 102, 241, 0.6); outline-offset: 1px; }
-  &--num { width: 7rem; }
 }
 
 .sd-check {

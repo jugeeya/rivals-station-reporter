@@ -92,25 +92,39 @@ const SET_STATE_QUERY: &str = "query($setId:ID!){ set(id:$setId){ state } }";
 // progress on the bracket right now, across the whole event, independent of
 // whether any of this app's own stations happen to be tracking it). State
 // 3/completed is deliberately excluded -- that's neither startable nor
-// playing. Plus the event's stations in the same round trip: the panel needs
-// both, and fetching stations separately for every render would be a second
-// full request for data that changes only when a TO adds/removes a physical
-// setup. `Stations.id` is an opaque GraphQL id; `Stations.number` is the
-// plain integer (1, 2, 3...) this app already uses for its own station
-// numbering (`cfg.station`) -- assigning a set to "station 2" means
-// resolving that number to this id first, never passing the number itself to
+// playing. Plus the tournament's stations and streams in the same round
+// trip: the panel needs both, and fetching them separately for every render
+// would be a second full request for data that changes only when a TO
+// touches physical setups.
+//
+// Stations come from `tournament{ stations }`, NOT `event{ stations }`, even
+// though the latter also exists and looks like the obvious choice --
+// confirmed live (a real multi-event tournament with 6 stations configured,
+// none of them ever assigned to a set in this particular event) that
+// `Event.stations` only returns stations that have actually been assigned to
+// a set WITHIN that event, silently narrowing to a subset (in this case,
+// EMPTY) instead of "every station configured for this tournament". A picker
+// built from that would occasionally show nothing, or fewer stations than
+// really exist, and it would look exactly like "streams pushed stations out"
+// once tournament-level streams were added alongside it -- there's no
+// clobbering, `Event.stations` was already silently wrong on its own.
+// `Tournament.stations` has no such scoping.
+//
+// `Stations.id` is an opaque GraphQL id; `Stations.number` is the plain
+// integer (1, 2, 3...) this app already uses for its own station numbering
+// (`cfg.station`) -- assigning a set to "station 2" means resolving that
+// number to this id first, never passing the number itself to
 // `assignStation`. `startedAt`/`startAt`/`totalGames` let "playing now" rows
 // show elapsed time and best-of the same way the operator console already
 // does for its own live sets (see `preferred_started_at` in hub.rs).
-// `tournament{ streams }` rides along in the same request: a set can be
-// pointed at a stream setup instead of (or as well as visible alongside) a
-// physical station, and `Streams` lives on `Tournament`, not `Event` --
-// confirmed against the live schema, there is no `Event.streams`. Unlike
-// `Stations`, `Streams` has no small human-facing integer -- `streamName`
-// is the closest equivalent and is what this app resolves by, the same way
-// a station number is resolved to its opaque id server-side, never a raw id
-// from the frontend.
-const AVAILABLE_SETS_QUERY: &str = "query($slug:String!){ event(slug:$slug){\n                 sets(page:1, perPage:60, sortType:STANDARD, filters:{state:[1,2,6]}){\n                   nodes{ id state fullRoundText startedAt startAt totalGames station{ number } stream{ streamName }\n                     slots{ entrant{ id name } } } }\n                 stations(query:{perPage:32}){ nodes{ id number enabled } }\n                 tournament{ streams{ id streamName enabled } } } }";
+//
+// `Streams` lives on `Tournament` only -- confirmed against the live schema,
+// there is no `Event.streams` at all, so this one was never at risk of the
+// same event-scoping trap. Unlike `Stations`, `Streams` has no small
+// human-facing integer -- `streamName` is the closest equivalent and is what
+// this app resolves by, the same way a station number is resolved to its
+// opaque id server-side, never a raw id from the frontend.
+const AVAILABLE_SETS_QUERY: &str = "query($slug:String!){ event(slug:$slug){\n                 sets(page:1, perPage:60, sortType:STANDARD, filters:{state:[1,2,6]}){\n                   nodes{ id state fullRoundText startedAt startAt totalGames station{ number } stream{ streamName }\n                     slots{ entrant{ id name } } } }\n                 tournament{ stations(perPage:32){ nodes{ id number enabled } } streams{ id streamName enabled } } } }";
 // `assignStation`'s own required args, confirmed against the live schema:
 // just the set and the station's opaque id.
 const ASSIGN_STATION_MUTATION: &str =
@@ -616,7 +630,8 @@ fn parse_available_sets(data: &Value) -> Value {
     }
     let station_nodes = data
         .get("event")
-        .and_then(|e| e.get("stations"))
+        .and_then(|e| e.get("tournament"))
+        .and_then(|t| t.get("stations"))
         .and_then(|s| s.get("nodes"))
         .and_then(|n| n.as_array())
         .unwrap_or(&empty);
@@ -828,10 +843,10 @@ mod tests {
                         ],
                     },
                 ]},
-                "stations": { "nodes": [
+                "tournament": { "stations": { "nodes": [
                     {"id": "opaque-st-1", "number": 1, "enabled": true},
                     {"id": "opaque-st-2", "number": 2, "enabled": true},
-                ]},
+                ]}},
             }
         });
 
@@ -873,7 +888,7 @@ mod tests {
                         ],
                     },
                 ]},
-                "stations": { "nodes": [] },
+                "tournament": { "stations": { "nodes": [] } },
             }
         });
         let out = parse_available_sets(&data);
@@ -905,7 +920,7 @@ mod tests {
                         ],
                     },
                 ]},
-                "stations": { "nodes": [] },
+                "tournament": { "stations": { "nodes": [] } },
             }
         });
         let out = parse_available_sets(&data);
@@ -941,7 +956,7 @@ mod tests {
                         ],
                     },
                 ]},
-                "stations": { "nodes": [] },
+                "tournament": { "stations": { "nodes": [] } },
             }
         });
         let out = parse_available_sets(&data);
@@ -966,7 +981,7 @@ mod tests {
                         ],
                     },
                 ]},
-                "stations": { "nodes": [] },
+                "tournament": { "stations": { "nodes": [] } },
             }
         });
         let out = parse_available_sets(&data);
@@ -993,8 +1008,8 @@ mod tests {
                         ],
                     },
                 ]},
-                "stations": { "nodes": [] },
                 "tournament": {
+                    "stations": { "nodes": [] },
                     "streams": [
                         {"id": 1369478, "streamName": "socalrivals", "enabled": true},
                     ],
@@ -1026,7 +1041,7 @@ mod tests {
                         ],
                     },
                 ]},
-                "stations": { "nodes": [] },
+                "tournament": { "stations": { "nodes": [] } },
             }
         });
         let out = parse_available_sets(&data);

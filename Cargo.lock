@@ -3082,7 +3082,7 @@ dependencies = [
 
 [[package]]
 name = "rivals-station-reporter"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "chrono",
  "serde",
@@ -3641,7 +3641,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "station-core"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "chrono",
  "regex",

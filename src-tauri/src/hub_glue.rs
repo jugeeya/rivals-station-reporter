@@ -201,28 +201,30 @@ pub fn available_sets(inner: &Arc<EngineInner>) -> Result<Value, String> {
 }
 
 /// Start a match on start.gg -- explicit operator action, same standing as
-/// `do_report`. Optionally (re)assigns a station first if the requested one
-/// differs from the set's current station (see `Hub::do_start_match` for the
-/// resolve-then-assign-then-start sequence).
+/// `do_report`. Optionally (re)assigns a station or a stream first if the
+/// requested one differs from the set's current destination (see
+/// `Hub::do_start_match` for the resolve-then-assign-then-start sequence).
 pub fn do_start_match(
     inner: &Arc<EngineInner>,
     set_id: &str,
     station_number: Option<i64>,
+    stream_name: Option<String>,
 ) -> Result<Value, String> {
     let (hub, slug) = hub_and_slug(inner)?;
-    hub.do_start_match(&slug, &json!(set_id), station_number)
+    hub.do_start_match(&slug, &json!(set_id), station_number, stream_name)
         .map_err(err_text)
 }
 
-/// Change a set's station on start.gg without starting it -- explicit
-/// operator action, same standing as `do_start_match`. See
-/// `Hub::do_reassign_station`.
-pub fn do_reassign_station(
+/// Change a set's station or stream on start.gg without starting it --
+/// explicit operator action, same standing as `do_start_match`. See
+/// `Hub::do_reassign_destination`.
+pub fn do_reassign_destination(
     inner: &Arc<EngineInner>,
     set_id: &str,
-    station_number: i64,
+    station_number: Option<i64>,
+    stream_name: Option<String>,
 ) -> Result<Value, String> {
     let (hub, slug) = hub_and_slug(inner)?;
-    hub.do_reassign_station(&slug, &json!(set_id), station_number)
+    hub.do_reassign_destination(&slug, &json!(set_id), station_number, stream_name)
         .map_err(err_text)
 }

@@ -28,14 +28,37 @@
 
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import AppIcon from './AppIcon.vue';
-import { listAvailableSets, startMatch, reassignStation } from '../lib/engine';
+import DestinationDropdown, { type DropdownOption } from './DestinationDropdown.vue';
+import { listAvailableSets, startMatch, reassignDestination } from '../lib/engine';
 import { elapsedSince } from '../lib/operatorFormat';
-import type { AvailableSet, AvailableStation } from '../types';
+import type { AvailableSet, AvailableStation, AvailableStream, Destination } from '../types';
 
 const STARTGG_STATE_ONGOING = 2;
 
+// A destination is encoded as one string key so a single ref per set (like
+// the plain station number this replaced) still works as the picker's
+// v-model: "station:3", "stream:socalrivals", or null for "no destination".
+const STATION_PREFIX = 'station:';
+const STREAM_PREFIX = 'stream:';
+
+function destKey(kind: 'station' | 'stream', value: number | string): string {
+  return kind === 'station' ? `${STATION_PREFIX}${value}` : `${STREAM_PREFIX}${value}`;
+}
+
+function parseDestKey(key: string | null): Destination | null {
+  if (key == null) return null;
+  if (key.startsWith(STATION_PREFIX)) {
+    return { kind: 'station', number: Number(key.slice(STATION_PREFIX.length)) };
+  }
+  if (key.startsWith(STREAM_PREFIX)) {
+    return { kind: 'stream', name: key.slice(STREAM_PREFIX.length) };
+  }
+  return null;
+}
+
 const sets = ref<AvailableSet[]>([]);
 const stations = ref<AvailableStation[]>([]);
+const streams = ref<AvailableStream[]>([]);
 const loaded = ref(false);
 const loadErr = ref('');
 const refreshing = ref(false);
@@ -43,10 +66,19 @@ const busyId = ref<string | null>(null);
 const actionMsg = ref('');
 const actionErr = ref(false);
 
-// One picked station number per set, keyed by set id -- seeded from the
-// set's current station (if any) so leaving the picker untouched preserves
-// today's assignment, and changed freely from there for either group.
-const picked = ref<Record<string, number | null>>({});
+// Stations first (the common case), then streams, each grouped so the type
+// reads at a glance instead of one flat list of ambiguous names/numbers.
+const destinationOptions = computed<DropdownOption[]>(() => [
+  { value: null, label: 'no destination' },
+  ...stations.value.map((st) => ({ value: destKey('station', st.number), label: `Station ${st.number}` })),
+  ...streams.value.map((st) => ({ value: destKey('stream', st.name), label: `Stream: ${st.name}` })),
+]);
+
+// One picked destination key per set, keyed by set id -- seeded from the
+// set's current station/stream (if any) so leaving the picker untouched
+// preserves today's assignment, and changed freely from there for either
+// group.
+const picked = ref<Record<string, string | null>>({});
 
 // Ticks slowly so "elapsed" text stays honest between refreshes without
 // every row needing its own timer -- same pattern as OperatorConsole's nowS.
@@ -81,6 +113,12 @@ function bestOfText(s: AvailableSet): string | null {
 const playingNow = computed(() => sets.value.filter((s) => s.state === STARTGG_STATE_ONGOING));
 const startable = computed(() => sets.value.filter((s) => s.state !== STARTGG_STATE_ONGOING));
 
+function currentDestKey(s: AvailableSet): string | null {
+  if (s.station != null) return destKey('station', s.station);
+  if (s.stream) return destKey('stream', s.stream);
+  return null;
+}
+
 async function refresh() {
   refreshing.value = true;
   loadErr.value = '';
@@ -88,8 +126,9 @@ async function refresh() {
     const res = await listAvailableSets();
     sets.value = res.sets ?? [];
     stations.value = res.stations ?? [];
+    streams.value = res.streams ?? [];
     for (const s of sets.value) {
-      if (!(key(s) in picked.value)) picked.value[key(s)] = s.station;
+      if (!(key(s) in picked.value)) picked.value[key(s)] = currentDestKey(s);
     }
   } catch (e) {
     loadErr.value = String(e);
@@ -116,8 +155,8 @@ async function onStart(s: AvailableSet) {
   busyId.value = id;
   actionMsg.value = '';
   try {
-    const stationNumber = picked.value[id] ?? null;
-    await startMatch(String(s.id), stationNumber);
+    const dest = parseDestKey(picked.value[id] ?? null);
+    await startMatch(String(s.id), dest);
     actionMsg.value = `Started ${playersLabel(s)}.`;
     actionErr.value = false;
     await refresh();
@@ -129,15 +168,19 @@ async function onStart(s: AvailableSet) {
   }
 }
 
-async function onChangeStation(s: AvailableSet) {
+function destinationLabel(dest: Destination): string {
+  return dest.kind === 'station' ? `station ${dest.number}` : `stream "${dest.name}"`;
+}
+
+async function onChangeDestination(s: AvailableSet) {
   const id = key(s);
-  const num = picked.value[id];
-  if (num == null) return;
+  const dest = parseDestKey(picked.value[id] ?? null);
+  if (dest == null) return;
   busyId.value = id;
   actionMsg.value = '';
   try {
-    await reassignStation(String(s.id), num);
-    actionMsg.value = `Moved ${playersLabel(s)} to station ${num}.`;
+    await reassignDestination(String(s.id), dest);
+    actionMsg.value = `Moved ${playersLabel(s)} to ${destinationLabel(dest)}.`;
     actionErr.value = false;
     await refresh();
   } catch (e) {
@@ -190,21 +233,19 @@ async function onChangeStation(s: AvailableSet) {
               </span>
               <span v-if="bestOfText(s)" class="as-bestof">{{ bestOfText(s) }}</span>
 
-              <select
-                class="as-picker"
-                :disabled="busyId === key(s)"
+              <DestinationDropdown
                 v-model="picked[key(s)]"
-              >
-                <option :value="null">no station</option>
-                <option v-for="st in stations" :key="st.number" :value="st.number">
-                  Station {{ st.number }}
-                </option>
-              </select>
+                class="as-picker"
+                :options="destinationOptions"
+                :disabled="busyId === key(s)"
+              />
               <button
                 class="linkish as-change"
-                :disabled="busyId !== null || picked[key(s)] == null || picked[key(s)] === s.station"
-                title="Change this set's station on start.gg (does not restart the match)"
-                @click="onChangeStation(s)"
+                :disabled="
+                  busyId !== null || picked[key(s)] == null || picked[key(s)] === currentDestKey(s)
+                "
+                title="Change this set's station or stream on start.gg (does not restart the match)"
+                @click="onChangeDestination(s)"
               >
                 Change
               </button>
@@ -222,16 +263,12 @@ async function onChangeStation(s: AvailableSet) {
               <span class="as-round" :title="s.fullRoundText">{{ s.fullRoundText || '·' }}</span>
               <span class="as-players" :title="playersLabel(s)">{{ playersLabel(s) }}</span>
 
-              <select
-                class="as-picker"
-                :disabled="busyId === key(s)"
+              <DestinationDropdown
                 v-model="picked[key(s)]"
-              >
-                <option :value="null">no station</option>
-                <option v-for="st in stations" :key="st.number" :value="st.number">
-                  Station {{ st.number }}
-                </option>
-              </select>
+                class="as-picker"
+                :options="destinationOptions"
+                :disabled="busyId === key(s)"
+              />
 
               <button
                 class="btn as-btn"
@@ -402,35 +439,10 @@ async function onChangeStation(s: AvailableSet) {
   white-space: nowrap;
 }
 
-// The native dropdown arrow ignores the theme entirely (a plain OS-drawn
-// triangle on some platforms, invisible against a dark background on
-// others), so it's replaced with a themed chevron drawn as a background
-// image -- appearance:none removes the native one and everything it would
-// have drawn, including its arrow.
+// DestinationDropdown.vue owns its own closed/open styling now; this row only needs to
+// say how the whole control sizes within the flex row.
 .as-picker {
-  appearance: none;
   flex: 0 0 auto;
-  background-color: var(--surface-inset);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='rgba(255,255,255,0.6)' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 0.4em center;
-  background-size: 0.85em;
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--radius-button);
-  color: var(--text-primary);
-  font: inherit;
-  font-size: 0.75rem;
-  padding: 0.25em 1.5em 0.25em 0.45em;
-  cursor: pointer;
-
-  &:focus-visible {
-    outline: 2px solid rgba(99, 102, 241, 0.6);
-    outline-offset: 1px;
-  }
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
 }
 
 .as-change {

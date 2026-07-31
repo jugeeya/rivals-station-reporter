@@ -195,6 +195,63 @@ fn resolve_station_id(data: &Value, num: i64) -> Result<Value, (Value, u16)> {
         })
 }
 
+/// Same as [`resolve_station_id`], but for a stream: `Streams` has no small
+/// human-facing integer the way `Stations` has `number`, so this resolves by
+/// `streamName` instead -- still never trusting a raw id from the frontend.
+fn resolve_stream_id(data: &Value, name: &str) -> Result<Value, (Value, u16)> {
+    let streams = data
+        .get("streams")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    streams
+        .iter()
+        .find(|s| s.get("name").and_then(|n| n.as_str()) == Some(name))
+        .map(|s| s.get("id").cloned().unwrap_or(Value::Null))
+        .ok_or_else(|| {
+            (
+                json!({"error": format!("Stream \"{}\" not found on start.gg.", name)}),
+                404,
+            )
+        })
+}
+
+/// A set's assignment target: a physical station (by number) or a stream
+/// setup (by name) -- mutually exclusive, resolved server-side either way.
+/// Shared by `Hub::do_start_match` and `Hub::do_reassign_destination`.
+enum Destination {
+    Station(i64),
+    Stream(String),
+}
+
+impl Destination {
+    fn from_parts(
+        station_number: Option<i64>,
+        stream_name: Option<String>,
+    ) -> Result<Option<Destination>, (Value, u16)> {
+        match (station_number, stream_name) {
+            (Some(_), Some(_)) => Err((
+                json!({"error": "Choose either a station or a stream, not both."}),
+                400,
+            )),
+            (Some(n), None) => Ok(Some(Destination::Station(n))),
+            (None, Some(s)) => Ok(Some(Destination::Stream(s))),
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// Whether a set (as `available_sets` normalizes it) is already assigned
+    /// to this destination -- an unchanged destination is never reassigned.
+    fn matches_current(&self, target: &Value) -> bool {
+        match self {
+            Destination::Station(n) => target.get("station").and_then(|v| v.as_i64()) == Some(*n),
+            Destination::Stream(name) => {
+                target.get("stream").and_then(|v| v.as_str()) == Some(name.as_str())
+            }
+        }
+    }
+}
+
 // -- Hub ------------------------------------------------------------------------
 
 /// Everything the Python `Hub.__init__` kept as mutable attributes, behind one
@@ -1199,33 +1256,65 @@ impl Hub {
             .map_err(|e| (json!({"error": format!("start.gg error: {}", e)}), 502))
     }
 
+    /// Resolve `dest` against a fresh `available_sets` read and assign it,
+    /// returning a human label (`"station 3"` / `stream "socalrivals"`) for
+    /// logging. Shared by `do_start_match` and `do_reassign_destination`.
+    fn assign(
+        &self,
+        data: &Value,
+        set_id: &Value,
+        dest: &Destination,
+    ) -> Result<String, (Value, u16)> {
+        match dest {
+            Destination::Station(num) => {
+                let station_id = resolve_station_id(data, *num)?;
+                if let Err(e) = self.startgg.assign_station(set_id, &station_id) {
+                    return Err((
+                        json!({"error": format!("start.gg station assignment failed: {}", e)}),
+                        502,
+                    ));
+                }
+                Ok(format!("station {num}"))
+            }
+            Destination::Stream(name) => {
+                let stream_id = resolve_stream_id(data, name)?;
+                if let Err(e) = self.startgg.assign_stream(set_id, &stream_id) {
+                    return Err((
+                        json!({"error": format!("start.gg stream assignment failed: {}", e)}),
+                        502,
+                    ));
+                }
+                Ok(format!("stream \"{name}\""))
+            }
+        }
+    }
+
     /// Start a match on start.gg -- explicit operator action, same standing
     /// as `do_report`'s Report button (the mutation this calls,
     /// `markSetInProgress`, is "the TO's call" the rest of this app
     /// deliberately never invokes on its own). Optionally (re)assigns a
-    /// station first, as one user-facing action.
+    /// station or a stream first, as one user-facing action.
     ///
-    /// The station number is never trusted blindly from the frontend: it is
-    /// resolved to start.gg's opaque station id server-side, against a fresh
+    /// The destination is never trusted blindly from the frontend: it is
+    /// resolved to start.gg's opaque id server-side, against a fresh
     /// `available_sets` read, the same way `matching::map_slots_to_entrants`
     /// never trusts a client-supplied slot/entrant pairing without
     /// cross-checking.
     ///
     /// Per direct user instruction, this supersedes a prior session's more
-    /// conservative decision here: a `station_number` naming a DIFFERENT
-    /// station than the one already assigned used to be refused outright
-    /// (409), on the reasoning that reassigning a set out from under
-    /// whichever station it's bound to was a bigger, more surprising side
-    /// effect than "start this set" asked for. The operator has since said
-    /// explicitly that changing a set's station from inside this app is
-    /// wanted, so that refusal is gone: whenever the requested station
-    /// differs from the current one (whether the set currently has none, or
-    /// a different one), `assign_station` (re)assigns it before
-    /// `start_match` runs. If it already has the SAME station requested,
-    /// assigning is simply skipped (nothing to do) and `start_match` still
-    /// runs.
+    /// conservative decision here: a destination naming something DIFFERENT
+    /// than what's already assigned used to be refused outright (409), on
+    /// the reasoning that reassigning a set out from under whichever
+    /// station it's bound to was a bigger, more surprising side effect than
+    /// "start this set" asked for. The operator has since said explicitly
+    /// that changing a set's station from inside this app is wanted, so
+    /// that refusal is gone: whenever the requested destination differs
+    /// from the current one (whether the set currently has none, or a
+    /// different one), it's (re)assigned before `start_match` runs. If it
+    /// already matches, assigning is simply skipped (nothing to do) and
+    /// `start_match` still runs.
     ///
-    /// If `station_number` requires an assignment and that assignment
+    /// If the destination requires an assignment and that assignment
     /// fails, `start_match` is never attempted -- a partial failure must
     /// never leave the operator thinking the match started when only the
     /// (failed) assignment was attempted, or believing an assignment
@@ -1235,6 +1324,7 @@ impl Hub {
         slug: &str,
         set_id: &Value,
         station_number: Option<i64>,
+        stream_name: Option<String>,
     ) -> Result<Value, (Value, u16)> {
         if !self.startgg.enabled() {
             return Err((
@@ -1242,6 +1332,7 @@ impl Hub {
                 501,
             ));
         }
+        let dest = Destination::from_parts(station_number, stream_name.clone())?;
         let data = self
             .startgg
             .available_sets(slug)
@@ -1264,23 +1355,14 @@ impl Hub {
                 ))
             }
         };
-        let current_station = target.get("station").and_then(|v| v.as_i64());
 
-        if let Some(num) = station_number {
-            if current_station != Some(num) {
-                let station_id = resolve_station_id(&data, num)?;
-                if let Err(e) = self.startgg.assign_station(set_id, &station_id) {
-                    return Err((
-                        json!({"error": format!("start.gg station assignment failed: {}", e)}),
-                        502,
-                    ));
-                }
-                (self.log)(&format!(
-                    "assigned set {set_id_s} to station {num} on start.gg"
-                ));
+        if let Some(d) = &dest {
+            if !d.matches_current(target) {
+                let label = self.assign(&data, set_id, d)?;
+                (self.log)(&format!("assigned set {set_id_s} to {label} on start.gg"));
             }
-            // else: already assigned to the requested station -- nothing to
-            // assign; fall through to start_match below.
+            // else: already assigned to the requested destination -- nothing
+            // to assign; fall through to start_match below.
         }
 
         if let Err(e) = self.startgg.start_match(set_id) {
@@ -1290,22 +1372,26 @@ impl Hub {
             ));
         }
         (self.log)(&format!("started match for set {set_id_s} on start.gg"));
-        Ok(json!({"ok": true, "setId": set_id, "stationAssigned": station_number}))
+        Ok(json!({
+            "ok": true, "setId": set_id,
+            "stationAssigned": station_number, "streamAssigned": stream_name,
+        }))
     }
 
-    /// Change a set's station on start.gg without starting it -- for a set
-    /// that's already playing (state 2, "playing now" in the Current Sets
-    /// panel), where there's no "start" action to also fire alongside a
-    /// station change. Shares `do_start_match`'s security property: the
-    /// station number is resolved to start.gg's opaque id server-side
-    /// against a fresh `available_sets` read, never trusted as a raw id
-    /// from the frontend. Only ever calls `assign_station` -- never
+    /// Change a set's station or stream on start.gg without starting it --
+    /// for a set that's already playing (state 2, "playing now" in the
+    /// Current Sets panel), where there's no "start" action to also fire
+    /// alongside a destination change. Shares `do_start_match`'s security
+    /// property: the destination is resolved to start.gg's opaque id
+    /// server-side against a fresh `available_sets` read, never trusted as
+    /// a raw id from the frontend. Only ever assigns -- never calls
     /// `start_match`.
-    pub fn do_reassign_station(
+    pub fn do_reassign_destination(
         &self,
         slug: &str,
         set_id: &Value,
-        station_number: i64,
+        station_number: Option<i64>,
+        stream_name: Option<String>,
     ) -> Result<Value, (Value, u16)> {
         if !self.startgg.enabled() {
             return Err((
@@ -1313,6 +1399,8 @@ impl Hub {
                 501,
             ));
         }
+        let dest = Destination::from_parts(station_number, stream_name.clone())?
+            .ok_or_else(|| (json!({"error": "No station or stream specified."}), 400))?;
         let data = self
             .startgg
             .available_sets(slug)
@@ -1332,17 +1420,12 @@ impl Hub {
                 404,
             ));
         }
-        let station_id = resolve_station_id(&data, station_number)?;
-        if let Err(e) = self.startgg.assign_station(set_id, &station_id) {
-            return Err((
-                json!({"error": format!("start.gg station assignment failed: {}", e)}),
-                502,
-            ));
-        }
-        (self.log)(&format!(
-            "assigned set {set_id_s} to station {station_number} on start.gg"
-        ));
-        Ok(json!({"ok": true, "setId": set_id, "stationAssigned": station_number}))
+        let label = self.assign(&data, set_id, &dest)?;
+        (self.log)(&format!("assigned set {set_id_s} to {label} on start.gg"));
+        Ok(json!({
+            "ok": true, "setId": set_id,
+            "stationAssigned": station_number, "streamAssigned": stream_name,
+        }))
     }
 
     /// Remember which save tag belongs to which start.gg entrant.
@@ -1972,9 +2055,12 @@ mod tests {
         /// with -- lets tests assert the opaque id was resolved server-side,
         /// never the raw station number.
         assign_calls: Mutex<Vec<(Value, Value)>>,
+        /// Same as `assign_calls`, for `assign_stream`.
+        assign_stream_calls: Mutex<Vec<(Value, Value)>>,
         /// Recorded setIds `start_match` was called with.
         start_calls: Mutex<Vec<Value>>,
         assign_station_should_fail: Mutex<bool>,
+        assign_stream_should_fail: Mutex<bool>,
         start_match_should_fail: Mutex<bool>,
         /// Extra fields merged onto `station_set`'s returned object -- used
         /// to simulate start.gg's `startedAt`/`startAt`/`totalGames`
@@ -2007,10 +2093,14 @@ mod tests {
                 reports: Mutex::new(Vec::new()),
                 set_games_override: Mutex::new(None),
                 set_state_override: Mutex::new(Value::Null),
-                available_sets_response: Mutex::new(json!({"sets": [], "stations": []})),
+                available_sets_response: Mutex::new(
+                    json!({"sets": [], "stations": [], "streams": []}),
+                ),
                 assign_calls: Mutex::new(Vec::new()),
+                assign_stream_calls: Mutex::new(Vec::new()),
                 start_calls: Mutex::new(Vec::new()),
                 assign_station_should_fail: Mutex::new(false),
+                assign_stream_should_fail: Mutex::new(false),
                 start_match_should_fail: Mutex::new(false),
                 station_set_extra: Mutex::new(json!({})),
                 station_set_ids: Mutex::new(HashMap::new()),
@@ -2061,12 +2151,20 @@ mod tests {
             self.assign_calls.lock().unwrap().clone()
         }
 
+        fn assign_stream_calls(&self) -> Vec<(Value, Value)> {
+            self.assign_stream_calls.lock().unwrap().clone()
+        }
+
         fn start_calls(&self) -> Vec<Value> {
             self.start_calls.lock().unwrap().clone()
         }
 
         fn fail_assign_station(&self) {
             *self.assign_station_should_fail.lock().unwrap() = true;
+        }
+
+        fn fail_assign_stream(&self) {
+            *self.assign_stream_should_fail.lock().unwrap() = true;
         }
 
         /// Simulate a set's remote state as seen by the direct-by-id check --
@@ -2213,6 +2311,17 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((set_id.clone(), station_id.clone()));
+            Ok(())
+        }
+        fn assign_stream(&self, set_id: &Value, stream_id: &Value) -> Result<(), StartggError> {
+            if *self.0.assign_stream_should_fail.lock().unwrap() {
+                return Err(StartggError("assignStream failed".to_string()));
+            }
+            self.0
+                .assign_stream_calls
+                .lock()
+                .unwrap()
+                .push((set_id.clone(), stream_id.clone()));
             Ok(())
         }
         fn start_match(&self, set_id: &Value) -> Result<(), StartggError> {
@@ -3290,8 +3399,19 @@ mod tests {
         })
     }
 
+    fn set_with_stream(id: &str, stream: Value) -> Value {
+        json!({
+            "id": id, "fullRoundText": "Winners Quarter-Final", "stream": stream,
+            "entrants": [{"id": "E1", "name": "jugeeya"}, {"id": "E2", "name": "Kimchi"}],
+        })
+    }
+
     fn stations_list() -> Value {
         json!([{"id": "opaque-st-1", "number": 1}, {"id": "opaque-st-2", "number": 2}])
+    }
+
+    fn streams_list() -> Value {
+        json!([{"id": "opaque-stream-1", "name": "socalrivals"}])
     }
 
     #[test]
@@ -3305,7 +3425,7 @@ mod tests {
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
-            .do_start_match(SLUG, &json!("S1"), None)
+            .do_start_match(SLUG, &json!("S1"), None, None)
             .expect("start match with no station succeeds");
         assert_eq!(res["ok"], json!(true));
         assert_eq!(
@@ -3330,7 +3450,7 @@ mod tests {
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
-            .do_start_match(SLUG, &json!("S1"), Some(2))
+            .do_start_match(SLUG, &json!("S1"), Some(2), None)
             .expect("assign then start succeeds");
         assert_eq!(res["ok"], json!(true));
         assert_eq!(
@@ -3356,7 +3476,7 @@ mod tests {
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
-            .do_start_match(SLUG, &json!("S1"), Some(2))
+            .do_start_match(SLUG, &json!("S1"), Some(2), None)
             .expect("requesting the station it already has succeeds");
         assert_eq!(res["ok"], json!(true));
         assert!(
@@ -3382,7 +3502,7 @@ mod tests {
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
-            .do_start_match(SLUG, &json!("S1"), Some(2))
+            .do_start_match(SLUG, &json!("S1"), Some(2), None)
             .expect("a set already on a different station can be moved and started");
         assert_eq!(res["ok"], json!(true));
         assert_eq!(
@@ -3409,7 +3529,7 @@ mod tests {
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
-            .do_start_match(SLUG, &json!("S1"), Some(2))
+            .do_start_match(SLUG, &json!("S1"), Some(2), None)
             .expect_err("a failed assignment must surface as an error");
         assert_eq!(err.1, 502);
         assert!(
@@ -3430,7 +3550,7 @@ mod tests {
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
-            .do_start_match(SLUG, &json!("NOPE"), None)
+            .do_start_match(SLUG, &json!("NOPE"), None, None)
             .expect_err("a set not in the available list must not be started blindly");
         assert_eq!(err.1, 404);
         assert!(fake.start_calls().is_empty());
@@ -3439,13 +3559,125 @@ mod tests {
     #[test]
     fn do_start_match_requires_a_start_gg_token() {
         let h = Hub::new(None, None, None, None, None, None, None, None);
-        let err = h.do_start_match(SLUG, &json!("S1"), None).unwrap_err();
+        let err = h
+            .do_start_match(SLUG, &json!("S1"), None, None)
+            .unwrap_err();
         assert_eq!(err.1, 501);
     }
 
-    // ---- Current Sets: do_reassign_station ---------------------------------
-    // Changes a set's station without starting it -- for a set that's
-    // already playing, where there's no "start" action to also fire.
+    #[test]
+    fn do_start_match_with_a_stream_assigns_then_starts() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_stream("S1", Value::Null)],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let res = h
+            .do_start_match(SLUG, &json!("S1"), None, Some("socalrivals".to_string()))
+            .expect("assign a stream then start succeeds");
+        assert_eq!(res["ok"], json!(true));
+        assert_eq!(
+            fake.assign_stream_calls(),
+            vec![(json!("S1"), json!("opaque-stream-1"))],
+            "stream name resolved to its opaque id, not passed as the raw name"
+        );
+        assert_eq!(fake.start_calls(), vec![json!("S1")]);
+        assert!(
+            fake.assign_calls().is_empty(),
+            "a stream destination must never call assign_station"
+        );
+    }
+
+    #[test]
+    fn do_start_match_with_the_same_stream_already_assigned_skips_assign_and_starts() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_stream("S1", json!("socalrivals"))],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let res = h
+            .do_start_match(SLUG, &json!("S1"), None, Some("socalrivals".to_string()))
+            .expect("requesting the stream it already has succeeds");
+        assert_eq!(res["ok"], json!(true));
+        assert!(
+            fake.assign_stream_calls().is_empty(),
+            "already assigned to the requested stream -> no redundant assign_stream call"
+        );
+        assert_eq!(fake.start_calls(), vec![json!("S1")]);
+    }
+
+    #[test]
+    fn do_start_match_with_an_unknown_stream_name_is_refused() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_stream("S1", Value::Null)],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let err = h
+            .do_start_match(SLUG, &json!("S1"), None, Some("nonexistent".to_string()))
+            .expect_err("a stream name not on this tournament must be refused");
+        assert_eq!(err.1, 404);
+        assert!(fake.assign_stream_calls().is_empty());
+        assert!(fake.start_calls().is_empty());
+    }
+
+    #[test]
+    fn do_start_match_with_both_a_station_and_a_stream_is_refused() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("S1", Value::Null)],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let err = h
+            .do_start_match(SLUG, &json!("S1"), Some(2), Some("socalrivals".to_string()))
+            .expect_err("a station and a stream at once must be refused, not silently resolved");
+        assert_eq!(err.1, 400);
+        assert!(fake.assign_calls().is_empty());
+        assert!(fake.assign_stream_calls().is_empty());
+        assert!(fake.start_calls().is_empty());
+    }
+
+    #[test]
+    fn do_start_match_a_failed_stream_assignment_never_calls_start_match() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_stream("S1", Value::Null)],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        fake.fail_assign_stream();
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let err = h
+            .do_start_match(SLUG, &json!("S1"), None, Some("socalrivals".to_string()))
+            .expect_err("a failed stream assignment must surface as an error");
+        assert_eq!(err.1, 502);
+        assert!(
+            fake.start_calls().is_empty(),
+            "a failed assign_stream must not let start_match run"
+        );
+    }
+
+    // ---- Current Sets: do_reassign_destination -----------------------------
+    // Changes a set's station or stream without starting it -- for a set
+    // that's already playing, where there's no "start" action to also fire.
 
     #[test]
     fn do_reassign_station_assigns_when_none_set() {
@@ -3458,7 +3690,7 @@ mod tests {
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
-            .do_reassign_station(SLUG, &json!("S1"), 2)
+            .do_reassign_destination(SLUG, &json!("S1"), Some(2), None)
             .expect("assigning a station to a set with none succeeds");
         assert_eq!(res["ok"], json!(true));
         assert_eq!(res["stationAssigned"], json!(2));
@@ -3484,7 +3716,7 @@ mod tests {
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
-            .do_reassign_station(SLUG, &json!("S1"), 2)
+            .do_reassign_destination(SLUG, &json!("S1"), Some(2), None)
             .expect("moving a set already on station 1 to station 2 succeeds");
         assert_eq!(res["ok"], json!(true));
         assert_eq!(
@@ -3509,7 +3741,7 @@ mod tests {
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
-            .do_reassign_station(SLUG, &json!("S1"), 99)
+            .do_reassign_destination(SLUG, &json!("S1"), Some(99), None)
             .expect_err("station 99 doesn't exist on this event");
         assert_eq!(err.1, 404);
         assert!(
@@ -3529,7 +3761,7 @@ mod tests {
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
-            .do_reassign_station(SLUG, &json!("NOPE"), 2)
+            .do_reassign_destination(SLUG, &json!("NOPE"), Some(2), None)
             .expect_err("a set not in the available list must not be reassigned blindly");
         assert_eq!(err.1, 404);
         assert!(fake.assign_calls().is_empty());
@@ -3547,7 +3779,7 @@ mod tests {
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
-            .do_reassign_station(SLUG, &json!("S1"), 2)
+            .do_reassign_destination(SLUG, &json!("S1"), Some(2), None)
             .expect_err("a failed assignment must surface as an error");
         assert_eq!(err.1, 502);
     }
@@ -3555,7 +3787,72 @@ mod tests {
     #[test]
     fn do_reassign_station_requires_a_start_gg_token() {
         let h = Hub::new(None, None, None, None, None, None, None, None);
-        let err = h.do_reassign_station(SLUG, &json!("S1"), 2).unwrap_err();
+        let err = h
+            .do_reassign_destination(SLUG, &json!("S1"), Some(2), None)
+            .unwrap_err();
         assert_eq!(err.1, 501);
+    }
+
+    #[test]
+    fn do_reassign_destination_assigns_a_stream() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_stream("S1", Value::Null)],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let res = h
+            .do_reassign_destination(SLUG, &json!("S1"), None, Some("socalrivals".to_string()))
+            .expect("assigning a stream to a set with none succeeds");
+        assert_eq!(res["ok"], json!(true));
+        assert_eq!(res["streamAssigned"], json!("socalrivals"));
+        assert_eq!(
+            fake.assign_stream_calls(),
+            vec![(json!("S1"), json!("opaque-stream-1"))],
+            "stream name resolved to its opaque id, not passed as the raw name"
+        );
+        assert!(
+            fake.start_calls().is_empty(),
+            "do_reassign_destination never calls start_match"
+        );
+    }
+
+    #[test]
+    fn do_reassign_destination_requires_a_destination() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("S1", Value::Null)],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let err = h
+            .do_reassign_destination(SLUG, &json!("S1"), None, None)
+            .expect_err("neither a station nor a stream must be refused");
+        assert_eq!(err.1, 400);
+    }
+
+    #[test]
+    fn do_reassign_destination_refuses_both_a_station_and_a_stream() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("S1", Value::Null)],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let err = h
+            .do_reassign_destination(SLUG, &json!("S1"), Some(2), Some("socalrivals".to_string()))
+            .expect_err("both at once must be refused, not silently resolved");
+        assert_eq!(err.1, 400);
+        assert!(fake.assign_calls().is_empty());
+        assert!(fake.assign_stream_calls().is_empty());
     }
 }

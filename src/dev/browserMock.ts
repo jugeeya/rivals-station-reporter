@@ -126,10 +126,11 @@ function startFakeTournament() {
 // either -- the UI fetches it on its own (see CurrentSets.vue). One set
 // already playing (state 2, with startggStartedAt/startggTotalGames so the
 // elapsed-time/best-of display has something real to show), one startable
-// set with a station already assigned, one startable set with none
-// (exercises the inline picker), and three stations to pick from.
+// set with a station already assigned, one startable set with a stream
+// already assigned, one startable set with neither (exercises the inline
+// picker), three stations and two streams to pick from.
 
-let availableSetsData: any = { sets: [], stations: [] };
+let availableSetsData: any = { sets: [], stations: [], streams: [] };
 
 function seedAvailableSets() {
   availableSetsData = {
@@ -139,6 +140,7 @@ function seedAvailableSets() {
         state: 2,
         fullRoundText: 'Winners Quarter-Final',
         station: 1,
+        stream: null,
         entrants: [
           { id: 'E1', name: 'jugeeya' },
           { id: 'E4', name: 'Kimchi' },
@@ -151,9 +153,21 @@ function seedAvailableSets() {
         state: 1,
         fullRoundText: 'Winners Round 1',
         station: 2,
+        stream: null,
         entrants: [
           { id: 'E5', name: 'Loom' },
           { id: 'E6', name: 'Rando' },
+        ],
+      },
+      {
+        id: 'sgg-set-303',
+        state: 1,
+        fullRoundText: 'Winners Round 2',
+        station: null,
+        stream: 'socalrivals',
+        entrants: [
+          { id: 'E7', name: 'Nap' },
+          { id: 'E8', name: 'Sopo' },
         ],
       },
       {
@@ -161,6 +175,7 @@ function seedAvailableSets() {
         state: 1,
         fullRoundText: 'Losers Round 2',
         station: null,
+        stream: null,
         entrants: [
           { id: 'E3', name: 'Brujita' },
           { id: 'E2', name: 'Kimchi' },
@@ -168,6 +183,7 @@ function seedAvailableSets() {
       },
     ],
     stations: [{ number: 1 }, { number: 2 }, { number: 3 }],
+    streams: [{ name: 'socalrivals' }, { name: 'main-stage' }],
   };
 }
 
@@ -239,7 +255,7 @@ function applySeed(next: unknown) {
   delete clone.availableSets;
   for (const k of Object.keys(state)) delete state[k];
   Object.assign(state, clone);
-  availableSetsData = seededAvailableSets ?? { sets: [], stations: [] };
+  availableSetsData = seededAvailableSets ?? { sets: [], stations: [], streams: [] };
 }
 
 // ---- invoke fixtures ---------------------------------------------------------
@@ -257,7 +273,7 @@ const handlers: Record<string, (args: any) => any> = {
       } else {
         state.hubUrl = null;
         state.hubSnapshot = { sets: [], stations: {} };
-        availableSetsData = { sets: [], stations: [] };
+        availableSetsData = { sets: [], stations: [], streams: [] };
       }
     }
     return JSON.parse(JSON.stringify(state));

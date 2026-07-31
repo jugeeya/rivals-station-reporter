@@ -107,29 +107,32 @@ pub fn list_available_sets(engine: State<'_, Engine>) -> Result<Value, String> {
 }
 
 /// Start a match on start.gg -- the same explicit-click standing as
-/// `report_winner`. `station_number` is optional: when given and it differs
-/// from the set's current station (whether that's none, or a different
-/// one), it's (re)assigned first as one user-facing action.
+/// `report_winner`. `station_number`/`stream_name` are optional and mutually
+/// exclusive: when one is given and it differs from the set's current
+/// destination (whether that's none, or a different one), it's (re)assigned
+/// first as one user-facing action.
 #[tauri::command]
 pub fn start_match(
     engine: State<'_, Engine>,
     set_id: String,
     station_number: Option<i64>,
+    stream_name: Option<String>,
 ) -> Result<Value, String> {
-    crate::hub_glue::do_start_match(&engine.0, &set_id, station_number)
+    crate::hub_glue::do_start_match(&engine.0, &set_id, station_number, stream_name)
 }
 
-/// Change a set's station on start.gg without starting it -- for a set
-/// that's already playing, in the Current Sets panel's "Playing now" group,
-/// where there's no "start" action to also fire alongside a station change.
-/// Same explicit-click standing as `start_match`.
+/// Change a set's station or stream on start.gg without starting it -- for a
+/// set that's already playing, in the Current Sets panel's "Playing now"
+/// group, where there's no "start" action to also fire alongside a
+/// destination change. Same explicit-click standing as `start_match`.
 #[tauri::command]
-pub fn reassign_station(
+pub fn reassign_destination(
     engine: State<'_, Engine>,
     set_id: String,
-    station_number: i64,
+    station_number: Option<i64>,
+    stream_name: Option<String>,
 ) -> Result<Value, String> {
-    crate::hub_glue::do_reassign_station(&engine.0, &set_id, station_number)
+    crate::hub_glue::do_reassign_destination(&engine.0, &set_id, station_number, stream_name)
 }
 
 // ---- autostart ---------------------------------------------------------------

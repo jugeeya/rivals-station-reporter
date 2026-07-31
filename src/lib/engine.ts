@@ -4,7 +4,7 @@
 import { reactive } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AvailableSetsResponse, Config, EngineState, EventSummary } from '../types';
+import type { AvailableSetsResponse, Config, Destination, EngineState, EventSummary } from '../types';
 
 const empty: EngineState = {
   config: {
@@ -89,19 +89,28 @@ export function deleteSet(station: number, setId: string) {
 }
 
 // Current Sets: both entrants determined, either playing now (state 2) or
-// startable (state 1/6), plus the event's stations. Starting a startable set
-// optionally (re)assigns a station first as part of the same click; a
-// playing-now set can only have its station changed (reassignStation), never
-// started again. Same standing as reportWinner: markSetInProgress and
-// assignStation are only ever reached through these explicit actions.
+// startable (state 1/6), plus the event's stations and streams. Starting a
+// startable set optionally (re)assigns a station or a stream first as part
+// of the same click; a playing-now set can only have its destination
+// changed (reassignDestination), never started again. Same standing as
+// reportWinner: markSetInProgress, assignStation, and assignStream are only
+// ever reached through these explicit actions.
 export function listAvailableSets(): Promise<AvailableSetsResponse> {
   return invoke('list_available_sets');
 }
 
-export function startMatch(setId: string, stationNumber?: number | null) {
-  return invoke('start_match', { setId, stationNumber: stationNumber ?? null });
+export function startMatch(setId: string, destination?: Destination | null) {
+  return invoke('start_match', {
+    setId,
+    stationNumber: destination?.kind === 'station' ? destination.number : null,
+    streamName: destination?.kind === 'stream' ? destination.name : null,
+  });
 }
 
-export function reassignStation(setId: string, stationNumber: number) {
-  return invoke('reassign_station', { setId, stationNumber });
+export function reassignDestination(setId: string, destination: Destination) {
+  return invoke('reassign_destination', {
+    setId,
+    stationNumber: destination.kind === 'station' ? destination.number : null,
+    streamName: destination.kind === 'stream' ? destination.name : null,
+  });
 }

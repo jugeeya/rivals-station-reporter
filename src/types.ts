@@ -100,6 +100,7 @@ export interface AvailableSet {
   state: number | null;
   fullRoundText: string;
   station: number | null;
+  stream: string | null;
   entrants: AvailableSetEntrant[];
   startggStartedAt?: number | null;
   startggTotalGames?: number | null;
@@ -112,7 +113,20 @@ export interface AvailableStation {
   number: number;
 }
 
+/** A tournament stream setup, as `available_sets` reports it: `Streams` has
+ *  no small human-facing integer the way `Stations` has `number`, so `name`
+ *  (start.gg's `streamName`) is the equivalent key this app resolves by --
+ *  the opaque id is resolved server-side and never sent to the frontend. */
+export interface AvailableStream {
+  name: string;
+}
+
 export interface AvailableSetsResponse {
   sets: AvailableSet[];
   stations: AvailableStation[];
+  streams: AvailableStream[];
 }
+
+/** What a set can be pointed at: a physical station (by number) or a stream
+ *  setup (by name) -- mutually exclusive, mirroring `hub::Destination`. */
+export type Destination = { kind: 'station'; number: number } | { kind: 'stream'; name: string };

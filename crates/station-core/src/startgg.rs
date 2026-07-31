@@ -102,11 +102,22 @@ const SET_STATE_QUERY: &str = "query($setId:ID!){ set(id:$setId){ state } }";
 // `assignStation`. `startedAt`/`startAt`/`totalGames` let "playing now" rows
 // show elapsed time and best-of the same way the operator console already
 // does for its own live sets (see `preferred_started_at` in hub.rs).
-const AVAILABLE_SETS_QUERY: &str = "query($slug:String!){ event(slug:$slug){\n                 sets(page:1, perPage:60, sortType:STANDARD, filters:{state:[1,2,6]}){\n                   nodes{ id state fullRoundText startedAt startAt totalGames station{ number }\n                     slots{ entrant{ id name } } } }\n                 stations(query:{perPage:32}){ nodes{ id number enabled } } } }";
+// `tournament{ streams }` rides along in the same request: a set can be
+// pointed at a stream setup instead of (or as well as visible alongside) a
+// physical station, and `Streams` lives on `Tournament`, not `Event` --
+// confirmed against the live schema, there is no `Event.streams`. Unlike
+// `Stations`, `Streams` has no small human-facing integer -- `streamName`
+// is the closest equivalent and is what this app resolves by, the same way
+// a station number is resolved to its opaque id server-side, never a raw id
+// from the frontend.
+const AVAILABLE_SETS_QUERY: &str = "query($slug:String!){ event(slug:$slug){\n                 sets(page:1, perPage:60, sortType:STANDARD, filters:{state:[1,2,6]}){\n                   nodes{ id state fullRoundText startedAt startAt totalGames station{ number } stream{ streamName }\n                     slots{ entrant{ id name } } } }\n                 stations(query:{perPage:32}){ nodes{ id number enabled } }\n                 tournament{ streams{ id streamName enabled } } } }";
 // `assignStation`'s own required args, confirmed against the live schema:
 // just the set and the station's opaque id.
 const ASSIGN_STATION_MUTATION: &str =
     "mutation($setId:ID!,$stationId:ID!){ assignStation(setId:$setId, stationId:$stationId){ id } }";
+// Same shape as `assignStation`, confirmed against the live schema.
+const ASSIGN_STREAM_MUTATION: &str =
+    "mutation($setId:ID!,$streamId:ID!){ assignStream(setId:$setId, streamId:$streamId){ id } }";
 // The TO's call ("Start Match" on start.gg) -- never invoked automatically
 // anywhere else in this app; only this explicit operator-clicked path (see
 // hub.rs's `do_start_match`) is allowed to call it.
@@ -157,6 +168,10 @@ pub trait StartggApi: Send + Sync {
     /// GraphQL id (resolved from its plain number by the caller), never the
     /// number itself.
     fn assign_station(&self, set_id: &Value, station_id: &Value) -> Result<(), StartggError>;
+    /// Assign a set to a stream setup. `stream_id` must be the stream's
+    /// opaque GraphQL id (resolved from its name by the caller), never the
+    /// name itself. See [`StartggApi::assign_station`]'s doc for why.
+    fn assign_stream(&self, set_id: &Value, stream_id: &Value) -> Result<(), StartggError>;
     /// `markSetInProgress` -- the TO's "Start Match" button. Only ever called
     /// from an explicit operator action; never automatic.
     fn start_match(&self, set_id: &Value) -> Result<(), StartggError>;
@@ -418,6 +433,15 @@ impl Startgg {
         Ok(())
     }
 
+    /// See [`StartggApi::assign_stream`].
+    pub fn assign_stream(&self, set_id: &Value, stream_id: &Value) -> Result<(), StartggError> {
+        self.gql(
+            ASSIGN_STREAM_MUTATION,
+            json!({ "setId": set_id, "streamId": stream_id }),
+        )?;
+        Ok(())
+    }
+
     /// See [`StartggApi::start_match`].
     pub fn start_match(&self, set_id: &Value) -> Result<(), StartggError> {
         self.gql(START_MATCH_MUTATION, json!({ "setId": set_id }))?;
@@ -474,6 +498,9 @@ impl StartggApi for Startgg {
     }
     fn assign_station(&self, set_id: &Value, station_id: &Value) -> Result<(), StartggError> {
         Startgg::assign_station(self, set_id, station_id)
+    }
+    fn assign_stream(&self, set_id: &Value, stream_id: &Value) -> Result<(), StartggError> {
+        Startgg::assign_stream(self, set_id, stream_id)
     }
     fn start_match(&self, set_id: &Value) -> Result<(), StartggError> {
         Startgg::start_match(self, set_id)
@@ -575,6 +602,11 @@ fn parse_available_sets(data: &Value) -> Value {
                 .and_then(|s| s.get("number"))
                 .cloned()
                 .unwrap_or(Value::Null),
+            "stream": n
+                .get("stream")
+                .and_then(|s| s.get("streamName"))
+                .cloned()
+                .unwrap_or(Value::Null),
             "entrants": entrants,
             // Reuses hub.rs's preferred_started_at rather than duplicating
             // the startedAt-over-startAt fallback logic here.
@@ -597,7 +629,22 @@ fn parse_available_sets(data: &Value) -> Value {
             })
         })
         .collect();
-    json!({ "sets": sets, "stations": stations })
+    let stream_nodes = data
+        .get("event")
+        .and_then(|e| e.get("tournament"))
+        .and_then(|t| t.get("streams"))
+        .and_then(|s| s.as_array())
+        .unwrap_or(&empty);
+    let streams: Vec<Value> = stream_nodes
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.get("id").cloned().unwrap_or(Value::Null),
+                "name": s.get("streamName").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    json!({ "sets": sets, "stations": stations, "streams": streams })
 }
 
 // -- helpers ------------------------------------------------------------------
@@ -925,6 +972,66 @@ mod tests {
         let out = parse_available_sets(&data);
         assert_eq!(out["sets"][0]["startggStartedAt"], Value::Null);
         assert_eq!(out["sets"][0]["startggTotalGames"], Value::Null);
+    }
+
+    /// `streams` comes from `event.tournament.streams` (a plain list, no
+    /// `.nodes`, unlike `stations`), normalized to `{id, name}` the same way
+    /// stations normalize to `{id, number}`; a set's own `stream.streamName`
+    /// carries through as its `"stream"` field, mirroring `"station"`.
+    #[test]
+    fn parse_available_sets_extracts_streams_and_a_sets_assigned_stream() {
+        let data = json!({
+            "event": {
+                "sets": { "nodes": [
+                    {
+                        "id": "set-11", "state": 2, "fullRoundText": "Winners Final",
+                        "station": Value::Null,
+                        "stream": {"streamName": "socalrivals"},
+                        "slots": [
+                            {"entrant": {"id": "E1", "name": "jugeeya"}},
+                            {"entrant": {"id": "E2", "name": "Kimchi"}},
+                        ],
+                    },
+                ]},
+                "stations": { "nodes": [] },
+                "tournament": {
+                    "streams": [
+                        {"id": 1369478, "streamName": "socalrivals", "enabled": true},
+                    ],
+                },
+            }
+        });
+        let out = parse_available_sets(&data);
+        assert_eq!(out["sets"][0]["stream"], json!("socalrivals"));
+        assert_eq!(
+            out["streams"],
+            json!([{"id": 1369478, "name": "socalrivals"}])
+        );
+    }
+
+    /// A set with no stream assigned, or an event with no tournament streams
+    /// configured at all (the common case), parses as null/empty, not a
+    /// missing key or a panic.
+    #[test]
+    fn parse_available_sets_defaults_missing_stream_fields_to_null_and_empty() {
+        let data = json!({
+            "event": {
+                "sets": { "nodes": [
+                    {
+                        "id": "set-12", "state": 1, "fullRoundText": "Losers Round 1",
+                        "station": Value::Null,
+                        "slots": [
+                            {"entrant": {"id": "E1", "name": "jugeeya"}},
+                            {"entrant": {"id": "E2", "name": "Kimchi"}},
+                        ],
+                    },
+                ]},
+                "stations": { "nodes": [] },
+            }
+        });
+        let out = parse_available_sets(&data);
+        assert_eq!(out["sets"][0]["stream"], Value::Null);
+        assert_eq!(out["streams"], json!([]));
     }
 
     /// `parse_station_set` carries `startedAt`/`startAt`/`totalGames` straight

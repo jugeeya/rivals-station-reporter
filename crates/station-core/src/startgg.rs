@@ -74,6 +74,26 @@ const SET_GAMES_QUERY: &str = "query($setId:ID!){ set(id:$setId){ games{ orderNu
 // write rather than attempt one against a set someone already finalized
 // through start.gg's own page.
 const SET_STATE_QUERY: &str = "query($setId:ID!){ set(id:$setId){ state } }";
+// Sets available to start (state 1 = created, 6 = called-not-started; state
+// 2/ongoing and 3/completed are deliberately excluded -- those aren't
+// "available to start" anymore), plus the event's stations in the same
+// round trip: the Start Match panel needs both, and fetching stations
+// separately for every render would be a second full request for data that
+// changes only when a TO adds/removes a physical setup. `Stations.id` is an
+// opaque GraphQL id; `Stations.number` is the plain integer (1, 2, 3...)
+// this app already uses for its own station numbering (`cfg.station`) --
+// assigning a set to "station 2" means resolving that number to this id
+// first, never passing the number itself to `assignStation`.
+const AVAILABLE_SETS_QUERY: &str = "query($slug:String!){ event(slug:$slug){\n                 sets(page:1, perPage:60, sortType:STANDARD, filters:{state:[1,6]}){\n                   nodes{ id state fullRoundText station{ number }\n                     slots{ entrant{ id name } } } }\n                 stations(query:{perPage:32}){ nodes{ id number enabled } } } }";
+// `assignStation`'s own required args, confirmed against the live schema:
+// just the set and the station's opaque id.
+const ASSIGN_STATION_MUTATION: &str =
+    "mutation($setId:ID!,$stationId:ID!){ assignStation(setId:$setId, stationId:$stationId){ id } }";
+// The TO's call ("Start Match" on start.gg) -- never invoked automatically
+// anywhere else in this app; only this explicit operator-clicked path (see
+// hub.rs's `do_start_match`) is allowed to call it.
+const START_MATCH_MUTATION: &str =
+    "mutation($setId:ID!){ markSetInProgress(setId:$setId){ id state } }";
 
 /// Error type mirroring Python's `StartggError(Exception)`: just a message.
 #[derive(Debug, Clone)]
@@ -111,6 +131,17 @@ pub trait StartggApi: Send + Sync {
         winner_entrant_id: &Value,
         game_data: Option<&Value>,
     ) -> Result<Value, StartggError>;
+    /// Sets available to start (both entrants determined, not yet begun) plus
+    /// the event's stations. See [`Startgg::available_sets`] for the exact
+    /// normalized shape.
+    fn available_sets(&self, slug: &str) -> Result<Value, StartggError>;
+    /// Assign a set to a station. `station_id` must be the station's opaque
+    /// GraphQL id (resolved from its plain number by the caller), never the
+    /// number itself.
+    fn assign_station(&self, set_id: &Value, station_id: &Value) -> Result<(), StartggError>;
+    /// `markSetInProgress` -- the TO's "Start Match" button. Only ever called
+    /// from an explicit operator action; never automatic.
+    fn start_match(&self, set_id: &Value) -> Result<(), StartggError>;
 }
 
 type LogFn = Box<dyn Fn(&str) + Send + Sync>;
@@ -372,6 +403,37 @@ impl Startgg {
         )
     }
 
+    /// Sets available to start on this event, plus its stations.
+    ///
+    /// Returns `{ "sets": [{id, fullRoundText, station, entrants}], "stations":
+    /// [{id, number}] }`. `station` is the plain station number (or `Null` if
+    /// unassigned); `entrants` is always exactly two `{id, name}` objects --
+    /// a set with either slot still undetermined (waiting on a prior round,
+    /// e.g. `slots: [{entrant: null}, {entrant: null}]` for a not-yet-seeded
+    /// Grand Final) is left out entirely, never included with a null/missing
+    /// entrant. `stations[].id` is the opaque id `assign_station` needs;
+    /// `stations[].number` is the plain integer this app's own station
+    /// numbering already uses.
+    pub fn available_sets(&self, slug: &str) -> Result<Value, StartggError> {
+        let data = self.gql(AVAILABLE_SETS_QUERY, json!({ "slug": slug }))?;
+        Ok(parse_available_sets(&data))
+    }
+
+    /// See [`StartggApi::assign_station`].
+    pub fn assign_station(&self, set_id: &Value, station_id: &Value) -> Result<(), StartggError> {
+        self.gql(
+            ASSIGN_STATION_MUTATION,
+            json!({ "setId": set_id, "stationId": station_id }),
+        )?;
+        Ok(())
+    }
+
+    /// See [`StartggApi::start_match`].
+    pub fn start_match(&self, set_id: &Value) -> Result<(), StartggError> {
+        self.gql(START_MATCH_MUTATION, json!({ "setId": set_id }))?;
+        Ok(())
+    }
+
     // -- test hooks ----------------------------------------------------------
     #[cfg(test)]
     fn seed_station_cache(&self, slug: &str, station: i64, fetched_at: f64, result: Value) {
@@ -417,6 +479,76 @@ impl StartggApi for Startgg {
     ) -> Result<Value, StartggError> {
         Startgg::report_set(self, set_id, winner_entrant_id, game_data)
     }
+    fn available_sets(&self, slug: &str) -> Result<Value, StartggError> {
+        Startgg::available_sets(self, slug)
+    }
+    fn assign_station(&self, set_id: &Value, station_id: &Value) -> Result<(), StartggError> {
+        Startgg::assign_station(self, set_id, station_id)
+    }
+    fn start_match(&self, set_id: &Value) -> Result<(), StartggError> {
+        Startgg::start_match(self, set_id)
+    }
+}
+
+/// Parsing half of [`Startgg::available_sets`], split out from the network
+/// call so it's testable against a hand-built GraphQL response shape without
+/// a live token.
+fn parse_available_sets(data: &Value) -> Value {
+    let empty = Vec::new();
+    let nodes = data
+        .get("event")
+        .and_then(|e| e.get("sets"))
+        .and_then(|s| s.get("nodes"))
+        .and_then(|n| n.as_array())
+        .unwrap_or(&empty);
+    let mut sets: Vec<Value> = Vec::new();
+    for n in nodes {
+        let slots = match n.get("slots").and_then(|s| s.as_array()) {
+            Some(a) if a.len() == 2 => a,
+            _ => continue,
+        };
+        let mut entrants: Vec<Value> = Vec::new();
+        for s in slots {
+            match s.get("entrant").filter(|e| truthy(Some(e))) {
+                Some(e) => entrants.push(json!({
+                    "id": e.get("id").cloned().unwrap_or(Value::Null),
+                    "name": or_empty_string(e.get("name")),
+                })),
+                // An undetermined slot (waiting on a prior round) -- the
+                // whole set is left out, never included with a null entrant.
+                None => break,
+            }
+        }
+        if entrants.len() != 2 {
+            continue;
+        }
+        sets.push(json!({
+            "id": n.get("id").cloned().unwrap_or(Value::Null),
+            "fullRoundText": or_empty_string(n.get("fullRoundText")),
+            "station": n
+                .get("station")
+                .and_then(|s| s.get("number"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            "entrants": entrants,
+        }));
+    }
+    let station_nodes = data
+        .get("event")
+        .and_then(|e| e.get("stations"))
+        .and_then(|s| s.get("nodes"))
+        .and_then(|n| n.as_array())
+        .unwrap_or(&empty);
+    let stations: Vec<Value> = station_nodes
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.get("id").cloned().unwrap_or(Value::Null),
+                "number": s.get("number").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    json!({ "sets": sets, "stations": stations })
 }
 
 // -- helpers ------------------------------------------------------------------
@@ -567,5 +699,88 @@ mod tests {
         assert_eq!(norm("JUGZ!"), "jugz");
         assert_eq!(norm("Mr. Game & Watch 2"), "mrgamewatch2");
         assert_eq!(norm(""), "");
+    }
+
+    /// Real shapes confirmed live: a ready set has `entrant:{id,name}` on
+    /// both slots; a set waiting on a prior round (Losers Final, Grand
+    /// Final) has `entrant: null` on the undetermined side(s). Only sets
+    /// with both slots determined should survive.
+    #[test]
+    fn parse_available_sets_only_keeps_sets_with_two_determined_entrants() {
+        let data = json!({
+            "event": {
+                "sets": { "nodes": [
+                    {
+                        "id": "set-1", "state": 1, "fullRoundText": "Winners Quarter-Final",
+                        "station": {"number": 2},
+                        "slots": [
+                            {"entrant": {"id": "E1", "name": "jugeeya"}},
+                            {"entrant": {"id": "E2", "name": "Kimchi"}},
+                        ],
+                    },
+                    {
+                        "id": "set-2", "state": 1, "fullRoundText": "Losers Final",
+                        "station": Value::Null,
+                        "slots": [{"entrant": Value::Null}, {"entrant": Value::Null}],
+                    },
+                    {
+                        "id": "set-3", "state": 6, "fullRoundText": "Grand Final",
+                        "station": Value::Null,
+                        "slots": [
+                            {"entrant": {"id": "E3", "name": "Brujita"}},
+                            {"entrant": Value::Null},
+                        ],
+                    },
+                ]},
+                "stations": { "nodes": [
+                    {"id": "opaque-st-1", "number": 1, "enabled": true},
+                    {"id": "opaque-st-2", "number": 2, "enabled": true},
+                ]},
+            }
+        });
+
+        let out = parse_available_sets(&data);
+        let sets = out["sets"].as_array().unwrap();
+        assert_eq!(
+            sets.len(),
+            1,
+            "only the set with two determined entrants survives  [{sets:?}]"
+        );
+        assert_eq!(sets[0]["id"], json!("set-1"));
+        assert_eq!(sets[0]["fullRoundText"], json!("Winners Quarter-Final"));
+        assert_eq!(sets[0]["station"], json!(2), "station is the plain number");
+        assert_eq!(
+            sets[0]["entrants"],
+            json!([{"id": "E1", "name": "jugeeya"}, {"id": "E2", "name": "Kimchi"}])
+        );
+
+        let stations = out["stations"].as_array().unwrap();
+        assert_eq!(stations.len(), 2);
+        assert_eq!(
+            stations[0],
+            json!({"id": "opaque-st-1", "number": 1}),
+            "stations carry the opaque id alongside the plain number"
+        );
+    }
+
+    #[test]
+    fn parse_available_sets_handles_a_set_with_no_station_assigned() {
+        let data = json!({
+            "event": {
+                "sets": { "nodes": [
+                    {
+                        "id": "set-4", "state": 6, "fullRoundText": "Losers Round 3",
+                        "station": Value::Null,
+                        "slots": [
+                            {"entrant": {"id": "E5", "name": "Loom"}},
+                            {"entrant": {"id": "E6", "name": "Rando"}},
+                        ],
+                    },
+                ]},
+                "stations": { "nodes": [] },
+            }
+        });
+        let out = parse_available_sets(&data);
+        assert_eq!(out["sets"][0]["station"], Value::Null);
     }
 }

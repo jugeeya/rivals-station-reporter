@@ -131,3 +131,24 @@ pub fn do_delete(inner: &Arc<EngineInner>, station: i64, set_id: &str) -> Result
     hub.do_delete(&slug, station, &json!(set_id))
         .map_err(err_text)
 }
+
+/// Sets available to start right now (both entrants determined, not yet
+/// begun) plus the event's stations, for the Start Match panel. Read-only.
+pub fn available_sets(inner: &Arc<EngineInner>) -> Result<Value, String> {
+    let (hub, slug) = hub_and_slug(inner)?;
+    hub.available_sets(&slug).map_err(err_text)
+}
+
+/// Start a match on start.gg -- explicit operator action, same standing as
+/// `do_report`. Optionally assigns a station first if the set has none (see
+/// `Hub::do_start_match` for the resolve-then-assign-then-start sequence and
+/// the already-assigned-elsewhere edge case).
+pub fn do_start_match(
+    inner: &Arc<EngineInner>,
+    set_id: &str,
+    station_number: Option<i64>,
+) -> Result<Value, String> {
+    let (hub, slug) = hub_and_slug(inner)?;
+    hub.do_start_match(&slug, &json!(set_id), station_number)
+        .map_err(err_text)
+}

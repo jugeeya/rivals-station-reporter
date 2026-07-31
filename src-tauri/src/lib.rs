@@ -75,6 +75,8 @@ pub fn run() {
             commands::report_winner,
             commands::swap_players,
             commands::delete_set,
+            commands::list_available_sets,
+            commands::start_match,
             commands::set_autostart,
             commands::get_autostart,
         ])

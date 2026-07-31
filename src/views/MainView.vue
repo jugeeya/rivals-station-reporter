@@ -11,6 +11,7 @@ import HealthStrip from '../components/HealthStrip.vue';
 import LiveSetCard from '../components/LiveSetCard.vue';
 import StationSets from '../components/StationSets.vue';
 import OperatorConsole from '../components/OperatorConsole.vue';
+import AvailableSets from '../components/AvailableSets.vue';
 import SettingsDrawer from '../components/SettingsDrawer.vue';
 import { state } from '../lib/engine';
 
@@ -67,6 +68,7 @@ async function copyHubUrl() {
       </template>
 
       <OperatorConsole v-if="isOperator" />
+      <AvailableSets v-if="isOperator" />
 
       <div v-if="showLog" class="mv-log">
         <pre class="mv-log-pre">{{ state.s.log.join('\n') || '(nothing logged yet)' }}</pre>

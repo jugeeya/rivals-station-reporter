@@ -34,6 +34,7 @@ import {
   stationFinished,
   operatorConsole,
   settingsBase,
+  availableSets,
 } from './fixtures.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -188,6 +189,17 @@ async function main() {
       await captureOne(browser, 'operator-console', operatorConsole, {
         onReady: (page) =>
           page.locator('.oc-row', { hasText: 'Winners Quarter-Final' }).waitFor({ state: 'visible' }),
+      }),
+    );
+
+    written.push(
+      await captureOne(browser, 'available-sets', availableSets, {
+        onReady: async (page) => {
+          await page.locator('.as-summary', { hasText: 'Start Match' }).click();
+          await page
+            .locator('.as-row', { hasText: 'Winners Round 1' })
+            .waitFor({ state: 'visible' });
+        },
       }),
     );
 

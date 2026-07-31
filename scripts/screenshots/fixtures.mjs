@@ -360,3 +360,42 @@ export const operatorConsole = {
 // Reuses the station-idle state as the backdrop; capture.mjs opens the
 // Settings drawer on top of it via a real click, same as a user would.
 export const settingsBase = stationIdle;
+
+// ---- available-sets.png -------------------------------------------------------
+// The Start Match panel, expanded: reuses the operator console backdrop
+// (same three stations already reporting) with a mix of sets waiting to
+// start -- one already assigned a station, one with none (exercises the
+// inline station picker) -- mirroring the real shapes confirmed live
+// against start.gg's API: a ready set has `entrant:{id,name}` on both
+// slots; `browserMock.ts`'s own `availableSetsData` fixture is the browser
+// dev-mode equivalent of this same shape. `availableSets` here is not part
+// of EngineState in the real app either (it's `list_available_sets`, a
+// separate query) -- capture.mjs's seeding passes it through to
+// `window.__RSR_SEED_DATA__` alongside the engine state, and
+// `browserMock.ts`'s `applySeed` peels it off into its own fixture object.
+export const availableSets = {
+  ...operatorConsole,
+  availableSets: {
+    sets: [
+      {
+        id: 'sgg-set-301',
+        fullRoundText: 'Winners Round 1',
+        station: 2,
+        entrants: [
+          { id: 'E5', name: 'Loom' },
+          { id: 'E6', name: 'Rando' },
+        ],
+      },
+      {
+        id: 'sgg-set-302',
+        fullRoundText: 'Losers Round 2',
+        station: null,
+        entrants: [
+          { id: 'E3', name: 'Brujita' },
+          { id: 'E2', name: 'Kimchi' },
+        ],
+      },
+    ],
+    stations: [{ number: 1 }, { number: 2 }, { number: 3 }],
+  },
+};

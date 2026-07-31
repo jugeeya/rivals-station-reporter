@@ -118,6 +118,43 @@ function startFakeTournament() {
   }, 4000);
 }
 
+// ---- Start Match (available sets) fixtures -----------------------------------
+// A separate query path from hubSnapshot (mirrors the real
+// Startgg::available_sets/list_available_sets): sets waiting to start on the
+// bracket, not sets already ingested from a station. Kept outside `state`
+// since the real command isn't part of engine-state either -- the UI fetches
+// it on its own (see AvailableSets.vue). One set with a station already
+// assigned, one with none (exercises the inline picker), and three stations
+// to pick from.
+
+let availableSetsData: any = { sets: [], stations: [] };
+
+function seedAvailableSets() {
+  availableSetsData = {
+    sets: [
+      {
+        id: 'sgg-set-301',
+        fullRoundText: 'Winners Round 1',
+        station: 2,
+        entrants: [
+          { id: 'E5', name: 'Loom' },
+          { id: 'E6', name: 'Rando' },
+        ],
+      },
+      {
+        id: 'sgg-set-302',
+        fullRoundText: 'Losers Round 2',
+        station: null,
+        entrants: [
+          { id: 'E3', name: 'Brujita' },
+          { id: 'E2', name: 'Kimchi' },
+        ],
+      },
+    ],
+    stations: [{ number: 1 }, { number: 2 }, { number: 3 }],
+  };
+}
+
 // ---- operator fixtures -------------------------------------------------------
 
 function seedHub() {
@@ -168,19 +205,25 @@ function seedHub() {
 // ---- deterministic seeding (screenshot harness) ----------------------------
 
 /** Replace the whole mock EngineState and permanently stop the ticker. Safe
- *  to call more than once (e.g. re-seeding between captures in one page). */
+ *  to call more than once (e.g. re-seeding between captures in one page).
+ *  An optional `availableSets` key on `next` seeds the separate Start Match
+ *  query too (not part of EngineState in the real app either -- see
+ *  `availableSetsData` above); absent, it resets to empty. */
 function applySeed(next: unknown) {
   if (ticker != null) {
     window.clearInterval(ticker);
     ticker = null;
   }
   seeded = true;
-  const clone =
+  const clone: any =
     typeof structuredClone === 'function'
       ? structuredClone(next)
       : JSON.parse(JSON.stringify(next));
+  const seededAvailableSets = clone.availableSets;
+  delete clone.availableSets;
   for (const k of Object.keys(state)) delete state[k];
   Object.assign(state, clone);
+  availableSetsData = seededAvailableSets ?? { sets: [], stations: [] };
 }
 
 // ---- invoke fixtures ---------------------------------------------------------
@@ -192,10 +235,13 @@ const handlers: Record<string, (args: any) => any> = {
     log('settings saved');
     if (state.config.configured) {
       startFakeTournament();
-      if (state.config.mode !== 'station') seedHub();
-      else {
+      if (state.config.mode !== 'station') {
+        seedHub();
+        seedAvailableSets();
+      } else {
         state.hubUrl = null;
         state.hubSnapshot = { sets: [], stations: {} };
+        availableSetsData = { sets: [], stations: [] };
       }
     }
     return JSON.parse(JSON.stringify(state));
@@ -241,6 +287,19 @@ const handlers: Record<string, (args: any) => any> = {
     );
     log('set deleted');
     return { ok: true };
+  },
+  list_available_sets: () => JSON.parse(JSON.stringify(availableSetsData)),
+  start_match: (a) => {
+    const set = availableSetsData.sets.find((s: any) => String(s.id) === String(a.setId));
+    if (!set) throw 'Set not found or not available to start.';
+    if (a.stationNumber != null && set.station != null && set.station !== a.stationNumber) {
+      throw 'This set is already assigned to a different station. Reassign it on start.gg directly if you meant to move it.';
+    }
+    if (a.stationNumber != null && set.station == null) set.station = a.stationNumber;
+    // Starting the match means it's no longer "available to start".
+    availableSetsData.sets = availableSetsData.sets.filter((s: any) => s !== set);
+    log(`started match for set ${a.setId} on start.gg`);
+    return { ok: true, setId: a.setId, stationAssigned: a.stationNumber ?? null };
   },
   get_autostart: () => false,
   set_autostart: () => null,

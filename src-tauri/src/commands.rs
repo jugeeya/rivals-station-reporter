@@ -99,6 +99,25 @@ pub fn delete_set(
     crate::hub_glue::do_delete(&engine.0, station, &set_id)
 }
 
+/// Sets available to start (both entrants determined, not yet begun) plus
+/// the event's stations -- backs the Start Match panel. Read-only.
+#[tauri::command]
+pub fn list_available_sets(engine: State<'_, Engine>) -> Result<Value, String> {
+    crate::hub_glue::available_sets(&engine.0)
+}
+
+/// Start a match on start.gg -- the same explicit-click standing as
+/// `report_winner`. `station_number` is optional: when given and the set has
+/// no station yet, it's assigned first as one user-facing action.
+#[tauri::command]
+pub fn start_match(
+    engine: State<'_, Engine>,
+    set_id: String,
+    station_number: Option<i64>,
+) -> Result<Value, String> {
+    crate::hub_glue::do_start_match(&engine.0, &set_id, station_number)
+}
+
 // ---- autostart ---------------------------------------------------------------
 
 #[tauri::command]

@@ -46,6 +46,14 @@ absolute clock, best-of shown next to the score, a per-game character strip
 with the winner marked, and the tag-to-entrant mapping the hub would actually
 report, per player.
 
+![Start Match panel, expanded](docs/screenshots/available-sets.png)
+
+The Start Match panel (collapsed by default below the console, since starting
+matches is occasional): every not-yet-started set with both entrants
+determined, across the whole event. One set already has a station; the other
+gets an inline picker so assigning one and starting the match happen as a
+single click.
+
 ![Station, idle between sets](docs/screenshots/station-idle.png)
 
 A station between sets: health checks green, waiting for the next game, two

@@ -4,7 +4,7 @@
 import { reactive } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { Config, EngineState, EventSummary } from '../types';
+import type { AvailableSetsResponse, Config, EngineState, EventSummary } from '../types';
 
 const empty: EngineState = {
   config: {
@@ -86,4 +86,16 @@ export function swapPlayers(station: number, setId: string) {
 
 export function deleteSet(station: number, setId: string) {
   return invoke('delete_set', { station, setId });
+}
+
+// Start Match: sets available to start (both entrants determined, not yet
+// begun) plus the event's stations, and starting one -- optionally assigning
+// a station first as part of the same click. Same standing as reportWinner:
+// markSetInProgress is only ever reached through this explicit action.
+export function listAvailableSets(): Promise<AvailableSetsResponse> {
+  return invoke('list_available_sets');
+}
+
+export function startMatch(setId: string, stationNumber?: number | null) {
+  return invoke('start_match', { setId, stationNumber: stationNumber ?? null });
 }

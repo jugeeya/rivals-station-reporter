@@ -78,3 +78,33 @@ export interface EventSummary {
   tournament: string;
   entrants: number | null;
 }
+
+/** One entrant on an available-to-start set (see AvailableSet). */
+export interface AvailableSetEntrant {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  id: any;
+  name: string;
+}
+
+/** A start.gg set with both entrants determined, not yet started -- what
+ *  the Start Match panel lists. Mirrors `Startgg::available_sets`'s
+ *  normalized shape (crates/station-core/src/startgg.rs). */
+export interface AvailableSet {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  id: any;
+  fullRoundText: string;
+  station: number | null;
+  entrants: AvailableSetEntrant[];
+}
+
+/** An event station, as `available_sets` reports it: the plain number this
+ *  app already uses (`cfg.station`), the opaque id is resolved server-side
+ *  and never sent to the frontend. */
+export interface AvailableStation {
+  number: number;
+}
+
+export interface AvailableSetsResponse {
+  sets: AvailableSet[];
+  stations: AvailableStation[];
+}

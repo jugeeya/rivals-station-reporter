@@ -23,6 +23,11 @@ use serde_json::{json, Value};
 /// warmups/friendlies at that setup, so they must not be bound to the bracket set
 /// or pushed to it — and we never start a match ourselves.
 pub const STARTGG_STATE_ONGOING: i64 = 2;
+/// A set that reached this state was reported by someone or something other
+/// than this hub's own `do_report` (that call marks our record `reported`
+/// itself, so if this shows up on a set we still think is merely
+/// "awaiting report", start.gg's is the version of events that happened).
+pub const STARTGG_STATE_COMPLETED: i64 = 3;
 
 /// Python truthiness for a JSON value (`None`/`False`/`0`/`""`/`[]`/`{}` are falsy).
 fn truthy(v: &Value) -> bool {

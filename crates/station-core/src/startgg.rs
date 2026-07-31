@@ -67,6 +67,13 @@ const REPORT_SET_MUTATION: &str = "mutation($setId:ID!,$winnerId:ID!,$gameData:[
 // entrant{id}/character{id}. `set(id:)` is a direct root lookup, cheaper than
 // re-listing the whole event's sets for the one we already know the id of.
 const SET_GAMES_QUERY: &str = "query($setId:ID!){ set(id:$setId){ games{ orderNum winnerId\n                 selections{ entrant{ id } character{ id } } } } }";
+// A cheap direct-by-id state check, bypassing STATION_SET_QUERY's [1,2,6]
+// filter (which is exactly the problem: once a set reaches state 3 it drops
+// out of that list silently, so a filtered lookup can't tell "already
+// completed" apart from "gone missing"). do_report uses this to refuse a
+// write rather than attempt one against a set someone already finalized
+// through start.gg's own page.
+const SET_STATE_QUERY: &str = "query($setId:ID!){ set(id:$setId){ state } }";
 
 /// Error type mirroring Python's `StartggError(Exception)`: just a message.
 #[derive(Debug, Clone)]
@@ -92,6 +99,12 @@ pub trait StartggApi: Send + Sync {
     /// or `Value::Null` if the set has none yet); [`live_push_confirmed`]
     /// does the comparison against what was pushed.
     fn set_games(&self, set_id: &Value) -> Result<Value, StartggError>;
+    /// The set's current state on start.gg (raw `Set.state`, or `Value::Null`
+    /// if the set can't be found at all), read directly by id. Used to catch
+    /// a set someone finalized through start.gg's own page before this hub's
+    /// Report button gets to it -- `STATION_SET_QUERY`'s filtered list can't
+    /// tell that apart from "gone missing" once a set reaches state 3.
+    fn set_state(&self, set_id: &Value) -> Result<Value, StartggError>;
     fn report_set(
         &self,
         set_id: &Value,
@@ -332,6 +345,16 @@ impl Startgg {
             .unwrap_or(Value::Null))
     }
 
+    /// See [`StartggApi::set_state`].
+    pub fn set_state(&self, set_id: &Value) -> Result<Value, StartggError> {
+        let data = self.gql(SET_STATE_QUERY, json!({ "setId": set_id }))?;
+        Ok(data
+            .get("set")
+            .and_then(|s| s.get("state"))
+            .cloned()
+            .unwrap_or(Value::Null))
+    }
+
     /// Advancing: set the winner and finalize. Operator action only.
     pub fn report_set(
         &self,
@@ -382,6 +405,9 @@ impl StartggApi for Startgg {
     }
     fn set_games(&self, set_id: &Value) -> Result<Value, StartggError> {
         Startgg::set_games(self, set_id)
+    }
+    fn set_state(&self, set_id: &Value) -> Result<Value, StartggError> {
+        Startgg::set_state(self, set_id)
     }
     fn report_set(
         &self,

@@ -944,6 +944,39 @@ impl Hub {
                 501,
             ));
         }
+        // A TO can finalize a set directly on start.gg's own page, entirely
+        // bypassing this hub's Report button. `reportable` alone can't catch
+        // that: it only ever gets set false by THIS hub's own bind/rebind
+        // logic, so a set we already matched stays "reportable" forever as
+        // far as our own state is concerned, no matter what happened to it
+        // out from under us. Check the live state directly (bypassing
+        // station_set's [1,2,6] filter, which can't tell "completed" apart
+        // from "gone missing") right before the write neither request can
+        // take back.
+        match self.startgg.set_state(&rec["matchedStartggSetId"]) {
+            Ok(v) if py_int(Some(&v)) == Some(matching::STARTGG_STATE_COMPLETED) => {
+                let key = sid(station, set_id);
+                {
+                    let mut s = self.state.lock().unwrap();
+                    if let Some(stored) = set_bucket(&mut s, slug).get_mut(&key) {
+                        stored["status"] = json!("already reported on start.gg");
+                        stored["reportable"] = json!(false);
+                        stored["notReportableReason"] =
+                            json!("already reported directly on start.gg");
+                    }
+                    self.touch(&mut s);
+                }
+                return Err((
+                    json!({"error": "This set was already reported directly on start.gg."}),
+                    409,
+                ));
+            }
+            // Any other state, or a failed check, isn't grounds to block a
+            // report the operator explicitly asked for -- only a CONFIRMED
+            // completion does that. A transient lookup failure here must not
+            // silently prevent reporting a set that is genuinely fine.
+            _ => {}
+        }
         // Python: winner_entrant_id = str(winner_entrant_id or '')
         let wid = if truthy(Some(winner_entrant_id)) {
             py_str(winner_entrant_id)
@@ -1580,6 +1613,14 @@ mod tests {
         /// yet" tests. `None` -- the default -- means "answer honestly",
         /// simulating a backend that already reflects the last push.
         set_games_override: Mutex<Option<Value>>,
+        /// `set_state`'s answer, independent of `state` above: `state` is
+        /// what `station_set`'s filtered lookup would find (and stays out of
+        /// [1,2,6] once a set completes, per that query's own filter), while
+        /// this is the direct-by-id state check that can still see a set
+        /// after it drops out of that list. Defaults to "not completed";
+        /// tests set it to 3 to simulate a TO finalizing the set on start.gg
+        /// directly, bypassing this hub's Report button entirely.
+        set_state_override: Mutex<Value>,
     }
 
     impl FakeStartgg {
@@ -1590,6 +1631,7 @@ mod tests {
                 live_pushes: Mutex::new(Vec::new()),
                 reports: Mutex::new(Vec::new()),
                 set_games_override: Mutex::new(None),
+                set_state_override: Mutex::new(Value::Null),
             })
         }
 
@@ -1603,6 +1645,14 @@ mod tests {
 
         fn reports(&self) -> Vec<(Value, Value, Option<Value>)> {
             self.reports.lock().unwrap().clone()
+        }
+
+        /// Simulate a set's remote state as seen by the direct-by-id check --
+        /// independent of `set_state` above (which drives the FILTERED
+        /// lookup `station_set` uses, and can't represent "completed" at
+        /// all, since that state is exactly what falls out of that filter).
+        fn set_state_will_answer(&self, v: Value) {
+            *self.set_state_override.lock().unwrap() = v;
         }
 
         /// Simulate start.gg not (yet) reflecting the last push -- or
@@ -1694,6 +1744,9 @@ mod tests {
                 .last()
                 .map(|(_, gd)| FakeStartgg::honest_read_back(gd))
                 .unwrap_or(Value::Null))
+        }
+        fn set_state(&self, _set_id: &Value) -> Result<Value, StartggError> {
+            Ok(self.0.set_state_override.lock().unwrap().clone())
         }
         fn report_set(
             &self,
@@ -2165,6 +2218,101 @@ mod tests {
             1,
             "exactly one report reached start.gg"
         );
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    // ---- Report refuses a set someone already finalized on start.gg directly ---
+    // `reportable` only ever gets set false by this hub's own bind/rebind logic,
+    // so a set we already matched stays "reportable" as far as OUR state is
+    // concerned no matter what happened to it out from under us. do_report has
+    // to check the live state itself, right before the write.
+
+    #[test]
+    fn report_is_refused_when_start_gg_already_shows_it_completed() {
+        let workdir = tmpdir("hubtest_alreadydone");
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(
+            None,
+            None,
+            Some(tags()),
+            None,
+            Some(path_str(&workdir.join("h.json"))),
+            None,
+            None,
+            Some(path_str(&workdir.join("learned.json"))),
+        );
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        h.handle_current(SLUG, 1, Some(&json!({"state": "set_start"})))
+            .unwrap();
+        h.handle_ingest(SLUG, 1, &with(real_set(), &[("setId", json!("AR1"))]))
+            .unwrap();
+        let before = h.get_set(SLUG, 1, &json!("AR1")).unwrap();
+        assert_eq!(before["reportable"], json!(true), "normally reportable");
+
+        // A TO finalized this exact set on start.gg's own page -- nothing
+        // about that touches this hub, so `reportable` above never moved.
+        fake.set_state_will_answer(json!(matching::STARTGG_STATE_COMPLETED));
+
+        let err = h
+            .do_report(SLUG, 1, &json!("AR1"), &json!(24186345))
+            .expect_err("must not attempt to write over an already-completed set");
+        assert_eq!(err.1, 409);
+        assert!(
+            err.0["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("already reported"),
+            "error explains why  [{}]",
+            err.0
+        );
+        assert_eq!(
+            fake.reports().len(),
+            0,
+            "no write was attempted against start.gg"
+        );
+
+        let after = h.get_set(SLUG, 1, &json!("AR1")).unwrap();
+        assert_eq!(
+            after["reportable"],
+            json!(false),
+            "the record reflects it's settled, not still actionable"
+        );
+        assert_eq!(after["status"], json!("already reported on start.gg"));
+
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    #[test]
+    fn report_still_succeeds_when_start_gg_does_not_show_it_completed() {
+        let workdir = tmpdir("hubtest_notdone");
+        let fake = FakeStartgg::new();
+        // Explicit, not just the default: this confirms the check itself
+        // (state != 3) rather than merely "the check never ran".
+        fake.set_state_will_answer(json!(matching::STARTGG_STATE_ONGOING));
+        let mut h = Hub::new(
+            None,
+            None,
+            Some(tags()),
+            None,
+            Some(path_str(&workdir.join("h.json"))),
+            None,
+            None,
+            Some(path_str(&workdir.join("learned.json"))),
+        );
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        h.handle_current(SLUG, 1, Some(&json!({"state": "set_start"})))
+            .unwrap();
+        h.handle_ingest(SLUG, 1, &with(real_set(), &[("setId", json!("AR2"))]))
+            .unwrap();
+
+        let res = h
+            .do_report(SLUG, 1, &json!("AR2"), &json!(24186345))
+            .expect("a set start.gg doesn't show as completed reports normally");
+        assert_eq!(res["ok"], json!(true));
+        assert_eq!(fake.reports().len(), 1, "the report reached start.gg");
+
         let _ = fs::remove_dir_all(&workdir);
     }
 

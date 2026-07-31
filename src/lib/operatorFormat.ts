@@ -208,3 +208,12 @@ export function matchFallback(r: HubRecord): string {
   if (r.reportable === false) return '·';
   return 'not matched to start.gg';
 }
+
+/** Tooltip for the public tag database's guess at whose start.gg account
+ * typed this tag in game — a submitted-tag -> handle lookup, nothing to do
+ * with the bracket. Weaker than the operator console's match cell (which
+ * means "found in this bracket"), so callers must never style it with that
+ * cell's success/warning colors. */
+export function sggTitle(tag: string, sgg: string): string {
+  return `Public tag database: "${tag}" is registered to start.gg @${sgg}. Not a bracket match, just what was submitted.`;
+}

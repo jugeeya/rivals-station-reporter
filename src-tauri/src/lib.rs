@@ -12,6 +12,18 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK's DMA-BUF renderer fails to initialize on a number of Linux
+    // GPU/compositor stacks (SteamOS's gamescope, NVIDIA proprietary drivers,
+    // some Wayland compositors) and then silently renders nothing — the app
+    // opens as a blank white window. Falling back to the shared-memory
+    // renderer costs some rendering speed, which this UI doesn't notice, and
+    // works everywhere. Must be set before the first webview is created, and
+    // only when the user hasn't already chosen a value themselves.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // A second launch just fronts the existing window — two copies on

@@ -294,6 +294,16 @@ pub fn save(config_dir: &Path, cfg: &Config) -> Result<(), String> {
     let tmp = config_dir.join("config.json.tmp");
     let body = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    // config.json holds the start.gg API token and the shared key; a default
+    // umask leaves fs::write's file world-readable, so tighten it to
+    // owner-only before it lands at its real name. Windows has no mode bits
+    // — the profile dir's ACL already scopes it to the user there.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 

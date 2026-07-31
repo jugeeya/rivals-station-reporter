@@ -107,10 +107,10 @@ pub fn list_available_sets(engine: State<'_, Engine>) -> Result<Value, String> {
 }
 
 /// Start a match on start.gg -- the same explicit-click standing as
-/// `report_winner`. `station_number`/`stream_name` are optional and mutually
-/// exclusive: when one is given and it differs from the set's current
-/// destination (whether that's none, or a different one), it's (re)assigned
-/// first as one user-facing action.
+/// `report_winner`. `station_number` and `stream_name` are each optional and
+/// may be given together (a set can sit at a physical station AND on a
+/// stream): each one that differs from the set's current assignment is
+/// (re)assigned first as one user-facing action.
 #[tauri::command]
 pub fn start_match(
     engine: State<'_, Engine>,
@@ -121,7 +121,7 @@ pub fn start_match(
     crate::hub_glue::do_start_match(&engine.0, &set_id, station_number, stream_name)
 }
 
-/// Change a set's station or stream on start.gg without starting it -- for a
+/// Change a set's station and/or stream on start.gg without starting it -- for a
 /// set that's already playing, in the Current Sets panel's "Playing now"
 /// group, where there's no "start" action to also fire alongside a
 /// destination change. Same explicit-click standing as `start_match`.

@@ -217,7 +217,9 @@ fn resolve_stream_id(data: &Value, name: &str) -> Result<Value, (Value, u16)> {
 }
 
 /// A set's assignment target: a physical station (by number) or a stream
-/// setup (by name) -- mutually exclusive, resolved server-side either way.
+/// setup (by name), resolved server-side either way. start.gg lets a set
+/// carry both at once (on stream AND at a physical station), so callers get
+/// a list of zero, one, or two of these rather than an either/or.
 /// Shared by `Hub::do_start_match` and `Hub::do_reassign_destination`.
 enum Destination {
     Station(i64),
@@ -225,19 +227,15 @@ enum Destination {
 }
 
 impl Destination {
-    fn from_parts(
-        station_number: Option<i64>,
-        stream_name: Option<String>,
-    ) -> Result<Option<Destination>, (Value, u16)> {
-        match (station_number, stream_name) {
-            (Some(_), Some(_)) => Err((
-                json!({"error": "Choose either a station or a stream, not both."}),
-                400,
-            )),
-            (Some(n), None) => Ok(Some(Destination::Station(n))),
-            (None, Some(s)) => Ok(Some(Destination::Stream(s))),
-            (None, None) => Ok(None),
+    fn from_parts(station_number: Option<i64>, stream_name: Option<String>) -> Vec<Destination> {
+        let mut dests = Vec::new();
+        if let Some(n) = station_number {
+            dests.push(Destination::Station(n));
         }
+        if let Some(s) = stream_name {
+            dests.push(Destination::Stream(s));
+        }
+        dests
     }
 
     /// Whether a set (as `available_sets` normalizes it) is already assigned
@@ -344,14 +342,29 @@ fn snapshot_of(s: &HubState, event_slug: Option<&str>) -> Value {
 }
 
 /// Python `Hub._set_bucket`: `self.sets.setdefault(slug, {})`.
-fn set_bucket<'a>(s: &'a mut HubState, slug: &str) -> &'a mut Map<String, Value> {
-    s.sets
+///
+/// A bucket that exists but ISN'T an object (a corrupt or hand-edited
+/// `hub-state.json` — external input, never validated shape-deep by
+/// `load_state`) is replaced with an empty one rather than `.expect`ed:
+/// panicking here would 500 every hub request and unwind straight through
+/// the Tauri command path, bricking the app over one bad byte on disk.
+fn json_bucket<'a>(map: &'a mut Map<String, Value>, slug: &str) -> &'a mut Map<String, Value> {
+    let entry = map
         .entry(slug.to_string())
         .or_insert_with(|| Value::Object(Map::new()));
-    s.sets
-        .get_mut(slug)
-        .and_then(|v| v.as_object_mut())
-        .expect("sets bucket is a JSON object")
+    if !entry.is_object() {
+        *entry = Value::Object(Map::new());
+    }
+    entry.as_object_mut().expect("just ensured an object")
+}
+
+fn set_bucket<'a>(s: &'a mut HubState, slug: &str) -> &'a mut Map<String, Value> {
+    json_bucket(&mut s.sets, slug)
+}
+
+/// Same shape guarantee for the per-slug stations map.
+fn stations_bucket<'a>(s: &'a mut HubState, slug: &str) -> &'a mut Map<String, Value> {
+    json_bucket(&mut s.stations, slug)
 }
 
 fn load_state(log: &dyn Fn(&str), state_path: Option<&str>, s: &mut HubState) {
@@ -588,6 +601,17 @@ impl Hub {
         }
     }
 
+    /// The station record stored from the previous heartbeat/ingest, if any.
+    /// Takes the lock only for the read, so callers can do network work
+    /// between reading it and writing back.
+    fn prev_station(&self, slug: &str, station: i64) -> Option<Value> {
+        let s = self.state.lock().unwrap();
+        s.stations
+            .get(slug)
+            .and_then(|m| m.get(station.to_string()))
+            .cloned()
+    }
+
     // -- station-facing -----------------------------------------------------
     pub fn handle_current(
         &self,
@@ -599,59 +623,77 @@ impl Hub {
             Some(v) if v.is_object() => v.clone(),
             _ => json!({}),
         };
-        let mut s = self.state.lock().unwrap();
         let mut rec = json!({"station": station, "current": current, "updatedAt": now_sec()});
-        // A set just started here -> pre-bind the two entrants now, so the
+        // Previous record read under a short lock, network done with NO lock
+        // held: bind_station_set is a start.gg round trip (up to the client's
+        // 20s timeout), and holding the state lock across it would stall
+        // every other station's heartbeat, the snapshot, and every operator
+        // action behind one slow request.
+        let prev = self.prev_station(slug, station);
+        let state = &rec["current"]["state"];
+        // "A set just started here" -> pre-bind the two entrants now, so the
         // eventual live/ingest can name a winner with far less ambiguity.
-        if rec["current"]["state"] == *"set_start" {
+        // Two triggers: the legacy Python sender's explicit "set_start", or —
+        // since this app's own set_machine only ever writes "set_open"/"idle"
+        // — a "set_open" heartbeat whose setId this station wasn't already
+        // on (or with no binding yet, so a failed lookup retries). Re-binding
+        // on a NEW set is also what clears a stale binding left behind when
+        // the previous set was rebound at report time: without it, the next
+        // set's games would be live-pushed to the PREVIOUS set's bracket
+        // entry.
+        let prev_binding = prev
+            .as_ref()
+            .filter(|p| truthy(p.get("startgg")))
+            .map(|p| p["startgg"].clone());
+        let new_set_here = match &prev {
+            Some(p) => p["current"]["setId"] != rec["current"]["setId"],
+            None => true,
+        };
+        let rebind = state == &json!("set_start")
+            || (state == &json!("set_open") && (new_set_here || prev_binding.is_none()));
+        if rebind {
             let sg = self.bind_station_set(slug, station);
             if truthy(Some(&sg)) {
                 rec["startgg"] = sg;
             }
-        } else {
-            let prev = s
-                .stations
-                .get(slug)
-                .and_then(|m| m.get(station.to_string()))
-                .cloned();
-            if let Some(prev) = prev {
-                if truthy(prev.get("startgg")) {
-                    rec["startgg"] = prev["startgg"].clone();
-                }
-            }
+            // A fresh lookup that finds nothing deliberately DROPS any old
+            // binding: it belonged to the previous set at this station, and
+            // "no start.gg set at this station" (kept off the bracket) is
+            // strictly safer than pushing this set's games to that one.
+        } else if let Some(b) = prev_binding {
+            rec["startgg"] = b;
         }
-        s.stations
-            .entry(slug.to_string())
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
-            .expect("stations bucket is a JSON object")
-            .insert(station.to_string(), rec.clone());
+        let mut s = self.state.lock().unwrap();
+        stations_bucket(&mut s, slug).insert(station.to_string(), rec.clone());
         self.touch(&mut s);
         Ok(json!({"ok": true, "startgg": rec.get("startgg")}))
     }
 
-    /// Build/refresh the stored record for a set coming off a station.
+    /// Which start.gg set a record from this station should bind to: the
+    /// station's stored binding if it has one, else a fresh lookup. The lock
+    /// is taken only for the read and released before any network — see
+    /// `handle_current` for why the lookup must never run under it.
+    fn station_binding(&self, slug: &str, station: i64) -> Value {
+        if let Some(prev) = self.prev_station(slug, station) {
+            if truthy(prev.get("startgg")) {
+                return prev["startgg"].clone();
+            }
+        }
+        self.bind_station_set(slug, station)
+    }
+
+    /// Build/refresh the stored record for a set coming off a station. `sg`
+    /// is the station's start.gg binding, resolved by the caller (via
+    /// `station_binding`) BEFORE taking the state lock.
     fn record_for(
         &self,
         s: &HubState,
-        slug: &str,
-        station: i64,
+        sg: Value,
         st: &Value,
+        station: i64,
+        slug: &str,
         status: &str,
     ) -> (String, Value) {
-        let mut sg = Value::Null;
-        if let Some(prev_station) = s
-            .stations
-            .get(slug)
-            .and_then(|m| m.get(station.to_string()))
-        {
-            if truthy(prev_station.get("startgg")) {
-                sg = prev_station["startgg"].clone();
-            }
-        }
-        if !truthy(Some(&sg)) {
-            sg = self.bind_station_set(slug, station);
-        }
         let mut summary = matching::summarize_set(st);
         summary["mode"] = st.get("mode").cloned().unwrap_or(Value::Null);
         let key = sid(station, st.get("setId").unwrap_or(&Value::Null));
@@ -768,9 +810,11 @@ impl Hub {
         if !st.is_object() {
             return Err((json!({"error": "Missing set."}), 400));
         }
+        // Resolved before the lock: may hit start.gg (see handle_current).
+        let sg = self.station_binding(slug, station);
         let (key, rec, tag_map) = {
             let mut s = self.state.lock().unwrap();
-            let (key, mut rec) = self.record_for(&s, slug, station, st, "live");
+            let (key, mut rec) = self.record_for(&s, sg, st, station, slug, "live");
             // Don't clobber the mode label _record_for set for online/ranked.
             if rec["status"] != *"reported" && get_default_true(&rec, "reportable") {
                 rec["status"] = json!("live");
@@ -896,9 +940,11 @@ impl Hub {
         if !st.is_object() {
             return Err((json!({"error": "Missing set."}), 400));
         }
+        // Resolved before the lock: may hit start.gg (see handle_current).
+        let sg = self.station_binding(slug, station);
         let rec = {
             let mut s = self.state.lock().unwrap();
-            let (key, mut rec) = self.record_for(&s, slug, station, st, "recorded");
+            let (key, mut rec) = self.record_for(&s, sg, st, station, slug, "recorded");
             if rec["status"] != *"reported" && get_default_true(&rec, "reportable") {
                 rec["status"] = json!(if truthy(rec.get("matchedStartggSetId")) {
                     "matched"
@@ -968,13 +1014,7 @@ impl Hub {
             let mut s = self.state.lock().unwrap();
             // Refresh the station's cached binding too, so later updates agree.
             {
-                let slug_map = s
-                    .stations
-                    .entry(slug.to_string())
-                    .or_insert_with(|| Value::Object(Map::new()))
-                    .as_object_mut()
-                    .expect("stations bucket is a JSON object");
-                let stn = slug_map
+                let stn = stations_bucket(&mut s, slug)
                     .entry(station.to_string())
                     .or_insert_with(|| json!({}));
                 stn["startgg"] = sg.clone();
@@ -1293,7 +1333,9 @@ impl Hub {
     /// as `do_report`'s Report button (the mutation this calls,
     /// `markSetInProgress`, is "the TO's call" the rest of this app
     /// deliberately never invokes on its own). Optionally (re)assigns a
-    /// station or a stream first, as one user-facing action.
+    /// station, a stream, or both first, as one user-facing action --
+    /// start.gg lets a set sit at a physical station AND on a stream at the
+    /// same time.
     ///
     /// The destination is never trusted blindly from the frontend: it is
     /// resolved to start.gg's opaque id server-side, against a fresh
@@ -1332,7 +1374,7 @@ impl Hub {
                 501,
             ));
         }
-        let dest = Destination::from_parts(station_number, stream_name.clone())?;
+        let dests = Destination::from_parts(station_number, stream_name.clone());
         let data = self
             .startgg
             .available_sets(slug)
@@ -1356,13 +1398,14 @@ impl Hub {
             }
         };
 
-        if let Some(d) = &dest {
+        // A set can carry both a station and a stream at once; assign each
+        // requested one that differs from what's already set (an unchanged
+        // destination is skipped -- nothing to do), then start.
+        for d in &dests {
             if !d.matches_current(target) {
                 let label = self.assign(&data, set_id, d)?;
                 (self.log)(&format!("assigned set {set_id_s} to {label} on start.gg"));
             }
-            // else: already assigned to the requested destination -- nothing
-            // to assign; fall through to start_match below.
         }
 
         if let Err(e) = self.startgg.start_match(set_id) {
@@ -1378,7 +1421,7 @@ impl Hub {
         }))
     }
 
-    /// Change a set's station or stream on start.gg without starting it --
+    /// Change a set's station and/or stream on start.gg without starting it --
     /// for a set that's already playing (state 2, "playing now" in the
     /// Current Sets panel), where there's no "start" action to also fire
     /// alongside a destination change. Shares `do_start_match`'s security
@@ -1399,8 +1442,10 @@ impl Hub {
                 501,
             ));
         }
-        let dest = Destination::from_parts(station_number, stream_name.clone())?
-            .ok_or_else(|| (json!({"error": "No station or stream specified."}), 400))?;
+        let dests = Destination::from_parts(station_number, stream_name.clone());
+        if dests.is_empty() {
+            return Err((json!({"error": "No station or stream specified."}), 400));
+        }
         let data = self
             .startgg
             .available_sets(slug)
@@ -1411,17 +1456,27 @@ impl Hub {
             .cloned()
             .unwrap_or_default();
         let set_id_s = py_str(set_id);
-        let found = sets
+        let target = sets
             .iter()
-            .any(|s| py_str(s.get("id").unwrap_or(&Value::Null)) == set_id_s);
-        if !found {
-            return Err((
-                json!({"error": "Set not found or not available to start."}),
-                404,
-            ));
+            .find(|s| py_str(s.get("id").unwrap_or(&Value::Null)) == set_id_s);
+        let target = match target {
+            Some(t) => t,
+            None => {
+                return Err((
+                    json!({"error": "Set not found or not available to start."}),
+                    404,
+                ))
+            }
+        };
+        // Same both-at-once rule as do_start_match: assign each requested
+        // destination that differs from the set's current one, skipping any
+        // that already match (no redundant start.gg mutation).
+        for d in &dests {
+            if !d.matches_current(target) {
+                let label = self.assign(&data, set_id, d)?;
+                (self.log)(&format!("assigned set {set_id_s} to {label} on start.gg"));
+            }
         }
-        let label = self.assign(&data, set_id, &dest)?;
-        (self.log)(&format!("assigned set {set_id_s} to {label} on start.gg"));
         Ok(json!({
             "ok": true, "setId": set_id,
             "stationAssigned": station_number, "streamAssigned": stream_name,
@@ -2701,9 +2756,17 @@ mod tests {
             None,
         ));
 
-        let port = free_port();
-        let mut server = HubServer::new(h.clone(), port, "127.0.0.1");
-        server.start().expect("first start binds the port");
+        // free_port() drops its probe listener before returning, so a test
+        // running in parallel can steal the port in that gap -- retry with a
+        // fresh candidate instead of flaking. The property under test is the
+        // RESTART bind below, not this first one.
+        let (mut server, port) = (0..10)
+            .find_map(|_| {
+                let port = free_port();
+                let mut s = HubServer::new(h.clone(), port, "127.0.0.1");
+                s.start().ok().map(|_| (s, port))
+            })
+            .expect("one of ten fresh ports binds");
         server.stop();
 
         let mut server = HubServer::new(h, port, "127.0.0.1");
@@ -2876,6 +2939,117 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&workdir);
+    }
+
+    // ---- set_open pre-binding -------------------------------------------------
+    // This app's own set_machine only ever writes "set_open"/"idle" (never the
+    // legacy Python sender's "set_start"), so the pre-bind has to trigger on
+    // the first set_open heartbeat of a NEW setId -- and re-trigger when the
+    // setId changes, or a binding cached at report time (rebind) would keep
+    // pointing the NEXT set's games at the PREVIOUS bracket set.
+
+    #[test]
+    fn a_set_open_heartbeat_for_a_new_set_binds_the_station() {
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let res = h
+            .handle_current(
+                SLUG,
+                1,
+                Some(&json!({"state": "set_open", "setId": "L1", "matchCount": 1})),
+            )
+            .unwrap();
+        assert_eq!(
+            res["startgg"]["setId"],
+            json!(105639152),
+            "the first set_open heartbeat pre-binds the station's start.gg set  [{res}]"
+        );
+    }
+
+    #[test]
+    fn a_repeat_set_open_heartbeat_keeps_the_original_binding() {
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        h.handle_current(
+            SLUG,
+            1,
+            Some(&json!({"state": "set_open", "setId": "L1", "matchCount": 1})),
+        )
+        .unwrap();
+        // start.gg's answer for this station changes mid-set (TO shuffling
+        // assignments): heartbeats for the SAME setId must not chase it.
+        fake.set_station_set_id(1, json!("SOMETHING-ELSE"));
+        let res = h
+            .handle_current(
+                SLUG,
+                1,
+                Some(&json!({"state": "set_open", "setId": "L1", "matchCount": 2})),
+            )
+            .unwrap();
+        assert_eq!(
+            res["startgg"]["setId"],
+            json!(105639152),
+            "a mid-set heartbeat preserves the set's original binding  [{res}]"
+        );
+    }
+
+    #[test]
+    fn a_new_set_id_refreshes_a_stale_binding() {
+        // The bracket-corruption scenario this guards against: set A's
+        // binding is cached on the station record (handle_current or a
+        // report-time rebind); set B then starts at the same station. Its
+        // set_open heartbeat carries a new setId, so the binding must be
+        // looked up fresh -- NOT carried over from set A, which would
+        // live-push set B's games onto set A's bracket entry.
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        h.handle_current(
+            SLUG,
+            1,
+            Some(&json!({"state": "set_open", "setId": "A", "matchCount": 1})),
+        )
+        .unwrap();
+        fake.set_station_set_id(1, json!("SG-B"));
+        let res = h
+            .handle_current(
+                SLUG,
+                1,
+                Some(&json!({"state": "set_open", "setId": "B", "matchCount": 1})),
+            )
+            .unwrap();
+        assert_eq!(
+            res["startgg"]["setId"],
+            json!("SG-B"),
+            "a new setId at the station re-binds against a fresh lookup  [{res}]"
+        );
+    }
+
+    #[test]
+    fn an_idle_heartbeat_preserves_the_binding() {
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        h.handle_current(
+            SLUG,
+            1,
+            Some(&json!({"state": "set_open", "setId": "L1", "matchCount": 1})),
+        )
+        .unwrap();
+        let res = h
+            .handle_current(SLUG, 1, Some(&json!({"state": "idle"})))
+            .unwrap();
+        assert_eq!(
+            res["startgg"]["setId"],
+            json!(105639152),
+            "going idle between games/sets keeps the binding for the eventual ingest  [{res}]"
+        );
     }
 
     // ---- Report refuses a set someone already finalized on start.gg directly ---
@@ -3634,7 +3808,10 @@ mod tests {
     }
 
     #[test]
-    fn do_start_match_with_both_a_station_and_a_stream_is_refused() {
+    fn do_start_match_with_both_a_station_and_a_stream_assigns_both_then_starts() {
+        // start.gg lets a set sit at a physical station AND on a stream at
+        // once (e.g. Station 1 + "socalrivals"), so requesting both assigns
+        // both -- each resolved to its opaque id -- before starting.
         let fake = FakeStartgg::new();
         fake.set_available_sets(json!({
             "sets": [set_with_station("S1", Value::Null)],
@@ -3644,13 +3821,45 @@ mod tests {
         let mut h = Hub::new(None, None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
-        let err = h
+        let res = h
             .do_start_match(SLUG, &json!("S1"), Some(2), Some("socalrivals".to_string()))
-            .expect_err("a station and a stream at once must be refused, not silently resolved");
-        assert_eq!(err.1, 400);
-        assert!(fake.assign_calls().is_empty());
-        assert!(fake.assign_stream_calls().is_empty());
-        assert!(fake.start_calls().is_empty());
+            .expect("a station and a stream at once assigns both, then starts");
+        assert_eq!(res["ok"], json!(true));
+        assert_eq!(fake.assign_calls(), vec![(json!("S1"), json!("opaque-st-2"))]);
+        assert_eq!(
+            fake.assign_stream_calls(),
+            vec![(json!("S1"), json!("opaque-stream-1"))]
+        );
+        assert_eq!(fake.start_calls(), vec![json!("S1")]);
+    }
+
+    #[test]
+    fn do_start_match_with_both_only_assigns_the_one_that_changed() {
+        // Already at station 2, stream requested on top: the matching
+        // station is skipped (no redundant mutation), only the stream is
+        // assigned, and the match still starts.
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("S1", json!(2))],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let res = h
+            .do_start_match(SLUG, &json!("S1"), Some(2), Some("socalrivals".to_string()))
+            .expect("an unchanged station alongside a new stream succeeds");
+        assert_eq!(res["ok"], json!(true));
+        assert!(
+            fake.assign_calls().is_empty(),
+            "already on station 2 -> no redundant assign_station call"
+        );
+        assert_eq!(
+            fake.assign_stream_calls(),
+            vec![(json!("S1"), json!("opaque-stream-1"))]
+        );
+        assert_eq!(fake.start_calls(), vec![json!("S1")]);
     }
 
     #[test]
@@ -3838,7 +4047,9 @@ mod tests {
     }
 
     #[test]
-    fn do_reassign_destination_refuses_both_a_station_and_a_stream() {
+    fn do_reassign_destination_assigns_both_a_station_and_a_stream() {
+        // Same both-at-once rule as do_start_match: a set can sit at a
+        // physical station AND on a stream, so requesting both assigns both.
         let fake = FakeStartgg::new();
         fake.set_available_sets(json!({
             "sets": [set_with_station("S1", Value::Null)],
@@ -3848,11 +4059,42 @@ mod tests {
         let mut h = Hub::new(None, None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
-        let err = h
+        let res = h
             .do_reassign_destination(SLUG, &json!("S1"), Some(2), Some("socalrivals".to_string()))
-            .expect_err("both at once must be refused, not silently resolved");
-        assert_eq!(err.1, 400);
-        assert!(fake.assign_calls().is_empty());
-        assert!(fake.assign_stream_calls().is_empty());
+            .expect("a station and a stream at once assigns both");
+        assert_eq!(res["ok"], json!(true));
+        assert_eq!(fake.assign_calls(), vec![(json!("S1"), json!("opaque-st-2"))]);
+        assert_eq!(
+            fake.assign_stream_calls(),
+            vec![(json!("S1"), json!("opaque-stream-1"))]
+        );
+        assert!(fake.start_calls().is_empty());
+    }
+
+    #[test]
+    fn do_reassign_destination_skips_an_unchanged_destination() {
+        // Already at station 2; only the stream actually changes, so only
+        // the stream is assigned -- no redundant assign_station mutation.
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("S1", json!(2))],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let res = h
+            .do_reassign_destination(SLUG, &json!("S1"), Some(2), Some("socalrivals".to_string()))
+            .expect("an unchanged station alongside a new stream succeeds");
+        assert_eq!(res["ok"], json!(true));
+        assert!(
+            fake.assign_calls().is_empty(),
+            "already on station 2 -> no redundant assign_station call"
+        );
+        assert_eq!(
+            fake.assign_stream_calls(),
+            vec![(json!("S1"), json!("opaque-stream-1"))]
+        );
     }
 }

@@ -43,6 +43,7 @@ const key = ref('');
 const brokerUrl = ref('');
 const token = ref('');
 const saving = ref(false);
+const saveError = ref('');
 
 const paths = ref({ save: '', saveExists: false, replays: '', replaysExists: false });
 onMounted(async () => {
@@ -76,6 +77,7 @@ const canFinish = computed(() => {
 
 async function finish() {
   saving.value = true;
+  saveError.value = '';
   try {
     await saveConfig({
       ...state.s.config,
@@ -87,6 +89,10 @@ async function finish() {
       startgg_token: token.value.trim(),
       configured: true,
     });
+  } catch (e) {
+    // Without this the button just flips back to "Start" and the user is
+    // stuck on onboarding with no idea the save was rejected.
+    saveError.value = String(e);
   } finally {
     saving.value = false;
   }
@@ -157,6 +163,11 @@ async function finish() {
         <div class="ob-field">
           <label>Shared key <span class="ob-opt">(required to send; ask whoever runs the event)</span></label>
           <input v-model="key" type="password" class="ob-input" autocomplete="off" />
+          <p v-if="isOperator && !key.trim()" class="ob-help ob-help--warn">
+            Without a key, anyone on the venue's network can post to this hub —
+            including reporting sets to your bracket. Pick one and give it to
+            your stations.
+          </p>
         </div>
 
         <div v-if="isOperator" class="ob-field">
@@ -181,6 +192,8 @@ async function finish() {
             Save not found. Has Rivals 2 been run on this PC? (Paths can be changed later in Settings.)
           </p>
         </div>
+
+        <p v-if="saveError" class="ob-help ob-help--err">{{ saveError }}</p>
 
         <div class="ob-actions">
           <button class="linkish" @click="step = 1">

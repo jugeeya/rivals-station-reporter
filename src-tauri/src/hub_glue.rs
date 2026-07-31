@@ -93,10 +93,14 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
     // — reports which event this hub is running, instead of a station
     // auto-connecting to an anonymous address.
     hub.set_event_slug(&cfg.slug);
-    let sweep_stop = spawn_reported_elsewhere_sweep(&hub);
 
     let mut server = HubServer::new(hub.clone(), cfg.hub_port, "0.0.0.0");
+    // Bind before spawning the sweep: if the port is taken, `?` returns here,
+    // and a sweep spawned earlier would have no owner left to stop it — a
+    // leaked thread polling start.gg every 90s against an orphaned hub, plus
+    // one more per failed rebuild.
     let url = server.start()?;
+    let sweep_stop = spawn_reported_elsewhere_sweep(&hub);
     inner.set_hub_snapshot(hub.snapshot());
     inner.set_hub(Some(hub));
     Ok(HubPieces {
@@ -201,9 +205,10 @@ pub fn available_sets(inner: &Arc<EngineInner>) -> Result<Value, String> {
 }
 
 /// Start a match on start.gg -- explicit operator action, same standing as
-/// `do_report`. Optionally (re)assigns a station or a stream first if the
-/// requested one differs from the set's current destination (see
-/// `Hub::do_start_match` for the resolve-then-assign-then-start sequence).
+/// `do_report`. Optionally (re)assigns a station, a stream, or both first,
+/// for each requested one that differs from the set's current assignment
+/// (see `Hub::do_start_match` for the resolve-then-assign-then-start
+/// sequence).
 pub fn do_start_match(
     inner: &Arc<EngineInner>,
     set_id: &str,
@@ -215,7 +220,7 @@ pub fn do_start_match(
         .map_err(err_text)
 }
 
-/// Change a set's station or stream on start.gg without starting it --
+/// Change a set's station and/or stream on start.gg without starting it --
 /// explicit operator action, same standing as `do_start_match`. See
 /// `Hub::do_reassign_destination`.
 pub fn do_reassign_destination(

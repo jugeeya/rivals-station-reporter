@@ -324,25 +324,40 @@ const handlers: Record<string, (args: any) => any> = {
   start_match: (a) => {
     const set = availableSetsData.sets.find((s: any) => String(s.id) === String(a.setId));
     if (!set) throw 'Set not found or not available to start.';
-    // Mirrors do_start_match: a different station than the one already
-    // assigned reassigns (no refusal) unless it already matches, in which
-    // case nothing needs to change before starting.
+    // Mirrors do_start_match: each requested destination (a set can carry a
+    // station AND a stream at once) that differs from the current one is
+    // reassigned; one that already matches is skipped.
     if (a.stationNumber != null && set.station !== a.stationNumber) {
       set.station = a.stationNumber;
+    }
+    if (a.streamName != null && set.stream !== a.streamName) {
+      set.stream = a.streamName;
     }
     // Starting the match means it's no longer "available to start" (it
     // moves into "playing now" for real; the mock just drops it since this
     // fixture data isn't meant to simulate a whole bracket).
     availableSetsData.sets = availableSetsData.sets.filter((s: any) => s !== set);
     log(`started match for set ${a.setId} on start.gg`);
-    return { ok: true, setId: a.setId, stationAssigned: a.stationNumber ?? null };
+    return {
+      ok: true,
+      setId: a.setId,
+      stationAssigned: a.stationNumber ?? null,
+      streamAssigned: a.streamName ?? null,
+    };
   },
-  reassign_station: (a) => {
+  reassign_destination: (a) => {
     const set = availableSetsData.sets.find((s: any) => String(s.id) === String(a.setId));
     if (!set) throw 'Set not found or not available to start.';
-    set.station = a.stationNumber;
-    log(`assigned set ${a.setId} to station ${a.stationNumber} on start.gg`);
-    return { ok: true, setId: a.setId, stationAssigned: a.stationNumber };
+    if (a.stationNumber == null && a.streamName == null) throw 'No station or stream specified.';
+    if (a.stationNumber != null) set.station = a.stationNumber;
+    if (a.streamName != null) set.stream = a.streamName;
+    log(`assigned set ${a.setId} on start.gg`);
+    return {
+      ok: true,
+      setId: a.setId,
+      stationAssigned: a.stationNumber ?? null,
+      streamAssigned: a.streamName ?? null,
+    };
   },
   get_autostart: () => false,
   set_autostart: () => null,
@@ -360,6 +375,9 @@ const handlers: Record<string, (args: any) => any> = {
   },
   // plugin shims used by drawers in browser mode
   'plugin:dialog|open': () => null,
+  // A real browser DOES have window.confirm (unlike WKWebView, which is why
+  // the app uses the dialog plugin) -- so the mock can just use it.
+  'plugin:dialog|confirm': (a) => window.confirm(String(a?.message ?? 'Confirm?')),
   'plugin:window|close': () => null,
   'plugin:app|version': () => '0.0.0-dev',
 };

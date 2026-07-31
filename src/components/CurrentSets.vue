@@ -19,42 +19,32 @@
 // seeing without an extra click.
 //
 // Starting a match fires immediately on click, no confirmation dialog, same
-// one-click standing as OperatorSetRow's Report button. A station can be
-// (re)assigned for either group: for a startable set, the picker doubles as
-// part of the Start Match click (assign then start, one user-facing action,
-// two GraphQL calls underneath); for a playing-now set there's no "start" to
-// also fire, so its picker has its own small Change action that only ever
-// reassigns.
+// one-click standing as OperatorSetRow's Report button. A destination can be
+// (re)assigned for either group: for a startable set, the pickers double as
+// part of the Start Match click (assign then start, one user-facing action);
+// for a playing-now set there's no "start" to also fire, so its pickers have
+// their own small Change action that only ever reassigns.
+//
+// Station and stream are SEPARATE pickers, not one combined list: start.gg
+// lets a set sit at a physical station AND on a stream at the same time
+// (e.g. Station 1 + "socalrivals"), so an either/or dropdown couldn't
+// express a real, common assignment. Picking the blank option on either
+// leaves that half of the assignment untouched -- there is no unassign.
 
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import AppIcon from './AppIcon.vue';
 import DestinationDropdown, { type DropdownOption } from './DestinationDropdown.vue';
 import { listAvailableSets, startMatch, reassignDestination } from '../lib/engine';
 import { elapsedSince } from '../lib/operatorFormat';
-import type { AvailableSet, AvailableStation, AvailableStream, Destination } from '../types';
+import { useNowSeconds } from '../lib/useNow';
+import type {
+  AvailableSet,
+  AvailableStation,
+  AvailableStream,
+  DestinationSelection,
+} from '../types';
 
 const STARTGG_STATE_ONGOING = 2;
-
-// A destination is encoded as one string key so a single ref per set (like
-// the plain station number this replaced) still works as the picker's
-// v-model: "station:3", "stream:socalrivals", or null for "no destination".
-const STATION_PREFIX = 'station:';
-const STREAM_PREFIX = 'stream:';
-
-function destKey(kind: 'station' | 'stream', value: number | string): string {
-  return kind === 'station' ? `${STATION_PREFIX}${value}` : `${STREAM_PREFIX}${value}`;
-}
-
-function parseDestKey(key: string | null): Destination | null {
-  if (key == null) return null;
-  if (key.startsWith(STATION_PREFIX)) {
-    return { kind: 'station', number: Number(key.slice(STATION_PREFIX.length)) };
-  }
-  if (key.startsWith(STREAM_PREFIX)) {
-    return { kind: 'stream', name: key.slice(STREAM_PREFIX.length) };
-  }
-  return null;
-}
 
 const sets = ref<AvailableSet[]>([]);
 const stations = ref<AvailableStation[]>([]);
@@ -66,32 +56,34 @@ const busyId = ref<string | null>(null);
 const actionMsg = ref('');
 const actionErr = ref(false);
 
-// Stations first (the common case), then streams, each grouped so the type
-// reads at a glance instead of one flat list of ambiguous names/numbers.
-const destinationOptions = computed<DropdownOption[]>(() => [
-  { value: null, label: 'no destination' },
-  ...stations.value.map((st) => ({ value: destKey('station', st.number), label: `Station ${st.number}` })),
-  ...streams.value.map((st) => ({ value: destKey('stream', st.name), label: `Stream: ${st.name}` })),
+// DestinationDropdown's v-model is string|null, so station numbers ride as
+// strings ("3") and get parsed back in selection().
+const stationOptions = computed<DropdownOption[]>(() => [
+  { value: null, label: 'no station' },
+  ...stations.value.map((st) => ({ value: String(st.number), label: `Station ${st.number}` })),
 ]);
 
-// One picked destination key per set, keyed by set id -- seeded from the
-// set's current station/stream (if any) so leaving the picker untouched
+const streamOptions = computed<DropdownOption[]>(() => [
+  { value: null, label: 'no stream' },
+  ...streams.value.map((st) => ({ value: st.name, label: st.name })),
+]);
+
+// One picked value per set per picker, keyed by set id -- seeded from the
+// set's current station/stream (if any) so leaving the pickers untouched
 // preserves today's assignment, and changed freely from there for either
-// group.
-const picked = ref<Record<string, string | null>>({});
+// group. `seen*` remembers what the current assignment was at the last
+// refresh: a pick still equal to it is untouched and follows start.gg (so a
+// TO moving the set on the website doesn't leave a stale pick here that
+// would light up Change and silently move it back), while a pick the
+// operator changed survives refreshes until acted on.
+const pickedStation = ref<Record<string, string | null>>({});
+const pickedStream = ref<Record<string, string | null>>({});
+const seenStation = ref<Record<string, string | null>>({});
+const seenStream = ref<Record<string, string | null>>({});
 
 // Ticks slowly so "elapsed" text stays honest between refreshes without
-// every row needing its own timer -- same pattern as OperatorConsole's nowS.
-const nowS = ref(Date.now() / 1000);
-let tickTimer: ReturnType<typeof setInterval> | undefined;
-onMounted(() => {
-  tickTimer = setInterval(() => {
-    nowS.value = Date.now() / 1000;
-  }, 30_000);
-});
-onUnmounted(() => {
-  if (tickTimer) clearInterval(tickTimer);
-});
+// every row needing its own timer (see useNow.ts).
+const nowS = useNowSeconds();
 
 function key(s: AvailableSet): string {
   return String(s.id);
@@ -113,28 +105,90 @@ function bestOfText(s: AvailableSet): string | null {
 const playingNow = computed(() => sets.value.filter((s) => s.state === STARTGG_STATE_ONGOING));
 const startable = computed(() => sets.value.filter((s) => s.state !== STARTGG_STATE_ONGOING));
 
-function currentDestKey(s: AvailableSet): string | null {
-  if (s.station != null) return destKey('station', s.station);
-  if (s.stream) return destKey('stream', s.stream);
-  return null;
+function currentStationKey(s: AvailableSet): string | null {
+  return s.station != null ? String(s.station) : null;
 }
 
+function currentStreamKey(s: AvailableSet): string | null {
+  return s.stream || null;
+}
+
+// What the pickers say should be sent for this set: null on either half
+// means "leave that half as it is".
+function selection(s: AvailableSet): DestinationSelection {
+  const id = key(s);
+  const st = pickedStation.value[id] ?? null;
+  return { station: st != null ? Number(st) : null, stream: pickedStream.value[id] ?? null };
+}
+
+// Whether the pickers name anything different from the set's current
+// assignment -- gates the Change button, since sending an unchanged
+// selection would be a no-op.
+function selectionChanged(s: AvailableSet): boolean {
+  const id = key(s);
+  const st = pickedStation.value[id] ?? null;
+  const sm = pickedStream.value[id] ?? null;
+  return (
+    (st != null && st !== currentStationKey(s)) || (sm != null && sm !== currentStreamKey(s))
+  );
+}
+
+// Guards against overlapping refreshes applying out of order: the 20s timer,
+// the header button, and every post-action refresh can all be in flight at
+// once, and a slow stale response landing last would resurrect a just-started
+// set (complete with a live Start Match button). Only the newest request may
+// write.
+let refreshGen = 0;
+
 async function refresh() {
+  const gen = ++refreshGen;
   refreshing.value = true;
-  loadErr.value = '';
   try {
     const res = await listAvailableSets();
+    if (gen !== refreshGen) return;
+    loadErr.value = '';
     sets.value = res.sets ?? [];
     stations.value = res.stations ?? [];
     streams.value = res.streams ?? [];
+    const liveIds = new Set(sets.value.map(key));
     for (const s of sets.value) {
-      if (!(key(s) in picked.value)) picked.value[key(s)] = currentDestKey(s);
+      const id = key(s);
+      const curSt = currentStationKey(s);
+      const curSm = currentStreamKey(s);
+      // Seed a new set's picks from its current assignment; re-sync a pick
+      // the operator hasn't touched (still equal to the assignment we last
+      // showed) so it tracks changes made elsewhere.
+      if (!(id in pickedStation.value) || pickedStation.value[id] === seenStation.value[id]) {
+        pickedStation.value[id] = curSt;
+      }
+      if (!(id in pickedStream.value) || pickedStream.value[id] === seenStream.value[id]) {
+        pickedStream.value[id] = curSm;
+      }
+      seenStation.value[id] = curSt;
+      seenStream.value[id] = curSm;
+    }
+    // Drop picks for sets that left the list (started elsewhere, completed,
+    // bracket moved on) -- with a 20s auto-refresh these records would
+    // otherwise grow for as long as the panel stays open.
+    for (const id of Object.keys(pickedStation.value)) {
+      if (!liveIds.has(id)) {
+        delete pickedStation.value[id];
+        delete pickedStream.value[id];
+        delete seenStation.value[id];
+        delete seenStream.value[id];
+      }
     }
   } catch (e) {
+    if (gen !== refreshGen) return;
+    // Keep whatever was already listed rendering -- one transient start.gg
+    // blip on the background refresh must not blank the whole panel (and any
+    // picker the operator is mid-click on) for the next 20 seconds.
     loadErr.value = String(e);
   } finally {
-    loaded.value = true;
-    refreshing.value = false;
+    if (gen === refreshGen) {
+      loaded.value = true;
+      refreshing.value = false;
+    }
   }
 }
 
@@ -155,8 +209,7 @@ async function onStart(s: AvailableSet) {
   busyId.value = id;
   actionMsg.value = '';
   try {
-    const dest = parseDestKey(picked.value[id] ?? null);
-    await startMatch(String(s.id), dest);
+    await startMatch(String(s.id), selection(s));
     actionMsg.value = `Started ${playersLabel(s)}.`;
     actionErr.value = false;
     await refresh();
@@ -168,19 +221,29 @@ async function onStart(s: AvailableSet) {
   }
 }
 
-function destinationLabel(dest: Destination): string {
-  return dest.kind === 'station' ? `station ${dest.number}` : `stream "${dest.name}"`;
+// "station 3 and stream "socalrivals"" -- only the halves that actually
+// changed, for the post-Change status line.
+function changedLabel(s: AvailableSet, dest: DestinationSelection): string {
+  const parts: string[] = [];
+  if (dest.station != null && String(dest.station) !== currentStationKey(s)) {
+    parts.push(`station ${dest.station}`);
+  }
+  if (dest.stream != null && dest.stream !== currentStreamKey(s)) {
+    parts.push(`stream "${dest.stream}"`);
+  }
+  return parts.join(' and ');
 }
 
 async function onChangeDestination(s: AvailableSet) {
   const id = key(s);
-  const dest = parseDestKey(picked.value[id] ?? null);
-  if (dest == null) return;
+  if (!selectionChanged(s)) return;
+  const dest = selection(s);
+  const label = changedLabel(s, dest);
   busyId.value = id;
   actionMsg.value = '';
   try {
     await reassignDestination(String(s.id), dest);
-    actionMsg.value = `Moved ${playersLabel(s)} to ${destinationLabel(dest)}.`;
+    actionMsg.value = `Moved ${playersLabel(s)} to ${label}.`;
     actionErr.value = false;
     await refresh();
   } catch (e) {
@@ -213,12 +276,17 @@ async function onChangeDestination(s: AvailableSet) {
         <span class="as-msg" :class="{ 'as-msg--err': actionErr }">{{ actionMsg }}</span>
       </div>
 
-      <p v-if="loadErr" class="as-empty as-empty--err">{{ loadErr }}</p>
+      <!-- A refresh error only takes over the panel when there is nothing to
+           show; with data already listed it appears alongside, so a transient
+           start.gg blip on the 20s background refresh doesn't blank the lists
+           (and any picker mid-interaction) until the next successful pass. -->
+      <p v-if="loadErr && !sets.length" class="as-empty as-empty--err">{{ loadErr }}</p>
       <p v-else-if="loaded && !sets.length" class="as-empty">
         Nothing happening on the bracket right now.
       </p>
 
       <template v-else>
+        <p v-if="loadErr" class="as-empty as-empty--err">refresh failed: {{ loadErr }}</p>
         <div v-if="playingNow.length" class="as-group">
           <div class="as-group-head as-group-head--live">
             <span class="as-group-dot" aria-hidden="true"></span>PLAYING NOW
@@ -234,17 +302,22 @@ async function onChangeDestination(s: AvailableSet) {
               <span v-if="bestOfText(s)" class="as-bestof">{{ bestOfText(s) }}</span>
 
               <DestinationDropdown
-                v-model="picked[key(s)]"
+                v-model="pickedStation[key(s)]"
                 class="as-picker"
-                :options="destinationOptions"
+                :options="stationOptions"
+                :disabled="busyId === key(s)"
+              />
+              <DestinationDropdown
+                v-if="streams.length"
+                v-model="pickedStream[key(s)]"
+                class="as-picker"
+                :options="streamOptions"
                 :disabled="busyId === key(s)"
               />
               <button
                 class="linkish as-change"
-                :disabled="
-                  busyId !== null || picked[key(s)] == null || picked[key(s)] === currentDestKey(s)
-                "
-                title="Change this set's station or stream on start.gg (does not restart the match)"
+                :disabled="busyId !== null || !selectionChanged(s)"
+                title="Change this set's station and/or stream on start.gg (does not restart the match)"
                 @click="onChangeDestination(s)"
               >
                 Change
@@ -264,9 +337,16 @@ async function onChangeDestination(s: AvailableSet) {
               <span class="as-players" :title="playersLabel(s)">{{ playersLabel(s) }}</span>
 
               <DestinationDropdown
-                v-model="picked[key(s)]"
+                v-model="pickedStation[key(s)]"
                 class="as-picker"
-                :options="destinationOptions"
+                :options="stationOptions"
+                :disabled="busyId === key(s)"
+              />
+              <DestinationDropdown
+                v-if="streams.length"
+                v-model="pickedStream[key(s)]"
+                class="as-picker"
+                :options="streamOptions"
                 :disabled="busyId === key(s)"
               />
 

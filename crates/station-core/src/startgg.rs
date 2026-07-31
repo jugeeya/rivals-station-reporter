@@ -52,6 +52,15 @@ pub const API_URL: &str = "https://api.start.gg/gql/alpha";
 // start.gg allows ~80 requests/60s per token; stay well under it.
 pub const MIN_INTERVAL_S: f64 = 0.8;
 pub const STATION_CACHE_S: f64 = 15.0; // station lookups repeat on every heartbeat
+
+/// Upper bound on how many pages of active sets one lookup will fetch
+/// (60/page). Big brackets routinely have >60 sets in state 1/2/6 at once —
+/// early rounds of 128+ entrants — and an unpaginated read silently dropped
+/// everything past the cutoff ("no start.gg set at this station" for a real
+/// set). 5 pages = 300 active sets, past any realistic single-event load,
+/// while still bounding worst-case request count against the ~80req/60s
+/// budget (the client's own throttle spaces them out regardless).
+const MAX_SET_PAGES: i64 = 5;
 pub const CHARACTER_CACHE_S: f64 = 604800.0;
 
 /// GraphQL query strings, byte-for-byte from the Python source (except where
@@ -68,7 +77,7 @@ pub const CHARACTER_CACHE_S: f64 = 604800.0;
 /// markSetInProgress mutation and this app's own STARTGG_STATE_ONGOING
 /// concept) and falls back to `startAt` as a documented, reasoned-from-naming
 /// guess rather than a verified fact -- see `hub.rs`'s `preferred_started_at`.
-const STATION_SET_QUERY: &str = "query($slug:String!){ event(slug:$slug){\n                 sets(page:1, perPage:60, sortType:STANDARD, filters:{ state:[1,2,6] }){\n                   nodes{ id state fullRoundText startedAt startAt totalGames station{ number }\n                     slots{ entrant{ id name } } } } } }";
+const STATION_SET_QUERY: &str = "query($slug:String!,$page:Int!){ event(slug:$slug){\n                 sets(page:$page, perPage:60, sortType:STANDARD, filters:{ state:[1,2,6] }){\n                   pageInfo{ totalPages }\n                   nodes{ id state fullRoundText startedAt startAt totalGames station{ number }\n                     slots{ entrant{ id name } } } } } }";
 const CHARACTER_MAP_QUERY: &str =
     "query($slug:String!){ event(slug:$slug){ videogame{ id characters{ id name } } } }";
 const UPDATE_LIVE_MUTATION: &str = "mutation($id:ID!,$g:[BracketSetGameDataInput]){\n                 updateBracketSet(setId:$id, gameData:$g){ id state } }";
@@ -124,7 +133,7 @@ const SET_STATE_QUERY: &str = "query($setId:ID!){ set(id:$setId){ state } }";
 // human-facing integer -- `streamName` is the closest equivalent and is what
 // this app resolves by, the same way a station number is resolved to its
 // opaque id server-side, never a raw id from the frontend.
-const AVAILABLE_SETS_QUERY: &str = "query($slug:String!){ event(slug:$slug){\n                 sets(page:1, perPage:60, sortType:STANDARD, filters:{state:[1,2,6]}){\n                   nodes{ id state fullRoundText startedAt startAt totalGames station{ number } stream{ streamName }\n                     slots{ entrant{ id name } } } }\n                 tournament{ stations(perPage:32){ nodes{ id number enabled } } streams{ id streamName enabled } } } }";
+const AVAILABLE_SETS_QUERY: &str = "query($slug:String!,$page:Int!){ event(slug:$slug){\n                 sets(page:$page, perPage:60, sortType:STANDARD, filters:{state:[1,2,6]}){\n                   pageInfo{ totalPages }\n                   nodes{ id state fullRoundText startedAt startAt totalGames station{ number } stream{ streamName }\n                     slots{ entrant{ id name } } } }\n                 tournament{ stations(perPage:32){ nodes{ id number enabled } } streams{ id streamName enabled } } } }";
 // `assignStation`'s own required args, confirmed against the live schema:
 // just the set and the station's opaque id.
 const ASSIGN_STATION_MUTATION: &str =
@@ -282,6 +291,48 @@ impl Startgg {
         })
     }
 
+    /// Run a `($slug,$page)` sets query across every page (up to
+    /// [`MAX_SET_PAGES`]), returning the FIRST page's `data` with
+    /// `event.sets.nodes` swapped for the concatenation of all pages' nodes
+    /// -- so callers' parsers (`parse_station_set`/`parse_available_sets`)
+    /// keep reading the exact same shape they always did. Any non-sets
+    /// payload in the query (e.g. AVAILABLE_SETS_QUERY's tournament
+    /// stations/streams) is simply taken from page 1.
+    fn gql_all_set_pages(&self, query: &str, slug: &str) -> Result<Value, StartggError> {
+        let mut data = self.gql(query, json!({ "slug": slug, "page": 1 }))?;
+        let sets = |d: &Value| d.get("event").and_then(|e| e.get("sets")).cloned();
+        let total_pages = sets(&data)
+            .as_ref()
+            .and_then(|s| s.get("pageInfo"))
+            .and_then(|p| p.get("totalPages"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+        if total_pages <= 1 {
+            return Ok(data);
+        }
+        if total_pages > MAX_SET_PAGES {
+            (self.log)(&format!(
+                "start.gg reports {total_pages} pages of active sets; reading only the first {MAX_SET_PAGES}"
+            ));
+        }
+        let mut nodes = sets(&data)
+            .and_then(|s| s.get("nodes").cloned())
+            .and_then(|n| n.as_array().cloned())
+            .unwrap_or_default();
+        for page in 2..=total_pages.min(MAX_SET_PAGES) {
+            let next = self.gql(query, json!({ "slug": slug, "page": page }))?;
+            if let Some(more) = sets(&next)
+                .as_ref()
+                .and_then(|s| s.get("nodes"))
+                .and_then(|n| n.as_array())
+            {
+                nodes.extend(more.iter().cloned());
+            }
+        }
+        data["event"]["sets"]["nodes"] = Value::Array(nodes);
+        Ok(data)
+    }
+
     // -- reads --------------------------------------------------------------
     /// The not-yet-completed set currently at a station, with entrants.
     ///
@@ -299,7 +350,7 @@ impl Startgg {
                 return Ok(cached.clone());
             }
         }
-        let data = self.gql(STATION_SET_QUERY, json!({ "slug": slug }))?;
+        let data = self.gql_all_set_pages(STATION_SET_QUERY, slug)?;
         let result = parse_station_set(&data, station);
         self.stations
             .lock()
@@ -434,7 +485,7 @@ impl Startgg {
     /// `stations[].number` is the plain integer this app's own station
     /// numbering already uses.
     pub fn available_sets(&self, slug: &str) -> Result<Value, StartggError> {
-        let data = self.gql(AVAILABLE_SETS_QUERY, json!({ "slug": slug }))?;
+        let data = self.gql_all_set_pages(AVAILABLE_SETS_QUERY, slug)?;
         Ok(parse_available_sets(&data))
     }
 

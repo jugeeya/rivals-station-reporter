@@ -50,6 +50,9 @@ async function toggleAutostart() {
   try {
     await invoke('set_autostart', { enabled: autostart.value });
   } catch (e) {
+    // Revert the optimistic flip: leaving the checkbox on when the OS call
+    // failed shows autostart as enabled when it isn't.
+    autostart.value = !autostart.value;
     err.value = String(e);
   }
 }

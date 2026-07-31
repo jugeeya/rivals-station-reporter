@@ -367,10 +367,28 @@ impl SetMachine {
             .iter()
             .map(|p| json!({"slot": p["slot"], "name": p["name"], "character": p["character"], "wins": p["wins"]}))
             .collect();
-        let winner = standings
+        // Only a UNIQUE top score names a winner — same rule as `summ`. An
+        // idle timeout can finalize a set at 1-1, and `max_by_key` on a tie
+        // would arbitrarily crown whoever sorts last; the hub then offers
+        // that player to the operator as a high-confidence pre-selected
+        // winner for a set nobody won.
+        let top = standings
             .iter()
-            .max_by_key(|p| p["wins"].as_i64().unwrap_or(i64::MIN))
-            .cloned();
+            .filter_map(|p| p["wins"].as_i64())
+            .max()
+            .unwrap_or(i64::MIN);
+        let tied = standings
+            .iter()
+            .filter(|p| p["wins"].as_i64() == Some(top))
+            .count();
+        let winner = (tied == 1)
+            .then(|| {
+                standings
+                    .iter()
+                    .find(|p| p["wins"].as_i64() == Some(top))
+                    .cloned()
+            })
+            .flatten();
         let report = json!({
             "setId": set.id, "complete": complete,
             "startTime": set.start_iso, "startEpoch": set.start_epoch,

@@ -14,9 +14,10 @@
 // Row rendering (per-game character strip, time column, mapping, best-of)
 // lives in OperatorSetRow.vue / ../lib/operatorFormat.ts.
 
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, ref } from 'vue';
 import OperatorSetRow from './OperatorSetRow.vue';
 import { state, reportWinner, swapPlayers, deleteSet } from '../lib/engine';
+import { useNowSeconds } from '../lib/useNow';
 import type { HubRecord } from '../types';
 
 const pickerFor = ref<string | null>(null); // "station:setId"
@@ -24,19 +25,8 @@ const busy = ref(false);
 const actionMsg = ref('');
 const actionErr = ref(false);
 
-// Drives the live rows' elapsed-time column. Ticking here (rather than
-// recomputing only when engine-state changes) keeps "12m" honest between
-// updates without every row needing its own timer.
-const nowS = ref(Date.now() / 1000);
-let tickTimer: ReturnType<typeof setInterval> | undefined;
-onMounted(() => {
-  tickTimer = setInterval(() => {
-    nowS.value = Date.now() / 1000;
-  }, 30_000);
-});
-onUnmounted(() => {
-  if (tickTimer) clearInterval(tickTimer);
-});
+// Drives the live rows' elapsed-time column (see useNow.ts).
+const nowS = useNowSeconds();
 
 const allSets = computed<HubRecord[]>(() => state.s.hubSnapshot.sets ?? []);
 const sets = allSets; // used by the header's total count, any grouping included
@@ -98,9 +88,17 @@ function onSwap(r: HubRecord) {
   );
 }
 
-function onDelete(r: HubRecord) {
+async function onDelete(r: HubRecord) {
   const who = playersLabel(r) || r.id;
-  if (!window.confirm(`Delete ${who} (station ${r.station})?\nstart.gg is untouched.`)) return;
+  // The dialog plugin, not window.confirm: WKWebView (the desktop app on
+  // macOS) has no native confirm and silently returns false, which made
+  // Delete a no-op there.
+  const { confirm } = await import('@tauri-apps/plugin-dialog');
+  const ok = await confirm(`Delete ${who} (station ${r.station})?\nstart.gg is untouched.`, {
+    title: 'Delete set',
+    kind: 'warning',
+  });
+  if (!ok) return;
   act(() => deleteSet(Number(r.station), String(r.id)), 'Set deleted.');
 }
 

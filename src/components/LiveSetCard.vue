@@ -4,6 +4,9 @@
 // they'll never touch the bracket.
 
 import { computed } from 'vue';
+// sggTitle: the public tag database hint — deliberately styled weaker than
+// the operator console's match cell; see .ls-sgg below.
+import { sggTitle } from '../lib/operatorFormat';
 import type { SnapshotSet } from '../types';
 
 const props = defineProps<{ live: SnapshotSet | null }>();
@@ -16,14 +19,6 @@ const modeLabel = computed(() =>
     ? props.live.mode.toLowerCase()
     : '',
 );
-
-// The public tag database's guess at whose start.gg account typed this tag in
-// game — nothing to do with the bracket. Weaker than the operator console's
-// match cell (which means "found in this bracket"), so it must never borrow
-// that cell's success/warning colors; see .ls-sgg below.
-function sggTitle(tag: string, sgg: string): string {
-  return `Public tag database: "${tag}" is registered to start.gg @${sgg}. Not a bracket match, just what was submitted.`;
-}
 </script>
 
 <template>

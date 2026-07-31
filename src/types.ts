@@ -127,6 +127,11 @@ export interface AvailableSetsResponse {
   streams: AvailableStream[];
 }
 
-/** What a set can be pointed at: a physical station (by number) or a stream
- *  setup (by name) -- mutually exclusive, mirroring `hub::Destination`. */
-export type Destination = { kind: 'station'; number: number } | { kind: 'stream'; name: string };
+/** What a set can be pointed at on start.gg: a physical station (by number)
+ *  and/or a stream setup (by name) -- a set can carry both at once (e.g.
+ *  Station 1 AND the "socalrivals" stream). `null` on either half means
+ *  "leave that half as it is" -- there is no unassign. */
+export interface DestinationSelection {
+  station: number | null;
+  stream: string | null;
+}

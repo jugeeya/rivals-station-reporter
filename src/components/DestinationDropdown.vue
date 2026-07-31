@@ -60,10 +60,15 @@ function computePosition() {
   };
 }
 
-function onReposition() {
+function onReposition(e?: Event) {
   // A scroll or resize can move the trigger anywhere relative to a fixed
   // popup; closing is simpler and just as unsurprising as a native select
-  // doing the same when the page moves under it.
+  // doing the same when the page moves under it. The one exception is the
+  // option list scrolling ITSELF (it's `overflow-y: auto`): this listener is
+  // capture-phase on window, so wheel-scrolling a long list — or ArrowDown's
+  // scrollIntoView pushing past the fold — would land here too and close the
+  // list mid-interaction.
+  if (e && listEl.value && e.target instanceof Node && listEl.value.contains(e.target)) return;
   close();
 }
 

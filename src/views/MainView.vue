@@ -5,6 +5,7 @@
 // so the main view never reflows.
 
 import { computed, ref } from 'vue';
+import { useNowSeconds } from '../lib/useNow';
 import AnimatedCard from '../components/AnimatedCard.vue';
 import AppIcon from '../components/AppIcon.vue';
 import HealthStrip from '../components/HealthStrip.vue';
@@ -22,8 +23,11 @@ const cfg = computed(() => state.s.config);
 const isStation = computed(() => cfg.value.mode !== 'operator');
 const isOperator = computed(() => cfg.value.mode !== 'station');
 
+// Ticks on its own (see useNow.ts): this label is the one place a stalled
+// engine shows up, so it must keep aging even when no new state arrives.
+const nowS = useNowSeconds(10_000);
 const statusAgo = computed(() => {
-  const d = Math.max(0, Math.floor(Date.now() / 1000 - state.s.status.t));
+  const d = Math.max(0, Math.floor(nowS.value - state.s.status.t));
   return d < 2 ? 'just now' : d < 60 ? `${d}s ago` : `${Math.floor(d / 60)}m ago`;
 });
 

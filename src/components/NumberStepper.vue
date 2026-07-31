@@ -32,6 +32,20 @@ function onInput(e: Event) {
   const n = Number((e.target as HTMLInputElement).value);
   emit('update:modelValue', Number.isFinite(n) ? n : (props.min ?? 0));
 }
+
+// Clamp when editing ENDS (change = blur/Enter), not on every keystroke:
+// clamping mid-typing would turn the "3" on the way to "30" into min
+// instantly. Without this, min/max only applied to the spin buttons — the
+// bare attributes on an <input type="number"> constrain nothing outside form
+// validation, so a typed 999999 sailed straight into the config (e.g. an
+// out-of-range hub port).
+function onChange(e: Event) {
+  const el = e.target as HTMLInputElement;
+  const n = Number(el.value);
+  const v = clamp(el.value !== '' && Number.isFinite(n) ? n : (props.min ?? 0));
+  el.value = String(v);
+  emit('update:modelValue', v);
+}
 </script>
 
 <template>
@@ -44,6 +58,7 @@ function onInput(e: Event) {
       :max="max"
       :step="step"
       @input="onInput"
+      @change="onChange"
     />
     <div class="ns-controls">
       <button type="button" class="ns-btn" tabindex="-1" title="Increase" @click="bump(step)">

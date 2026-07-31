@@ -3,6 +3,9 @@
 // above). Online/ranked rows are greyed with the reason.
 
 import { computed } from 'vue';
+// sggTitle: the public tag database hint — deliberately styled weaker than
+// the operator console's match cell; see .ss-sgg below.
+import { sggTitle } from '../lib/operatorFormat';
 import type { Snapshot, SnapshotSet } from '../types';
 
 const props = defineProps<{ snapshot: Snapshot }>();
@@ -22,12 +25,6 @@ function badge(s: SnapshotSet): string {
   return reportable(s) ? '' : (s.mode ?? '').toLowerCase();
 }
 
-// Same public tag database hint as LiveSetCard — a submitted-tag -> handle
-// lookup, not a bracket match. Deliberately styled weaker than the operator
-// console's match cell; see .ss-sgg below.
-function sggTitle(tag: string, sgg: string): string {
-  return `Public tag database: "${tag}" is registered to start.gg @${sgg}. Not a bracket match, just what was submitted.`;
-}
 </script>
 
 <template>

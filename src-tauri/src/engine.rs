@@ -412,12 +412,18 @@ fn build(inner: &Arc<EngineInner>) -> Built {
                 inner.log_line(&format!("hub failed to start: {e}"));
                 *inner.hub_url.lock().unwrap() = None;
                 inner.set_hub(None);
+                // Without this the UI keeps rendering the dead hub's last
+                // sets/stations as if the console were still live.
+                inner.set_hub_snapshot(json!({ "sets": [], "stations": {} }));
                 None
             }
         }
     } else {
         *inner.hub_url.lock().unwrap() = None;
         inner.set_hub(None);
+        // Same as the Err arm: leaving operator mode must not keep serving
+        // the previous operator run's snapshot.
+        inner.set_hub_snapshot(json!({ "sets": [], "stations": {} }));
         None
     };
 
@@ -571,7 +577,12 @@ pub fn start(app: AppHandle, config_dir: PathBuf) -> Engine {
             // tick — only re-parses the settings file when it changes.
             loop_inner.check_replay_autosave();
             loop_inner.emit_state();
-            let poll = loop_inner.cfg.lock().unwrap().poll.max(0.5);
+            // Bounded on BOTH sides, via max/min rather than `clamp` (which
+            // passes NaN through): `from_secs_f64` PANICS on a huge or
+            // non-finite value, and a hand-edited config.json (`"poll": 1e300`)
+            // must not be able to kill this thread — the window would stay up
+            // while watching/forwarding silently stopped forever.
+            let poll = loop_inner.cfg.lock().unwrap().poll.max(0.5).min(60.0);
             std::thread::sleep(std::time::Duration::from_secs_f64(poll));
         }
     });

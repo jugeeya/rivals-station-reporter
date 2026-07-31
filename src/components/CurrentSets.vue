@@ -27,6 +27,7 @@
 // reassigns.
 
 import { computed, onMounted, onUnmounted, ref } from 'vue';
+import AppIcon from './AppIcon.vue';
 import { listAvailableSets, startMatch, reassignStation } from '../lib/engine';
 import { elapsedSince } from '../lib/operatorFormat';
 import type { AvailableSet, AvailableStation } from '../types';
@@ -37,6 +38,7 @@ const sets = ref<AvailableSet[]>([]);
 const stations = ref<AvailableStation[]>([]);
 const loaded = ref(false);
 const loadErr = ref('');
+const refreshing = ref(false);
 const busyId = ref<string | null>(null);
 const actionMsg = ref('');
 const actionErr = ref(false);
@@ -80,6 +82,7 @@ const playingNow = computed(() => sets.value.filter((s) => s.state === STARTGG_S
 const startable = computed(() => sets.value.filter((s) => s.state !== STARTGG_STATE_ONGOING));
 
 async function refresh() {
+  refreshing.value = true;
   loadErr.value = '';
   try {
     const res = await listAvailableSets();
@@ -92,6 +95,7 @@ async function refresh() {
     loadErr.value = String(e);
   } finally {
     loaded.value = true;
+    refreshing.value = false;
   }
 }
 
@@ -150,12 +154,20 @@ async function onChangeStation(s: AvailableSet) {
     <summary class="as-summary">
       Current Sets
       <span v-if="sets.length" class="as-count">{{ sets.length }}</span>
+      <button
+        class="icon-btn as-refresh"
+        :class="{ 'as-refresh--spinning': refreshing }"
+        :disabled="busyId !== null || refreshing"
+        title="Refresh"
+        @click.stop.prevent="refresh"
+      >
+        <AppIcon name="refresh" :size="14" />
+      </button>
     </summary>
 
     <div class="as-body">
-      <div class="as-head">
-        <button class="linkish" :disabled="busyId !== null" @click="refresh">Refresh</button>
-        <span v-if="actionMsg" class="as-msg" :class="{ 'as-msg--err': actionErr }">{{ actionMsg }}</span>
+      <div v-if="actionMsg" class="as-head">
+        <span class="as-msg" :class="{ 'as-msg--err': actionErr }">{{ actionMsg }}</span>
       </div>
 
       <p v-if="loadErr" class="as-empty as-empty--err">{{ loadErr }}</p>
@@ -258,6 +270,21 @@ async function onChangeStation(s: AvailableSet) {
   &::-webkit-details-marker {
     color: var(--text-muted);
   }
+}
+
+// Sits at the end of the summary line rather than after it: `margin-left:
+// auto` on a flex child pushes it to the far right without needing a
+// separate wrapping element around "Current Sets" + the count.
+.as-refresh {
+  margin-left: auto;
+}
+
+.as-refresh--spinning svg {
+  animation: as-spin 0.8s linear infinite;
+}
+
+@keyframes as-spin {
+  to { transform: rotate(360deg); }
 }
 
 .as-count {
@@ -375,15 +402,35 @@ async function onChangeStation(s: AvailableSet) {
   white-space: nowrap;
 }
 
+// The native dropdown arrow ignores the theme entirely (a plain OS-drawn
+// triangle on some platforms, invisible against a dark background on
+// others), so it's replaced with a themed chevron drawn as a background
+// image -- appearance:none removes the native one and everything it would
+// have drawn, including its arrow.
 .as-picker {
+  appearance: none;
   flex: 0 0 auto;
-  background: var(--surface-inset);
+  background-color: var(--surface-inset);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='rgba(255,255,255,0.6)' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.4em center;
+  background-size: 0.85em;
   border: 1px solid var(--line-subtle);
   border-radius: var(--radius-button);
   color: var(--text-primary);
   font: inherit;
   font-size: 0.75rem;
-  padding: 0.2em 0.4em;
+  padding: 0.25em 1.5em 0.25em 0.45em;
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid rgba(99, 102, 241, 0.6);
+    outline-offset: 1px;
+  }
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 }
 
 .as-change {

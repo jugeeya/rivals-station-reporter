@@ -60,6 +60,13 @@ const CHARACTER_MAP_QUERY: &str =
     "query($slug:String!){ event(slug:$slug){ videogame{ id characters{ id name } } } }";
 const UPDATE_LIVE_MUTATION: &str = "mutation($id:ID!,$g:[BracketSetGameDataInput]){\n                 updateBracketSet(setId:$id, gameData:$g){ id state } }";
 const REPORT_SET_MUTATION: &str = "mutation($setId:ID!,$winnerId:ID!,$gameData:[BracketSetGameDataInput]){\n                 reportBracketSet(setId:$setId, winnerId:$winnerId, gameData:$gameData){ id state } }";
+// `updateBracketSet`'s own response only echoes { id state }, never the game
+// data it just wrote, so confirming a live push landed needs a separate read.
+// Field names verified against the live schema (introspected on api.start.gg,
+// not assumed): Game has orderNum/winnerId/selections, GameSelection has
+// entrant{id}/character{id}. `set(id:)` is a direct root lookup, cheaper than
+// re-listing the whole event's sets for the one we already know the id of.
+const SET_GAMES_QUERY: &str = "query($setId:ID!){ set(id:$setId){ games{ orderNum winnerId\n                 selections{ entrant{ id } character{ id } } } } }";
 
 /// Error type mirroring Python's `StartggError(Exception)`: just a message.
 #[derive(Debug, Clone)]
@@ -80,6 +87,11 @@ pub trait StartggApi: Send + Sync {
     fn station_set(&self, slug: &str, station: i64, max_age: f64) -> Result<Value, StartggError>;
     fn character_map(&self, slug: &str) -> Result<Value, StartggError>;
     fn update_live(&self, set_id: &Value, game_data: &Value) -> Result<(), StartggError>;
+    /// Read back what start.gg actually has for a set's games, to confirm a
+    /// prior `update_live` landed. Returns the raw `games` field (an array,
+    /// or `Value::Null` if the set has none yet); [`live_push_confirmed`]
+    /// does the comparison against what was pushed.
+    fn set_games(&self, set_id: &Value) -> Result<Value, StartggError>;
     fn report_set(
         &self,
         set_id: &Value,
@@ -310,6 +322,16 @@ impl Startgg {
         Ok(())
     }
 
+    /// See [`StartggApi::set_games`].
+    pub fn set_games(&self, set_id: &Value) -> Result<Value, StartggError> {
+        let data = self.gql(SET_GAMES_QUERY, json!({ "setId": set_id }))?;
+        Ok(data
+            .get("set")
+            .and_then(|s| s.get("games"))
+            .cloned()
+            .unwrap_or(Value::Null))
+    }
+
     /// Advancing: set the winner and finalize. Operator action only.
     pub fn report_set(
         &self,
@@ -357,6 +379,9 @@ impl StartggApi for Startgg {
     }
     fn update_live(&self, set_id: &Value, game_data: &Value) -> Result<(), StartggError> {
         Startgg::update_live(self, set_id, game_data)
+    }
+    fn set_games(&self, set_id: &Value) -> Result<Value, StartggError> {
+        Startgg::set_games(self, set_id)
     }
     fn report_set(
         &self,

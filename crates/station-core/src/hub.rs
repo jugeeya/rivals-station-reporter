@@ -658,20 +658,21 @@ impl Hub {
         if !st.is_object() {
             return Err((json!({"error": "Missing set."}), 400));
         }
-        let (rec, tag_map) = {
+        let (key, rec, tag_map) = {
             let mut s = self.state.lock().unwrap();
             let (key, mut rec) = self.record_for(&s, slug, station, st, "live");
             // Don't clobber the mode label _record_for set for online/ranked.
             if rec["status"] != *"reported" && get_default_true(&rec, "reportable") {
                 rec["status"] = json!("live");
             }
-            set_bucket(&mut s, slug).insert(key, rec.clone());
+            set_bucket(&mut s, slug).insert(key.clone(), rec.clone());
             self.touch(&mut s);
             let tm = s.tag_map.clone();
-            (rec, tm)
+            (key, rec, tm)
         };
 
         let (mut live, mut games) = (false, 0usize);
+        let mut confirmed = false;
         let mut reason: Option<String> = None;
         if !get_default_true(&rec, "reportable") {
             let why = match rec.get("notReportableReason") {
@@ -708,13 +709,35 @@ impl Hub {
                     if gd.is_empty() {
                         reason = Some("no completed games yet".to_string());
                     } else {
-                        match self
-                            .startgg
-                            .update_live(&rec["matchedStartggSetId"], &Value::Array(gd.clone()))
-                        {
+                        let set_id = rec["matchedStartggSetId"].clone();
+                        match self.startgg.update_live(&set_id, &Value::Array(gd.clone())) {
                             Ok(()) => {
                                 live = true;
                                 games = gd.len();
+                                // The mutation only echoes back {id, state}; it
+                                // never confirms the game data itself landed, so
+                                // read the set back and compare. A mismatch here
+                                // isn't an error -- start.gg's write may simply
+                                // not be visible yet -- it just means "not
+                                // confirmed on THIS tick". The station keeps
+                                // posting live updates every poll interval while
+                                // the set is ongoing, so the next tick pushes
+                                // (harmlessly re-sending the same data if nothing
+                                // changed) and checks again; this loop across
+                                // natural ticks IS the poll, rather than a
+                                // separate busy-wait that would hold up this
+                                // request or need an injected delay in tests.
+                                confirmed = self
+                                    .startgg
+                                    .set_games(&set_id)
+                                    .ok()
+                                    .map(|remote| {
+                                        matching::live_push_confirmed(
+                                            &Value::Array(gd.clone()),
+                                            &remote,
+                                        )
+                                    })
+                                    .unwrap_or(false);
                             }
                             Err(e) => reason = Some(format!("start.gg update failed: {e}")),
                         }
@@ -726,10 +749,30 @@ impl Hub {
             (self.log)(&format!("live (station {station}): {r}"));
         } else {
             (self.log)(&format!(
-                "live (station {station}): pushed {games} game(s) to start.gg"
+                "live (station {station}): pushed {games} game(s) to start.gg{}",
+                if confirmed {
+                    " (confirmed)"
+                } else {
+                    " (not yet confirmed)"
+                }
             ));
         }
-        Ok(json!({"ok": true, "live": live, "games": games, "reason": reason}))
+
+        // Patch the confirm result onto the record already stored above,
+        // rather than computing it before the push (which hadn't happened
+        // yet) -- this is the only place liveConfirmed is written, so a
+        // record with no live push attempt simply never gets the field.
+        {
+            let mut s = self.state.lock().unwrap();
+            if let Some(stored) = set_bucket(&mut s, slug).get_mut(&key) {
+                stored["liveConfirmed"] = json!(confirmed);
+            }
+            self.touch(&mut s);
+        }
+
+        Ok(
+            json!({"ok": true, "live": live, "games": games, "reason": reason, "confirmed": confirmed}),
+        )
     }
 
     /// A finished set. Stored and matched; never written to the bracket —
@@ -1533,6 +1576,10 @@ mod tests {
         state: Mutex<i64>,
         live_pushes: Mutex<Vec<(Value, Value)>>,
         reports: Mutex<Vec<(Value, Value, Option<Value>)>>,
+        /// Forces `set_games`'s answer for the "start.gg hasn't caught up
+        /// yet" tests. `None` -- the default -- means "answer honestly",
+        /// simulating a backend that already reflects the last push.
+        set_games_override: Mutex<Option<Value>>,
     }
 
     impl FakeStartgg {
@@ -1542,6 +1589,7 @@ mod tests {
                 state: Mutex::new(2),
                 live_pushes: Mutex::new(Vec::new()),
                 reports: Mutex::new(Vec::new()),
+                set_games_override: Mutex::new(None),
             })
         }
 
@@ -1555,6 +1603,55 @@ mod tests {
 
         fn reports(&self) -> Vec<(Value, Value, Option<Value>)> {
             self.reports.lock().unwrap().clone()
+        }
+
+        /// Simulate start.gg not (yet) reflecting the last push -- or
+        /// reflecting something else entirely.
+        fn set_games_will_answer(&self, v: Option<Value>) {
+            *self.set_games_override.lock().unwrap() = v;
+        }
+
+        /// Turns pushed gameData (`{gameNum, winnerId, selections:
+        /// [{entrantId, characterId}]}`, ids as strings) into the shape
+        /// `set_games` reads back from start.gg (`{orderNum, winnerId,
+        /// selections:[{entrant:{id}, character:{id}}]}`, ids as JSON
+        /// numbers). Returning numbers here, where the push used strings, is
+        /// deliberate: it's what the real API actually does (confirmed by
+        /// introspecting the live schema), and it's exactly the mismatch
+        /// `live_push_confirmed`'s id normalization has to see past.
+        fn honest_read_back(pushed: &Value) -> Value {
+            let empty: Vec<Value> = Vec::new();
+            let games: Vec<Value> = pushed
+                .as_array()
+                .unwrap_or(&empty)
+                .iter()
+                .map(|g| {
+                    let as_num = |v: &Value| -> Value {
+                        v.as_str()
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .map(|n| json!(n))
+                            .unwrap_or_else(|| v.clone())
+                    };
+                    let selections: Vec<Value> = g
+                        .get("selections")
+                        .and_then(|v| v.as_array())
+                        .unwrap_or(&empty)
+                        .iter()
+                        .map(|s| {
+                            json!({
+                                "entrant": {"id": as_num(s.get("entrantId").unwrap_or(&Value::Null))},
+                                "character": {"id": s.get("characterId").cloned().unwrap_or(Value::Null)},
+                            })
+                        })
+                        .collect();
+                    json!({
+                        "orderNum": g.get("gameNum").cloned().unwrap_or(Value::Null),
+                        "winnerId": g.get("winnerId").map(as_num).unwrap_or(Value::Null),
+                        "selections": selections,
+                    })
+                })
+                .collect();
+            json!(games)
         }
     }
 
@@ -1587,6 +1684,16 @@ mod tests {
                 .unwrap()
                 .push((set_id.clone(), game_data.clone()));
             Ok(())
+        }
+        fn set_games(&self, _set_id: &Value) -> Result<Value, StartggError> {
+            if let Some(v) = self.0.set_games_override.lock().unwrap().clone() {
+                return Ok(v);
+            }
+            let pushes = self.0.live_pushes.lock().unwrap();
+            Ok(pushes
+                .last()
+                .map(|(_, gd)| FakeStartgg::honest_read_back(gd))
+                .unwrap_or(Value::Null))
         }
         fn report_set(
             &self,
@@ -2058,6 +2165,104 @@ mod tests {
             1,
             "exactly one report reached start.gg"
         );
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    // ---- live pushes are confirmed by reading the set back, not assumed ---------
+    // updateBracketSet's response only echoes {id state}; it never says whether
+    // the game data itself landed. These exercise the read-back this hub does
+    // instead of trusting a bare "the HTTP call didn't error".
+
+    #[test]
+    fn live_push_is_confirmed_once_start_gg_reflects_it() {
+        let workdir = tmpdir("hubtest_liveconfirm_ok");
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(
+            None,
+            None,
+            Some(tags()),
+            None,
+            Some(path_str(&workdir.join("h.json"))),
+            None,
+            None,
+            Some(path_str(&workdir.join("learned.json"))),
+        );
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        h.handle_current(SLUG, 1, Some(&json!({"state": "set_start"})))
+            .unwrap();
+        let live_set = with(
+            real_set(),
+            &[("setId", json!("LC1")), ("complete", json!(false))],
+        );
+        let res = h.handle_live(SLUG, 1, &live_set).unwrap();
+
+        assert_eq!(res["live"], json!(true));
+        // The fake's default set_games answer is built from the same push it
+        // just recorded (with ids re-typed to numbers, as start.gg actually
+        // returns them), so a healthy backend confirms on the very next read.
+        assert_eq!(
+            res["confirmed"],
+            json!(true),
+            "a backend that already reflects the push must confirm  [{res}]"
+        );
+
+        // And the confirmation is on the STORED record, not just this call's
+        // response -- that's what the operator console actually reads.
+        let rec = h.get_set(SLUG, 1, &json!("LC1")).unwrap();
+        assert_eq!(
+            rec["liveConfirmed"],
+            json!(true),
+            "confirmation persists on the record  [{rec}]"
+        );
+
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    #[test]
+    fn live_push_stays_unconfirmed_while_start_gg_has_not_caught_up() {
+        let workdir = tmpdir("hubtest_liveconfirm_lag");
+        let fake = FakeStartgg::new();
+        // Simulates read-after-write lag: the push succeeds, but a read right
+        // after still sees nothing for the set.
+        fake.set_games_will_answer(Some(Value::Null));
+        let mut h = Hub::new(
+            None,
+            None,
+            Some(tags()),
+            None,
+            Some(path_str(&workdir.join("h.json"))),
+            None,
+            None,
+            Some(path_str(&workdir.join("learned.json"))),
+        );
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        h.handle_current(SLUG, 1, Some(&json!({"state": "set_start"})))
+            .unwrap();
+        let live_set = with(
+            real_set(),
+            &[("setId", json!("LC2")), ("complete", json!(false))],
+        );
+        let res = h.handle_live(SLUG, 1, &live_set).unwrap();
+
+        // The push itself still succeeded -- lag isn't a push failure.
+        assert_eq!(res["live"], json!(true));
+        assert_eq!(
+            res["confirmed"],
+            json!(false),
+            "not confirmed yet is not the same as failed  [{res}]"
+        );
+        let rec = h.get_set(SLUG, 1, &json!("LC2")).unwrap();
+        assert_eq!(rec["liveConfirmed"], json!(false));
+
+        // The next tick (the station keeps posting live updates on its own
+        // poll interval) is what settles it, once start.gg has caught up --
+        // this is the "poll" -- across natural ticks, not a busy-wait here.
+        fake.set_games_will_answer(None);
+        let res2 = h.handle_live(SLUG, 1, &live_set).unwrap();
+        assert_eq!(res2["confirmed"], json!(true), "the next tick confirms it");
+
         let _ = fs::remove_dir_all(&workdir);
     }
 

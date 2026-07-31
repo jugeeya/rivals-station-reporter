@@ -542,6 +542,92 @@ pub fn game_data_from_games(
     Value::Array(out)
 }
 
+/// True once start.gg's own copy of a set's games matches what was just
+/// pushed via `update_live`. The mutation only echoes `{id state}` back,
+/// never the game data itself, so this is the only way to tell a push
+/// actually landed from merely "the HTTP call didn't error".
+///
+/// `pushed` is `game_data_from_games`'s own output (what was sent); `remote`
+/// is whatever `StartggApi::set_games` read back: start.gg's raw `games`
+/// field, `Null`/empty if the set has no games recorded yet, otherwise
+/// `[{orderNum, winnerId, selections:[{entrant:{id}, character:{id}}]}]`.
+/// IDs are compared as strings on both sides: what gets pushed uses JSON
+/// strings, start.gg returns JSON numbers for the same ids, and the two
+/// representations of one id still have to count as equal.
+pub fn live_push_confirmed(pushed: &Value, remote: &Value) -> bool {
+    fn id_str(v: &Value) -> String {
+        v.to_string().trim_matches('"').to_string()
+    }
+
+    // (game number, winner id, sorted (entrantId, characterId) pairs) -- one
+    // canonical, order-independent shape both sides get reduced to.
+    type CanonGame = (i64, Option<String>, Vec<(String, String)>);
+
+    fn canonicalize(
+        games: &[Value],
+        game_num_key: &str,
+        selections_of: impl Fn(&Value) -> Vec<(String, String)>,
+    ) -> Vec<CanonGame> {
+        let mut out: Vec<_> = games
+            .iter()
+            .map(|g| {
+                let num = g.get(game_num_key).and_then(|v| v.as_i64()).unwrap_or(0);
+                let winner = g.get("winnerId").filter(|v| !v.is_null()).map(id_str);
+                let mut sel = selections_of(g);
+                sel.sort();
+                (num, winner, sel)
+            })
+            .collect();
+        out.sort_by_key(|(n, _, _)| *n);
+        out
+    }
+
+    let empty: Vec<Value> = Vec::new();
+    let pushed_games = pushed.as_array().unwrap_or(&empty);
+    let remote_games = remote.as_array().unwrap_or(&empty);
+
+    // Nothing was pushed, or start.gg has nothing yet: not a mismatch,
+    // just nothing to confirm.
+    if pushed_games.is_empty() || remote_games.is_empty() {
+        return false;
+    }
+
+    let a = canonicalize(pushed_games, "gameNum", |g| {
+        g.get("selections")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty)
+            .iter()
+            .map(|s| {
+                (
+                    s.get("entrantId").map(id_str).unwrap_or_default(),
+                    s.get("characterId").map(id_str).unwrap_or_default(),
+                )
+            })
+            .collect()
+    });
+    let b = canonicalize(remote_games, "orderNum", |g| {
+        g.get("selections")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty)
+            .iter()
+            .map(|s| {
+                (
+                    s.get("entrant")
+                        .and_then(|e| e.get("id"))
+                        .map(id_str)
+                        .unwrap_or_default(),
+                    s.get("character")
+                        .and_then(|c| c.get("id"))
+                        .map(id_str)
+                        .unwrap_or_default(),
+                )
+            })
+            .collect()
+    });
+
+    a == b
+}
+
 // ---------------------------------------------------------------------------
 // Tests: built around the real 2-0 set that exposed the live-score bug
 // (JUGZ!/Orcane 2-0 KIM/Galvan, entrants jugeeya + Kimchi).
@@ -819,5 +905,57 @@ mod tests {
             ]),
             "character selections resolved per entrant"
         );
+    }
+
+    /// start.gg's read side returns ids as JSON numbers where the pushed
+    /// gameData used strings (confirmed against the live schema, not
+    /// assumed) -- the exact same push, read back with that representation
+    /// swapped, must still count as confirmed.
+    #[test]
+    fn live_push_confirmed_true_for_the_same_push_with_numeric_ids() {
+        let gd = game_data_from_games(&derive_games(&real_set()), &live_map(), &chars());
+        let remote = json!([
+            {"orderNum": 1, "winnerId": 24186345, "selections": [
+                {"entrant": {"id": 24186345}, "character": {"id": 41}},
+                {"entrant": {"id": 24186347}, "character": {"id": 42}},
+            ]},
+            {"orderNum": 2, "winnerId": 24186345, "selections": [
+                {"entrant": {"id": 24186345}, "character": {"id": 41}},
+                {"entrant": {"id": 24186347}, "character": {"id": 42}},
+            ]},
+        ]);
+        assert!(live_push_confirmed(&gd, &remote));
+    }
+
+    #[test]
+    fn live_push_confirmed_false_before_anything_is_pushed() {
+        assert!(!live_push_confirmed(&json!([]), &json!(null)));
+    }
+
+    /// start.gg hasn't recorded any games for the set yet -- not an error,
+    /// just "not confirmed on this attempt"; the next live push tries again.
+    #[test]
+    fn live_push_confirmed_false_when_start_gg_has_nothing_yet() {
+        let gd = game_data_from_games(&derive_games(&real_set()), &live_map(), &chars());
+        assert!(!live_push_confirmed(&gd, &Value::Null));
+        assert!(!live_push_confirmed(&gd, &json!([])));
+    }
+
+    /// A genuine divergence (wrong winner) must not read as confirmed --
+    /// this is what would have papered over a bad push silently.
+    #[test]
+    fn live_push_confirmed_false_on_a_real_mismatch() {
+        let gd = game_data_from_games(&derive_games(&real_set()), &live_map(), &chars());
+        let remote_wrong_winner = json!([
+            {"orderNum": 1, "winnerId": 24186347, "selections": [
+                {"entrant": {"id": 24186345}, "character": {"id": 41}},
+                {"entrant": {"id": 24186347}, "character": {"id": 42}},
+            ]},
+            {"orderNum": 2, "winnerId": 24186345, "selections": [
+                {"entrant": {"id": 24186345}, "character": {"id": 41}},
+                {"entrant": {"id": 24186347}, "character": {"id": 42}},
+            ]},
+        ]);
+        assert!(!live_push_confirmed(&gd, &remote_wrong_winner));
     }
 }

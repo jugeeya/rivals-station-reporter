@@ -1,6 +1,6 @@
 [package]
 name = "station-core"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2021"
 description = "Rivals Station Reporter core: save parsing, set machine, matching, hub, start.gg client. No Tauri dependency — everything here runs under plain `cargo test`."
 

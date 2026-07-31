@@ -214,15 +214,41 @@ impl SetMachine {
             }
         }
 
-        // Slots from the replay, by character; leftovers by position.
+        // Slots from the replay: by name first, then by character, then by
+        // position; each replay side can only be claimed once.
+        //
+        // Character alone can't disambiguate a mirror matchup (both players
+        // on the same character): without the claimed-tracking below, two
+        // different local players both searching for "whoever in the replay
+        // is playing Clairen" would each find the SAME first Clairen entry
+        // and end up sharing one slot. Everything derived from slot
+        // downstream then treats them as the same side -- in particular
+        // derive_games's winner marking, which reads the per-game winner off
+        // a slot number, ends up ringing both characters as the winner for
+        // a mirror-matchup game (see the operator console's per-game strip).
+        // Name is unique per player and tried first for exactly this reason;
+        // character is the fallback for whatever name mismatch already made
+        // the online-opponent reconstruction above necessary.
+        let mut claimed = vec![false; replay.map(|r| r.players.len()).unwrap_or(0)];
         for (i, pl) in players.iter_mut().enumerate() {
             let mut slot: Option<usize> = None;
             if let Some(rep) = replay {
                 for (idx, rp) in rep.players.iter().enumerate() {
-                    if char_full(&rp.char_code) == pl["character"] {
+                    if !claimed[idx] && rp.name == pl["name"] {
                         slot = Some(idx);
                         break;
                     }
+                }
+                if slot.is_none() {
+                    for (idx, rp) in rep.players.iter().enumerate() {
+                        if !claimed[idx] && char_full(&rp.char_code) == pl["character"] {
+                            slot = Some(idx);
+                            break;
+                        }
+                    }
+                }
+                if let Some(idx) = slot {
+                    claimed[idx] = true;
                 }
             }
             pl["slot"] = json!(slot.unwrap_or(i));
@@ -1264,6 +1290,54 @@ mod tests {
         let opp = players.iter().find(|pl| pl["name"] == "OPP").unwrap();
         assert_eq!(opp["character"], "Kragg");
         assert_eq!(matches[0]["gameNumber"].as_i64(), Some(1));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A mirror matchup (both players on the same character) must still get
+    /// distinct slots. Character alone can't tell the replay's two entries
+    /// apart, so before slot assignment tried name first, the opponent's
+    /// search for "whoever in the replay is playing Clairen" found the same
+    /// first match the local player's identical search had already found,
+    /// and both players ended up on slot 0. Exactly this showed up live: the
+    /// operator console's per-game strip reads the winner off a slot number,
+    /// so a shared slot rings BOTH characters as the winner of that game.
+    #[test]
+    fn mirror_matchup_gets_distinct_slots_from_the_replay() {
+        let g_online = snap(&[("BRUJITA", "Cla", "ONLINE", &[("wins", 1.0)])]);
+        let r = to_game_result(diff(&Map::new(), &g_online)).unwrap();
+        let fname = now_replay_name("BRUJITA", "Cla", "DumbledalftheWizard", "Cla", 1);
+        let rep = parse_replay_name(&fname).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("statstest_mirror_{}", std::process::id()));
+        let replays = dir.join("replays");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&replays).unwrap();
+        std::fs::write(replays.join(&fname), []).unwrap();
+
+        let mut p = producer(&dir, &replays, 180.0);
+        p.pending = Some(PendingGame {
+            result: r,
+            at: rep.epoch,
+            detected_at: std::time::Instant::now(),
+        });
+        p.poll();
+
+        assert!(p.pending.is_none());
+        let matches = &p.machine.set.as_ref().unwrap().matches;
+        let players = matches[0]["players"].as_array().unwrap();
+        assert_eq!(players.len(), 2);
+        let brujita = players.iter().find(|pl| pl["name"] == "BRUJITA").unwrap();
+        let dumbledalf = players
+            .iter()
+            .find(|pl| pl["name"] == "DumbledalftheWizard")
+            .unwrap();
+        assert_eq!(brujita["character"], "Clairen");
+        assert_eq!(dumbledalf["character"], "Clairen");
+        assert_ne!(
+            brujita["slot"], dumbledalf["slot"],
+            "a mirror matchup must not collapse both players onto the same slot"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

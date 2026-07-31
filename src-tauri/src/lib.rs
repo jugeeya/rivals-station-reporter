@@ -1,98 +1,36 @@
-// Thin Tauri shell. All logic lives in the station-core crate; this side owns
-// the engine thread, the tray, and the command surface.
+//! Rivals Station Reporter core — a 1:1 port of the Python station reporter
+//! (`jugeeya.github.io/matchlogger/sender/`), organized the same way:
+//!
+//! * [`save`]        — GVAS stats-save parsing (via `uesave`), `parse_stats`
+//! * [`stats`]       — stat diffing, game results, character table, replays
+//! * [`set_machine`] — groups games into sets, writes current/live/set files
+//! * [`matching`]    — set/entrant matching (port of broker/worker.js logic)
+//! * [`startgg`]     — token-authed start.gg client (operator only)
+//! * [`hub`]         — LAN hub state machine + `/matchlogger/*` HTTP server
+//! * [`forwarder`]   — station-side POSTs to a hub/broker with dedup state
+//! * [`tagdb`]       — the public tag database (jugeeya.github.io/tags), cached to disk
+//!
+//! Design note: records, sets, and snapshots are `serde_json::Value` (dynamic
+//! JSON) rather than typed structs. The Python original passes dicts across
+//! every boundary and the wire contract is JSON; keeping the same shape makes
+//! the port checkable line-by-line and the hub bit-compatible with the
+//! Cloudflare broker. Typed structs live only at the edges (config).
 
-mod commands;
-mod config;
-mod engine;
-mod hub_glue;
+pub mod discovery;
+pub mod forwarder;
+pub mod hub;
+pub mod matching;
+pub mod save;
+pub mod set_machine;
+pub mod startgg;
+pub mod startgg_web;
+pub mod stats;
+pub mod tagdb;
 
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
-use tauri::Manager;
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    // WebKitGTK's DMA-BUF renderer fails to initialize on a number of Linux
-    // GPU/compositor stacks (SteamOS's gamescope, NVIDIA proprietary drivers,
-    // some Wayland compositors) and then silently renders nothing — the app
-    // opens as a blank white window. Falling back to the shared-memory
-    // renderer costs some rendering speed, which this UI doesn't notice, and
-    // works everywhere. Must be set before the first webview is created, and
-    // only when the user hasn't already chosen a value themselves.
-    #[cfg(target_os = "linux")]
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-    }
-
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // A second launch just fronts the existing window — two copies on
-            // one PC would double-post every set.
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
-        }))
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        // Updating N station PCs by hand mid-bracket is the thing this is
-        // meant to avoid. `process` is what lets the app relaunch itself once
-        // an update has been installed.
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
-        .setup(|app| {
-            let config_dir = app.path().app_config_dir().expect("app config dir");
-            let engine = engine::start(app.handle().clone(), config_dir);
-            app.manage(engine);
-
-            // Tray: closing the window hides here and the sender keeps
-            // running — a station must survive the TO absent-mindedly
-            // closing the window mid-bracket.
-            let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
-            TrayIconBuilder::new()
-                .icon(app.default_window_icon().expect("window icon").clone())
-                .menu(&menu)
-                .tooltip("Rivals Station Reporter: reporting keeps running here")
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(win) = app.get_webview_window("main") {
-                            let _ = win.show();
-                            let _ = win.set_focus();
-                        }
-                    }
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .build(app)?;
-            Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
-            }
-        })
-        .invoke_handler(tauri::generate_handler![
-            commands::get_state,
-            commands::save_config,
-            commands::resolve_event,
-            commands::default_paths,
-            commands::find_hubs,
-            commands::report_winner,
-            commands::swap_players,
-            commands::delete_set,
-            commands::list_available_sets,
-            commands::start_match,
-            commands::reassign_destination,
-            commands::set_autostart,
-            commands::get_autostart,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+/// Seconds since the Unix epoch, as the Python code's `time.time()` int.
+pub fn now_sec() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }

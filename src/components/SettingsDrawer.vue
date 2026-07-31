@@ -172,8 +172,20 @@ async function installUpdate() {
 async function save() {
   saving.value = true;
   err.value = '';
+  // A changed start.gg event swaps out the hub's whole start.gg-backed state
+  // (sets, streams, the reported-elsewhere sweep) out from under the running
+  // engine. The in-process rebuild that a normal save triggers doesn't tear
+  // all of that down cleanly, and has been observed to leave the hub failing
+  // to rebind its port. A full relaunch sidesteps that class of bug entirely
+  // -- exactly what the update-install flow already does above.
+  const slugBefore = state.s.config.slug.trim();
   try {
     await saveConfig({ ...draft, station: Number(draft.station) || 1 });
+    if (draft.slug.trim() !== slugBefore) {
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await relaunch();
+      return;
+    }
     emit('close');
   } catch (e) {
     err.value = String(e);

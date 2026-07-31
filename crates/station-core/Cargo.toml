@@ -1,6 +1,6 @@
 [package]
 name = "station-core"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 description = "Rivals Station Reporter core: save parsing, set machine, matching, hub, start.gg client. No Tauri dependency — everything here runs under plain `cargo test`."
 
@@ -16,3 +16,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "blo
 # Thread-per-connection HTTP server for the LAN hub — deliberately mirrors the
 # Python ThreadingHTTPServer design instead of pulling in an async stack.
 tiny_http = "0.12"
+# Only used to set SO_REUSEADDR before handing the listener to tiny_http (see
+# HubServer::start's doc comment) -- already in the dependency tree via
+# tiny_http/reqwest, so this adds no new code to the binary.
+socket2 = "0.6"

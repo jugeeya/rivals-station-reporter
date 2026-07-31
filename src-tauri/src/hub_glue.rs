@@ -10,6 +10,7 @@
 //! not-reportable set first — the TO may have pressed Start Match since it
 //! was recorded.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -37,10 +38,15 @@ pub struct HubPieces {
     pub url: String,
     pub port: u16,
     server: HubServer,
+    sweep_stop: Arc<AtomicBool>,
 }
 
 impl HubPieces {
     pub fn stop(mut self) {
+        // Every rebuild (any config save) spawns a fresh sweep thread; without
+        // this signal the old one never learns it should exit and just keeps
+        // ticking forever against an orphaned `Arc<Hub>` and a stale slug.
+        self.sweep_stop.store(true, Ordering::SeqCst);
         self.server.stop();
     }
 }
@@ -87,7 +93,7 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
     // — reports which event this hub is running, instead of a station
     // auto-connecting to an anonymous address.
     hub.set_event_slug(&cfg.slug);
-    spawn_reported_elsewhere_sweep(&hub);
+    let sweep_stop = spawn_reported_elsewhere_sweep(&hub);
 
     let mut server = HubServer::new(hub.clone(), cfg.hub_port, "0.0.0.0");
     let url = server.start()?;
@@ -97,6 +103,7 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
         url,
         port: cfg.hub_port,
         server,
+        sweep_stop,
     })
 }
 
@@ -111,19 +118,32 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
 /// `sweep_reported_elsewhere` method; this Tauri-side glue owns the thread's
 /// lifetime, not `Hub::new` -- the same split as `TagDb::load` (no thread)
 /// versus `engine.rs` calling `spawn_refresh` separately.
-fn spawn_reported_elsewhere_sweep(hub: &Arc<Hub>) {
+fn spawn_reported_elsewhere_sweep(hub: &Arc<Hub>) -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = stop.clone();
     let hub = hub.clone();
-    thread::spawn(move || loop {
-        // Nothing to check without both a token (start.gg calls need one)
-        // and a configured event slug (there's no bucket to sweep without
-        // one) -- mirrors TagDb's own "only do real work when due" gate.
-        if hub.startgg.enabled() {
-            if let Some(slug) = hub.event_slug() {
-                hub.sweep_reported_elsewhere(&slug);
+    thread::spawn(move || {
+        while !stop_thread.load(Ordering::SeqCst) {
+            // Nothing to check without both a token (start.gg calls need one)
+            // and a configured event slug (there's no bucket to sweep without
+            // one) -- mirrors TagDb's own "only do real work when due" gate.
+            if hub.startgg.enabled() {
+                if let Some(slug) = hub.event_slug() {
+                    hub.sweep_reported_elsewhere(&slug);
+                }
+            }
+            // Sleep in 1s increments rather than one long sleep so a rebuild
+            // stops this thread promptly instead of leaving it (and the
+            // `Arc<Hub>` it holds) alive for up to SWEEP_INTERVAL_S more.
+            for _ in 0..SWEEP_INTERVAL_S {
+                if stop_thread.load(Ordering::SeqCst) {
+                    break;
+                }
+                thread::sleep(Duration::from_secs(1));
             }
         }
-        thread::sleep(Duration::from_secs(SWEEP_INTERVAL_S));
     });
+    stop
 }
 
 fn hub_and_slug(inner: &Arc<EngineInner>) -> Result<(Arc<Hub>, String), String> {

@@ -1753,12 +1753,40 @@ impl HubServer {
         format!("http://{}:{}", lan_ip(), self.port)
     }
 
+    /// A rebuild stops the old server and starts a new one back to back
+    /// (same process, same port). Plain `TcpListener::bind` doesn't set
+    /// `SO_REUSEADDR`, and on Windows in particular, closing a listening
+    /// socket doesn't release the port instantly -- the very next bind
+    /// attempt can lose to that delay and fail with "address already in
+    /// use" (confirmed live: exactly this, os error 10048, on a real
+    /// config-driven rebuild -- and confirmed that a short retry loop does
+    /// NOT reliably cover it: the delay can run into multiple seconds, not
+    /// milliseconds). Binding through `socket2` with `SO_REUSEADDR` set
+    /// avoids the race at the OS level instead of racing it.
+    fn bind(addr: &str) -> Result<std::net::TcpListener, String> {
+        let sock_addr: std::net::SocketAddr = addr
+            .parse()
+            .map_err(|e| format!("bad bind address {addr}: {e}"))?;
+        let domain = if sock_addr.is_ipv4() {
+            socket2::Domain::IPV4
+        } else {
+            socket2::Domain::IPV6
+        };
+        let socket =
+            socket2::Socket::new(domain, socket2::Type::STREAM, None).map_err(|e| e.to_string())?;
+        socket.set_reuse_address(true).map_err(|e| e.to_string())?;
+        socket.bind(&sock_addr.into()).map_err(|e| e.to_string())?;
+        socket.listen(128).map_err(|e| e.to_string())?;
+        Ok(socket.into())
+    }
+
     pub fn start(&mut self) -> Result<String, String> {
         if self.srv.is_some() {
             return Ok(self.url());
         }
-        let server = tiny_http::Server::http(format!("{}:{}", self.bind, self.port))
-            .map_err(|e| e.to_string())?;
+        let addr = format!("{}:{}", self.bind, self.port);
+        let listener = Self::bind(&addr)?;
+        let server = tiny_http::Server::from_listener(listener, None).map_err(|e| e.to_string())?;
         let server = Arc::new(server);
         let hub = self.hub.clone();
         let srv = server.clone();
@@ -2542,6 +2570,38 @@ mod tests {
 
         server.stop();
         let _ = fs::remove_dir_all(&workdir);
+    }
+
+    /// Regression test for the live-reproduced bug: a config-driven rebuild
+    /// stops the old server and starts a new one on the same port back to
+    /// back, with nothing pacing the two calls apart. A plain
+    /// `TcpListener::bind` lost this race often enough in practice (WSAEADDRINUSE,
+    /// os error 10048) that even a 5-attempt/200ms retry loop didn't reliably
+    /// cover it. `HubServer::bind`'s `SO_REUSEADDR` should make the very next
+    /// bind on the same port succeed immediately, no retry needed.
+    #[test]
+    fn restart_on_the_same_port_back_to_back_does_not_lose_the_bind_race() {
+        let h = Arc::new(Hub::new(
+            Some(KEY),
+            None,
+            Some(tags()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+
+        let port = free_port();
+        let mut server = HubServer::new(h.clone(), port, "127.0.0.1");
+        server.start().expect("first start binds the port");
+        server.stop();
+
+        let mut server = HubServer::new(h, port, "127.0.0.1");
+        server
+            .start()
+            .expect("restarting on the same port immediately after stop must not race the bind");
+        server.stop();
     }
 
     // ---- report with no token degrades honestly --------------------------------

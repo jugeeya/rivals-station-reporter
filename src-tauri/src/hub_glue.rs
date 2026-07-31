@@ -11,6 +11,8 @@
 //! was recorded.
 
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use station_core::hub::{Hub, HubServer};
@@ -18,6 +20,18 @@ use station_core::matching;
 
 use crate::config::Config;
 use crate::engine::EngineInner;
+
+/// How often the background sweep (`spawn_reported_elsewhere_sweep`) wakes up
+/// to check for a set finalized directly on start.gg's own page. start.gg
+/// allows ~80 requests/60s per token (see `startgg.rs`'s `MIN_INTERVAL_S`
+/// comment), and the awaiting-report list is normally small (a handful of
+/// sets at most), so one sweep costs at most a handful of `set_state` calls --
+/// negligible against that budget even stacked on top of this hub's other
+/// per-station traffic (live pushes, heartbeats). 90 seconds is picked as a
+/// middle point in the 60-120s range: frequent enough that an operator does
+/// not sit looking at a stale "awaiting report" row for long after a TO
+/// finalizes it directly on start.gg, without adding meaningful load.
+const SWEEP_INTERVAL_S: u64 = 90;
 
 pub struct HubPieces {
     pub url: String,
@@ -73,6 +87,7 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
     // — reports which event this hub is running, instead of a station
     // auto-connecting to an anonymous address.
     hub.set_event_slug(&cfg.slug);
+    spawn_reported_elsewhere_sweep(&hub);
 
     let mut server = HubServer::new(hub.clone(), cfg.hub_port, "0.0.0.0");
     let url = server.start()?;
@@ -83,6 +98,32 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
         port: cfg.hub_port,
         server,
     })
+}
+
+/// Background safety net for a set someone finalized directly on start.gg's
+/// own page: without this, a set sitting in "awaiting report" stays looking
+/// actionable indefinitely, since `do_report`'s own check only runs at the
+/// moment someone clicks Report. Modeled on `station_core::tagdb::TagDb`'s
+/// `spawn_refresh` (`Arc<Self>`, `thread::spawn` loop, `thread::sleep`):
+/// always spawns, but each tick only does real work when there is something
+/// to check, exactly like `TagDb`'s own refresher only fetches when a refresh
+/// is actually due. `Hub` itself stays a plain struct with a callable
+/// `sweep_reported_elsewhere` method; this Tauri-side glue owns the thread's
+/// lifetime, not `Hub::new` -- the same split as `TagDb::load` (no thread)
+/// versus `engine.rs` calling `spawn_refresh` separately.
+fn spawn_reported_elsewhere_sweep(hub: &Arc<Hub>) {
+    let hub = hub.clone();
+    thread::spawn(move || loop {
+        // Nothing to check without both a token (start.gg calls need one)
+        // and a configured event slug (there's no bucket to sweep without
+        // one) -- mirrors TagDb's own "only do real work when due" gate.
+        if hub.startgg.enabled() {
+            if let Some(slug) = hub.event_slug() {
+                hub.sweep_reported_elsewhere(&slug);
+            }
+        }
+        thread::sleep(Duration::from_secs(SWEEP_INTERVAL_S));
+    });
 }
 
 fn hub_and_slug(inner: &Arc<EngineInner>) -> Result<(Arc<Hub>, String), String> {

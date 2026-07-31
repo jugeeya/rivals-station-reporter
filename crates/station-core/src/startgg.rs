@@ -54,8 +54,21 @@ pub const MIN_INTERVAL_S: f64 = 0.8;
 pub const STATION_CACHE_S: f64 = 15.0; // station lookups repeat on every heartbeat
 pub const CHARACTER_CACHE_S: f64 = 604800.0;
 
-/// GraphQL query strings, byte-for-byte from the Python source.
-const STATION_SET_QUERY: &str = "query($slug:String!){ event(slug:$slug){\n                 sets(page:1, perPage:60, sortType:STANDARD, filters:{ state:[1,2,6] }){\n                   nodes{ id state fullRoundText station{ number }\n                     slots{ entrant{ id name } } } } } }";
+/// GraphQL query strings, byte-for-byte from the Python source (except where
+/// noted below).
+///
+/// `startedAt`, `startAt`, and `totalGames` are an addition over the Python
+/// source, confirmed live via schema introspection on `Set`. `totalGames` is
+/// the actual configured best-of (e.g. 5), used in place of a station's own
+/// guessed `winsRequired` when present. `startedAt` and `startAt` are two
+/// separate, similarly-named fields; which one populates when a real match
+/// starts (i.e. when markSetInProgress fires) could not be verified without
+/// starting a real match on a live tournament, so both are fetched: the
+/// consuming code prefers `startedAt` (its name directly parallels the
+/// markSetInProgress mutation and this app's own STARTGG_STATE_ONGOING
+/// concept) and falls back to `startAt` as a documented, reasoned-from-naming
+/// guess rather than a verified fact -- see `hub.rs`'s `preferred_started_at`.
+const STATION_SET_QUERY: &str = "query($slug:String!){ event(slug:$slug){\n                 sets(page:1, perPage:60, sortType:STANDARD, filters:{ state:[1,2,6] }){\n                   nodes{ id state fullRoundText startedAt startAt totalGames station{ number }\n                     slots{ entrant{ id name } } } } } }";
 const CHARACTER_MAP_QUERY: &str =
     "query($slug:String!){ event(slug:$slug){ videogame{ id characters{ id name } } } }";
 const UPDATE_LIVE_MUTATION: &str = "mutation($id:ID!,$g:[BracketSetGameDataInput]){\n                 updateBracketSet(setId:$id, gameData:$g){ id state } }";
@@ -253,46 +266,7 @@ impl Startgg {
             }
         }
         let data = self.gql(STATION_SET_QUERY, json!({ "slug": slug }))?;
-        let empty = Vec::new();
-        let nodes = data
-            .get("event")
-            .and_then(|e| e.get("sets"))
-            .and_then(|s| s.get("nodes"))
-            .and_then(|n| n.as_array())
-            .unwrap_or(&empty);
-        let mut found: Option<&Value> = None;
-        for n in nodes {
-            let st = n.get("station").and_then(|s| s.get("number"));
-            if let Some(st_num) = st.and_then(as_int) {
-                if st_num == station {
-                    found = Some(n);
-                    break;
-                }
-            }
-        }
-        let result = match found {
-            Some(f) => {
-                let mut entrants: Vec<Value> = Vec::new();
-                if let Some(slots) = f.get("slots").and_then(|s| s.as_array()) {
-                    for s in slots {
-                        if let Some(e) = s.get("entrant").filter(|e| truthy(Some(e))) {
-                            entrants.push(json!({
-                                "id": e.get("id").cloned().unwrap_or(Value::Null),
-                                "name": or_empty_string(e.get("name")),
-                            }));
-                        }
-                    }
-                }
-                json!({
-                    "found": true,
-                    "setId": f.get("id").cloned().unwrap_or(Value::Null),
-                    "state": f.get("state").cloned().unwrap_or(Value::Null),
-                    "fullRoundText": or_empty_string(f.get("fullRoundText")),
-                    "entrants": entrants,
-                })
-            }
-            None => Value::Null,
-        };
+        let result = parse_station_set(&data, station);
         self.stations
             .lock()
             .unwrap()
@@ -487,6 +461,60 @@ impl StartggApi for Startgg {
     }
     fn start_match(&self, set_id: &Value) -> Result<(), StartggError> {
         Startgg::start_match(self, set_id)
+    }
+}
+
+/// Parsing half of [`Startgg::station_set`], split out from the network call
+/// so it's testable against a hand-built GraphQL response shape without a
+/// live token. Mirrors [`parse_available_sets`]'s split.
+fn parse_station_set(data: &Value, station: i64) -> Value {
+    let empty = Vec::new();
+    let nodes = data
+        .get("event")
+        .and_then(|e| e.get("sets"))
+        .and_then(|s| s.get("nodes"))
+        .and_then(|n| n.as_array())
+        .unwrap_or(&empty);
+    let mut found: Option<&Value> = None;
+    for n in nodes {
+        let st = n.get("station").and_then(|s| s.get("number"));
+        if let Some(st_num) = st.and_then(as_int) {
+            if st_num == station {
+                found = Some(n);
+                break;
+            }
+        }
+    }
+    match found {
+        Some(f) => {
+            let mut entrants: Vec<Value> = Vec::new();
+            if let Some(slots) = f.get("slots").and_then(|s| s.as_array()) {
+                for s in slots {
+                    if let Some(e) = s.get("entrant").filter(|e| truthy(Some(e))) {
+                        entrants.push(json!({
+                            "id": e.get("id").cloned().unwrap_or(Value::Null),
+                            "name": or_empty_string(e.get("name")),
+                        }));
+                    }
+                }
+            }
+            json!({
+                "found": true,
+                "setId": f.get("id").cloned().unwrap_or(Value::Null),
+                "state": f.get("state").cloned().unwrap_or(Value::Null),
+                "fullRoundText": or_empty_string(f.get("fullRoundText")),
+                // Raw GraphQL field names, kept as-is (like `state` and
+                // `fullRoundText` above) rather than renamed here -- the
+                // startedAt-over-startAt preference is a decision for the
+                // consumer (`hub.rs`'s `preferred_started_at`), not this
+                // parsing step, so both are passed through untouched.
+                "startedAt": f.get("startedAt").cloned().unwrap_or(Value::Null),
+                "startAt": f.get("startAt").cloned().unwrap_or(Value::Null),
+                "totalGames": f.get("totalGames").cloned().unwrap_or(Value::Null),
+                "entrants": entrants,
+            })
+        }
+        None => Value::Null,
     }
 }
 
@@ -782,5 +810,67 @@ mod tests {
         });
         let out = parse_available_sets(&data);
         assert_eq!(out["sets"][0]["station"], Value::Null);
+    }
+
+    /// `parse_station_set` carries `startedAt`/`startAt`/`totalGames` straight
+    /// through from a hand-built GraphQL response, the same shape
+    /// `STATION_SET_QUERY` actually requests. The startedAt-over-startAt
+    /// preference is not this function's job (see `hub.rs`'s
+    /// `preferred_started_at`) -- this only confirms both survive parsing
+    /// untouched, alongside the pre-existing fields.
+    #[test]
+    fn parse_station_set_carries_started_at_start_at_and_total_games() {
+        let data = json!({
+            "event": { "sets": { "nodes": [
+                {
+                    "id": "set-9", "state": 2, "fullRoundText": "Winners Final",
+                    "startedAt": 1784879708i64, "startAt": 1784879700i64, "totalGames": 5,
+                    "station": {"number": 4},
+                    "slots": [
+                        {"entrant": {"id": "E1", "name": "jugeeya"}},
+                        {"entrant": {"id": "E2", "name": "Kimchi"}},
+                    ],
+                },
+            ]}}
+        });
+        let out = parse_station_set(&data, 4);
+        assert_eq!(out["found"], json!(true));
+        assert_eq!(out["startedAt"], json!(1784879708i64));
+        assert_eq!(out["startAt"], json!(1784879700i64));
+        assert_eq!(out["totalGames"], json!(5));
+    }
+
+    /// A node missing these fields entirely (an older cached shape, or a
+    /// response from before this addition) parses as null for each, not a
+    /// missing key or a panic.
+    #[test]
+    fn parse_station_set_defaults_missing_started_at_fields_to_null() {
+        let data = json!({
+            "event": { "sets": { "nodes": [
+                {
+                    "id": "set-10", "state": 2, "fullRoundText": "Losers Final",
+                    "station": {"number": 1},
+                    "slots": [
+                        {"entrant": {"id": "E1", "name": "jugeeya"}},
+                        {"entrant": {"id": "E2", "name": "Kimchi"}},
+                    ],
+                },
+            ]}}
+        });
+        let out = parse_station_set(&data, 1);
+        assert_eq!(out["found"], json!(true));
+        assert_eq!(out["startedAt"], Value::Null);
+        assert_eq!(out["startAt"], Value::Null);
+        assert_eq!(out["totalGames"], Value::Null);
+    }
+
+    /// No matching station number: still returns `Value::Null` for the whole
+    /// result, same as before this change (unaffected by the new fields).
+    #[test]
+    fn parse_station_set_returns_null_when_no_set_at_the_station() {
+        let data = json!({
+            "event": { "sets": { "nodes": [] } }
+        });
+        assert_eq!(parse_station_set(&data, 1), Value::Null);
     }
 }

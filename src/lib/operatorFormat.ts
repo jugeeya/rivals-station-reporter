@@ -57,10 +57,23 @@ export function score(r: HubRecord): string {
   return players(r).map((p) => p.wins ?? '?').join('–');
 }
 
-/** "first to N", or null when the station never learned the best-of --
- * `winsRequired` can be null (see matching.rs), and a guess would be worse
- * than nothing here. */
+/** "first to N", or null when neither start.gg's authoritative best-of nor
+ * the station's own guess is known -- a guess would be worse than nothing
+ * here.
+ *
+ * Prefers `record.startggTotalGames` (start.gg's `Set.totalGames`, the
+ * actual configured best-of, e.g. 5 -- see hub.rs's `record_for`) when
+ * present, converted to the "first to N wins" form this cell already shows
+ * (`ceil(totalGames / 2)`, e.g. best-of-5 -> first to 3). Falls back
+ * completely to the station's own `winsRequired` guess otherwise (no token,
+ * no bracket set bound, or an older cached binding from before start.gg's
+ * totalGames was threaded through) -- `winsRequired` can itself be null (see
+ * matching.rs), in which case there is still nothing to show. */
 export function bestOf(r: HubRecord): string | null {
+  const totalGames = r.startggTotalGames;
+  if (typeof totalGames === 'number' && totalGames > 0) {
+    return `first to ${Math.ceil(totalGames / 2)}`;
+  }
   const wr = r.set?.winsRequired;
   return wr || wr === 0 ? `first to ${wr}` : null;
 }
@@ -81,17 +94,32 @@ export function elapsedSince(startEpoch: number | null | undefined, nowS: number
   return `${Math.floor(mins / 60)}h${String(mins % 60).padStart(2, '0')}m`;
 }
 
+/** When this match actually started, for elapsed-time display. Prefers
+ * `record.startggStartedAt` -- start.gg's own authoritative record of when
+ * markSetInProgress fired (already resolved server-side between `startedAt`
+ * and `startAt`; see hub.rs's `preferred_started_at` for that fallback and
+ * why it's not verified which of the two populates) -- over the station's
+ * own `startEpoch` guess (when the station first detected the set). Falls
+ * back completely to the local inference when start.gg's field is absent:
+ * no token, not bound to a bracket set, or an older cached binding from
+ * before this field existed. An upgrade in accuracy when available, never a
+ * hard requirement. */
+export function preferredStartEpoch(r: HubRecord): number | null | undefined {
+  return r.startggStartedAt ?? r.set?.startEpoch;
+}
+
 /** The one thing the time column shows: elapsed for a live set, an absolute
  * clock for a finished one -- never the same field meaning two things. */
 export function timeText(r: HubRecord, nowS: number): string {
-  if (r.status === 'live') return elapsedSince(r.set?.startEpoch, nowS);
+  if (r.status === 'live') return elapsedSince(preferredStartEpoch(r), nowS);
   return clockAt(r.set?.endEpoch ?? r.ingestedAt);
 }
 
 export function timeTitle(r: HubRecord, nowS: number): string {
   if (r.status === 'live') {
-    return r.set?.startEpoch
-      ? `Live ${elapsedSince(r.set.startEpoch, nowS)} (started ${clockAt(r.set.startEpoch)})`
+    const startEpoch = preferredStartEpoch(r);
+    return startEpoch
+      ? `Live ${elapsedSince(startEpoch, nowS)} (started ${clockAt(startEpoch)})`
       : 'Live, start time unknown';
   }
   return r.set?.endEpoch

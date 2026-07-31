@@ -185,6 +185,17 @@ export const stationFinished = {
 // "none" with no candidate -- station 3 (complete, winner "LOOM") normalizes
 // to the same alias as entrant "Loom" ("loom" == "loom") for a "high"
 // confidence match, exactly as norm()/entrant_names() would produce.
+//
+// Station 1 additionally carries startggStartedAt/startggTotalGames (see
+// hub.rs's record_for) -- start.gg's own authoritative versions of the
+// station's startEpoch/winsRequired guesses (operatorFormat.ts's
+// timeText/bestOf prefer these when present). Deliberately given DIFFERENT
+// values than the local guess they override (startggStartedAt 6 minutes
+// earlier than set.startEpoch; startggTotalGames 7 where set.winsRequired
+// implies a best-of-5) so the screenshot visibly demonstrates the override
+// is actually being used, not merely that it doesn't crash: station 1 should
+// read a longer elapsed time than its set.startEpoch alone would produce, and
+// "first to 4" (ceil(7/2)) rather than "first to 3".
 
 const station1Record = {
   id: toId(FAKE_NOW_S - 720),
@@ -228,6 +239,14 @@ const station1Record = {
   swap: false,
   mode: null,
   startggState: 2,
+  // start.gg's authoritative startedAt (18 minutes ago, vs. the station's
+  // own startEpoch guess of 12 minutes ago above) and totalGames (7, a
+  // best-of-7, vs. the station's own winsRequired guess of 3 -- a
+  // best-of-5) -- deliberately different from the local guesses so the
+  // screenshot shows the override taking effect (18m elapsed, "first to 4"),
+  // not just that these fields exist without crashing.
+  startggStartedAt: FAKE_NOW_S - 1080,
+  startggTotalGames: 7,
   reportable: true,
   notReportableReason: null,
 };

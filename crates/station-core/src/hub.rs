@@ -149,6 +149,26 @@ fn ingested(r: &Value) -> i64 {
     r.get("ingestedAt").and_then(|v| v.as_i64()).unwrap_or(0)
 }
 
+/// Which of start.gg's two similarly-named timestamps to trust for "when
+/// this match started": `startedAt` is preferred (its name directly
+/// parallels the markSetInProgress mutation and this app's own
+/// STARTGG_STATE_ONGOING concept), falling back to `startAt` only when
+/// `startedAt` is absent. This is a documented, reasoned-from-naming
+/// inference, not a verified fact -- the test tournament used to build this
+/// had no set in progress or completed, so which field actually populates
+/// when a real match starts could not be confirmed live (see startgg.rs's
+/// STATION_SET_QUERY doc). `sg` is the raw `Startgg::station_set` value (or
+/// `Value::Null`/anything falsy, which yields `Value::Null` here too).
+fn preferred_started_at(sg: &Value) -> Value {
+    match sg.get("startedAt") {
+        Some(v) if truthy(Some(v)) => v.clone(),
+        _ => match sg.get("startAt") {
+            Some(v) if truthy(Some(v)) => v.clone(),
+            _ => Value::Null,
+        },
+    }
+}
+
 // -- Hub ------------------------------------------------------------------------
 
 /// Everything the Python `Hub.__init__` kept as mutable attributes, behind one
@@ -598,6 +618,13 @@ impl Hub {
             "swap": prev.get("swap").cloned().unwrap_or(json!(false)),
             "mode": st.get("mode"),
             "startggState": sg.get("state"),
+            // start.gg's authoritative versions of the station's own
+            // startEpoch guess and winsRequired guess -- see
+            // preferred_started_at's doc for the startedAt/startAt caveat.
+            // operatorFormat.ts prefers these over the local inference when
+            // present, falling back to the station's own guess otherwise.
+            "startggStartedAt": preferred_started_at(&sg),
+            "startggTotalGames": sg.get("totalGames").cloned().unwrap_or(Value::Null),
             "reportable": reason.is_none(),
             "notReportableReason": reason.clone(),
             // Which in-game slot the hub believes is which bracket entrant.
@@ -878,6 +905,8 @@ impl Hub {
                     r["fullRoundText"] = sg.get("fullRoundText").cloned().unwrap_or(Value::Null);
                     r["entrants"] = sg.get("entrants").cloned().unwrap_or(Value::Null);
                     r["startggState"] = sg.get("state").cloned().unwrap_or(Value::Null);
+                    r["startggStartedAt"] = preferred_started_at(&sg);
+                    r["startggTotalGames"] = sg.get("totalGames").cloned().unwrap_or(Value::Null);
                     r["reportable"] = json!(true);
                     r["notReportableReason"] = Value::Null;
                     if r["status"] != *"reported" {
@@ -953,29 +982,11 @@ impl Hub {
         // station_set's [1,2,6] filter, which can't tell "completed" apart
         // from "gone missing") right before the write neither request can
         // take back.
-        match self.startgg.set_state(&rec["matchedStartggSetId"]) {
-            Ok(v) if py_int(Some(&v)) == Some(matching::STARTGG_STATE_COMPLETED) => {
-                let key = sid(station, set_id);
-                {
-                    let mut s = self.state.lock().unwrap();
-                    if let Some(stored) = set_bucket(&mut s, slug).get_mut(&key) {
-                        stored["status"] = json!("already reported on start.gg");
-                        stored["reportable"] = json!(false);
-                        stored["notReportableReason"] =
-                            json!("already reported directly on start.gg");
-                    }
-                    self.touch(&mut s);
-                }
-                return Err((
-                    json!({"error": "This set was already reported directly on start.gg."}),
-                    409,
-                ));
-            }
-            // Any other state, or a failed check, isn't grounds to block a
-            // report the operator explicitly asked for -- only a CONFIRMED
-            // completion does that. A transient lookup failure here must not
-            // silently prevent reporting a set that is genuinely fine.
-            _ => {}
+        if self.settle_if_reported_elsewhere(slug, station, set_id, &rec["matchedStartggSetId"]) {
+            return Err((
+                json!({"error": "This set was already reported directly on start.gg."}),
+                409,
+            ));
         }
         // Python: winner_entrant_id = str(winner_entrant_id or '')
         let wid = if truthy(Some(winner_entrant_id)) {
@@ -1064,6 +1075,87 @@ impl Hub {
             station
         ));
         Ok(json!({"ok": true, "record": rec, "gamesReported": games_reported}))
+    }
+
+    /// Check whether `matched_startgg_set_id` shows completed directly on
+    /// start.gg -- bypassing this hub's own Report button entirely -- and if
+    /// so, mark the stored record settled (status/reportable/
+    /// notReportableReason). Shared by `do_report` (checked right before an
+    /// operator-triggered write, so a request neither side can take back
+    /// never fires) and `sweep_reported_elsewhere` (a periodic background
+    /// check over every awaiting-report record), so both apply the exact
+    /// same "found it completed elsewhere" logic rather than duplicating it.
+    ///
+    /// Returns whether an external completion was found and applied. Any
+    /// state other than completed, or a failed lookup, changes nothing and
+    /// returns false -- only a CONFIRMED completion is grounds to stop
+    /// treating a set as actionable; a transient lookup failure must not
+    /// silently mark a genuinely fine set as settled.
+    fn settle_if_reported_elsewhere(
+        &self,
+        slug: &str,
+        station: i64,
+        set_id: &Value,
+        matched_startgg_set_id: &Value,
+    ) -> bool {
+        match self.startgg.set_state(matched_startgg_set_id) {
+            Ok(v) if py_int(Some(&v)) == Some(matching::STARTGG_STATE_COMPLETED) => {
+                let key = sid(station, set_id);
+                let mut s = self.state.lock().unwrap();
+                if let Some(stored) = set_bucket(&mut s, slug).get_mut(&key) {
+                    stored["status"] = json!("already reported on start.gg");
+                    stored["reportable"] = json!(false);
+                    stored["notReportableReason"] = json!("already reported directly on start.gg");
+                }
+                self.touch(&mut s);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Safety net for a set someone finalized directly on start.gg's own
+    /// page instead of clicking this hub's Report button: `do_report`'s own
+    /// check (via `settle_if_reported_elsewhere`) only runs at the moment
+    /// someone actually clicks Report, so a set sitting in "awaiting report"
+    /// otherwise stays looking actionable indefinitely. This sweeps every
+    /// such record in `slug`'s bucket and settles any that start.gg already
+    /// shows completed.
+    ///
+    /// Scoped to `status == "matched"` with a non-null matchedStartggSetId --
+    /// "live" sets are still being played (nothing to settle yet) and
+    /// already-"reported"/settled records need no re-check, so neither is
+    /// touched even if their remote state happened to read back as
+    /// completed. Logs only when it actually settles something, so a quiet
+    /// sweep (the common case -- the awaiting-report list is normally a
+    /// handful of sets at most) doesn't spam the log on every tick.
+    pub fn sweep_reported_elsewhere(&self, slug: &str) {
+        // Collect the candidates first, then check each remotely -- avoids
+        // holding the state lock across a blocking network call per record.
+        let candidates: Vec<(i64, Value, Value)> = {
+            let mut s = self.state.lock().unwrap();
+            set_bucket(&mut s, slug)
+                .values()
+                .filter(|r| r["status"] == *"matched" && truthy(r.get("matchedStartggSetId")))
+                .filter_map(|r| {
+                    let station = r.get("station").and_then(|v| v.as_i64())?;
+                    let set_id = r.get("id").cloned().unwrap_or(Value::Null);
+                    let matched = r["matchedStartggSetId"].clone();
+                    Some((station, set_id, matched))
+                })
+                .collect()
+        };
+        let mut settled = 0usize;
+        for (station, set_id, matched) in &candidates {
+            if self.settle_if_reported_elsewhere(slug, *station, set_id, matched) {
+                settled += 1;
+            }
+        }
+        if settled > 0 {
+            (self.log)(&format!(
+                "sweep: found {settled} set(s) already reported directly on start.gg"
+            ));
+        }
     }
 
     /// Sets available to start (both entrants determined, not yet begun)
@@ -1698,6 +1790,41 @@ mod tests {
         );
     }
 
+    // ---- preferred_started_at: startedAt-over-startAt fallback ------------------
+    // start.gg exposes two separate, similarly-named timestamps; which one
+    // populates when a real match starts could not be verified live (see the
+    // function's own doc and startgg.rs's STATION_SET_QUERY comment). These
+    // confirm the documented, defensive fallback: prefer startedAt, fall back
+    // to startAt only when startedAt is absent, and null when neither is.
+
+    #[test]
+    fn preferred_started_at_prefers_started_at_when_present() {
+        let sg = json!({"startedAt": 1784879708i64, "startAt": 1784879700i64});
+        assert_eq!(preferred_started_at(&sg), json!(1784879708i64));
+    }
+
+    #[test]
+    fn preferred_started_at_falls_back_to_start_at_when_started_at_is_null() {
+        let sg = json!({"startedAt": Value::Null, "startAt": 1784879700i64});
+        assert_eq!(preferred_started_at(&sg), json!(1784879700i64));
+    }
+
+    #[test]
+    fn preferred_started_at_falls_back_to_start_at_when_started_at_is_missing() {
+        let sg = json!({"startAt": 1784879700i64});
+        assert_eq!(preferred_started_at(&sg), json!(1784879700i64));
+    }
+
+    #[test]
+    fn preferred_started_at_is_null_when_neither_field_is_present() {
+        assert_eq!(preferred_started_at(&json!({})), Value::Null);
+        assert_eq!(
+            preferred_started_at(&json!({"startedAt": Value::Null, "startAt": Value::Null})),
+            Value::Null
+        );
+        assert_eq!(preferred_started_at(&Value::Null), Value::Null);
+    }
+
     /// The real set, as the station writes it (REAL_SET in test_hub.py).
     fn real_set() -> Value {
         json!({
@@ -1767,6 +1894,26 @@ mod tests {
         start_calls: Mutex<Vec<Value>>,
         assign_station_should_fail: Mutex<bool>,
         start_match_should_fail: Mutex<bool>,
+        /// Extra fields merged onto `station_set`'s returned object -- used
+        /// to simulate start.gg's `startedAt`/`startAt`/`totalGames`
+        /// without disturbing every other test's `station_set` shape.
+        /// Defaults to an empty object (nothing merged in).
+        station_set_extra: Mutex<Value>,
+        /// Per-station overrides for the setId `station_set` reports as
+        /// "found" -- defaults to 105639152 for every station (as before this
+        /// field existed) unless a test asks for a specific station to bind
+        /// to a different fake start.gg set id. Needed so two different
+        /// stations' records can be independently driven to two different
+        /// `set_state` answers: the sweep tests need one externally-completed
+        /// set and one that isn't, at the same time, which first requires two
+        /// distinct set ids (the default single-id behavior gives every
+        /// station the same matchedStartggSetId).
+        station_set_ids: Mutex<HashMap<i64, Value>>,
+        /// Per-set-id overrides for `set_state`, keyed by the set id's string
+        /// form, consulted before the single `set_state_override` above. The
+        /// single override is global to every set id, so it can't give two
+        /// different sets two different remote states at once -- this can.
+        set_state_overrides: Mutex<HashMap<String, Value>>,
     }
 
     impl FakeStartgg {
@@ -1783,11 +1930,35 @@ mod tests {
                 start_calls: Mutex::new(Vec::new()),
                 assign_station_should_fail: Mutex::new(false),
                 start_match_should_fail: Mutex::new(false),
+                station_set_extra: Mutex::new(json!({})),
+                station_set_ids: Mutex::new(HashMap::new()),
+                set_state_overrides: Mutex::new(HashMap::new()),
             })
         }
 
         fn set_state(&self, st: i64) {
             *self.state.lock().unwrap() = st;
+        }
+
+        /// Merge extra fields (e.g. `startedAt`/`startAt`/`totalGames`) onto
+        /// every subsequent `station_set` response.
+        fn set_station_set_extra(&self, v: Value) {
+            *self.station_set_extra.lock().unwrap() = v;
+        }
+
+        /// Bind a specific station to a specific (fake) start.gg set id,
+        /// instead of the default 105639152 every station gets otherwise.
+        fn set_station_set_id(&self, station: i64, set_id: Value) {
+            self.station_set_ids.lock().unwrap().insert(station, set_id);
+        }
+
+        /// Answer `set_state` for one specific set id independently of the
+        /// global `set_state_will_answer` override.
+        fn set_state_will_answer_for(&self, set_id: &Value, v: Value) {
+            self.set_state_overrides
+                .lock()
+                .unwrap()
+                .insert(py_str(set_id), v);
         }
 
         fn pushes(&self) -> Vec<(Value, Value)> {
@@ -1885,13 +2056,27 @@ mod tests {
         fn station_set(
             &self,
             _slug: &str,
-            _station: i64,
+            station: i64,
             _max_age: f64,
         ) -> Result<Value, StartggError> {
-            Ok(json!({
-                "found": true, "setId": 105639152, "state": *self.0.state.lock().unwrap(),
+            let set_id = self
+                .0
+                .station_set_ids
+                .lock()
+                .unwrap()
+                .get(&station)
+                .cloned()
+                .unwrap_or(json!(105639152));
+            let mut result = json!({
+                "found": true, "setId": set_id, "state": *self.0.state.lock().unwrap(),
                 "fullRoundText": "Winners Round 1", "entrants": entrants(),
-            }))
+            });
+            if let Some(extra) = self.0.station_set_extra.lock().unwrap().as_object() {
+                for (k, v) in extra {
+                    result[k] = v.clone();
+                }
+            }
+            Ok(result)
         }
         fn character_map(&self, _slug: &str) -> Result<Value, StartggError> {
             Ok(json!({"orcane": 41, "galvan": 42, "random": 99}))
@@ -1914,7 +2099,11 @@ mod tests {
                 .map(|(_, gd)| FakeStartgg::honest_read_back(gd))
                 .unwrap_or(Value::Null))
         }
-        fn set_state(&self, _set_id: &Value) -> Result<Value, StartggError> {
+        fn set_state(&self, set_id: &Value) -> Result<Value, StartggError> {
+            let key = py_str(set_id);
+            if let Some(v) = self.0.set_state_overrides.lock().unwrap().get(&key) {
+                return Ok(v.clone());
+            }
             Ok(self.0.set_state_override.lock().unwrap().clone())
         }
         fn report_set(
@@ -2411,6 +2600,61 @@ mod tests {
         let _ = fs::remove_dir_all(&workdir);
     }
 
+    // ---- start.gg's authoritative startedAt/totalGames thread onto the record ---
+    // record_for (via bind_station_set) is where sg's fields land on a hub
+    // record; this confirms startggStartedAt/startggTotalGames actually reach
+    // the stored record, not just that the pure preferred_started_at helper
+    // works in isolation.
+    #[test]
+    fn record_carries_startgg_started_at_and_total_games_from_the_station_binding() {
+        let workdir = tmpdir("hubtest_startgg_started_at");
+        let fake = FakeStartgg::new();
+        fake.set_station_set_extra(json!({
+            "startedAt": 1784879708i64, "startAt": 1784879700i64, "totalGames": 5,
+        }));
+        let mut h = Hub::new(
+            None,
+            None,
+            Some(tags()),
+            None,
+            Some(path_str(&workdir.join("h.json"))),
+            None,
+            None,
+            Some(path_str(&workdir.join("learned.json"))),
+        );
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        h.handle_current(SLUG, 1, Some(&json!({"state": "set_start"})))
+            .unwrap();
+        h.handle_ingest(SLUG, 1, &with(real_set(), &[("setId", json!("SGSTART"))]))
+            .unwrap();
+        let rec = h.get_set(SLUG, 1, &json!("SGSTART")).unwrap();
+        assert_eq!(
+            rec["startggStartedAt"],
+            json!(1784879708i64),
+            "startedAt preferred over startAt on the stored record  [{rec}]"
+        );
+        assert_eq!(
+            rec["startggTotalGames"],
+            json!(5),
+            "totalGames threaded onto the stored record  [{rec}]"
+        );
+
+        // Now simulate a station binding that only ever exposed startAt
+        // (startedAt absent) -- rebind should carry the fallback through too.
+        fake.set_station_set_extra(json!({"startAt": 1784879700i64}));
+        let rebound = h
+            .rebind(SLUG, 1, &json!("SGSTART"))
+            .expect("rebind finds the existing record");
+        assert_eq!(
+            rebound["startggStartedAt"],
+            json!(1784879700i64),
+            "rebind falls back to startAt when startedAt is absent  [{rebound}]"
+        );
+
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
     // ---- Report refuses a set someone already finalized on start.gg directly ---
     // `reportable` only ever gets set false by this hub's own bind/rebind logic,
     // so a set we already matched stays "reportable" as far as OUR state is
@@ -2502,6 +2746,145 @@ mod tests {
             .expect("a set start.gg doesn't show as completed reports normally");
         assert_eq!(res["ok"], json!(true));
         assert_eq!(fake.reports().len(), 1, "the report reached start.gg");
+
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    // ---- sweep_reported_elsewhere: the periodic safety net -----------------------
+    // do_report's own check (settle_if_reported_elsewhere) only runs at the
+    // moment someone clicks Report; this proves the same settling logic also
+    // runs proactively over the whole awaiting-report list, touching only
+    // records that are actually awaiting report.
+
+    #[test]
+    fn sweep_settles_only_the_externally_completed_awaiting_report_record_and_ignores_live() {
+        let workdir = tmpdir("hubtest_sweep");
+        let fake = FakeStartgg::new();
+        // Distinct fake start.gg set ids per station -- the default (every
+        // station sharing one id) would make it impossible to drive two
+        // different stations' sets to two different remote states.
+        fake.set_station_set_id(1, json!(910001));
+        fake.set_station_set_id(2, json!(910002));
+        fake.set_station_set_id(3, json!(910003));
+        let mut h = Hub::new(
+            None,
+            None,
+            Some(tags()),
+            None,
+            Some(path_str(&workdir.join("h.json"))),
+            None,
+            None,
+            Some(path_str(&workdir.join("learned.json"))),
+        );
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        // Two awaiting-report ("matched") records at two different stations.
+        h.handle_current(SLUG, 1, Some(&json!({"state": "set_start"})))
+            .unwrap();
+        h.handle_ingest(
+            SLUG,
+            1,
+            &with(real_set(), &[("setId", json!("SWEEP-DONE"))]),
+        )
+        .unwrap();
+        h.handle_current(SLUG, 2, Some(&json!({"state": "set_start"})))
+            .unwrap();
+        h.handle_ingest(
+            SLUG,
+            2,
+            &with(real_set(), &[("setId", json!("SWEEP-STILL-GOING"))]),
+        )
+        .unwrap();
+        assert_eq!(
+            h.get_set(SLUG, 1, &json!("SWEEP-DONE")).unwrap()["status"],
+            json!("matched"),
+            "fixture assumption: awaiting report before the sweep"
+        );
+        assert_eq!(
+            h.get_set(SLUG, 2, &json!("SWEEP-STILL-GOING")).unwrap()["status"],
+            json!("matched"),
+            "fixture assumption: awaiting report before the sweep"
+        );
+
+        // A third record, still "live" (in progress, not awaiting report) --
+        // must never be touched, even though its remote state also reads
+        // back as completed. Proves the sweep skips it because of its local
+        // status, not because the remote check merely never runs for it.
+        h.handle_current(SLUG, 3, Some(&json!({"state": "set_start"})))
+            .unwrap();
+        let live_set = with(
+            real_set(),
+            &[("setId", json!("SWEEP-LIVE")), ("complete", json!(false))],
+        );
+        h.handle_live(SLUG, 3, &live_set).unwrap();
+        assert_eq!(
+            h.get_set(SLUG, 3, &json!("SWEEP-LIVE")).unwrap()["status"],
+            json!("live"),
+            "fixture assumption: still live before the sweep"
+        );
+
+        fake.set_state_will_answer_for(&json!(910001), json!(matching::STARTGG_STATE_COMPLETED));
+        fake.set_state_will_answer_for(&json!(910002), json!(matching::STARTGG_STATE_ONGOING));
+        fake.set_state_will_answer_for(&json!(910003), json!(matching::STARTGG_STATE_COMPLETED));
+
+        h.sweep_reported_elsewhere(SLUG);
+
+        let done = h.get_set(SLUG, 1, &json!("SWEEP-DONE")).unwrap();
+        assert_eq!(
+            done["status"],
+            json!("already reported on start.gg"),
+            "settled by the sweep  [{done}]"
+        );
+        assert_eq!(done["reportable"], json!(false));
+
+        let still_going = h.get_set(SLUG, 2, &json!("SWEEP-STILL-GOING")).unwrap();
+        assert_eq!(
+            still_going["status"],
+            json!("matched"),
+            "untouched -- start.gg does not show it completed  [{still_going}]"
+        );
+
+        let live = h.get_set(SLUG, 3, &json!("SWEEP-LIVE")).unwrap();
+        assert_eq!(
+            live["status"],
+            json!("live"),
+            "a live-status record is never touched by the sweep, even though its \
+             remote state reads back as completed  [{live}]"
+        );
+
+        let _ = fs::remove_dir_all(&workdir);
+    }
+
+    #[test]
+    fn sweep_is_a_quiet_noop_when_nothing_needs_settling() {
+        let workdir = tmpdir("hubtest_sweep_quiet");
+        let fake = FakeStartgg::new();
+        fake.set_state_will_answer(json!(matching::STARTGG_STATE_ONGOING));
+        let mut h = Hub::new(
+            None,
+            None,
+            Some(tags()),
+            None,
+            Some(path_str(&workdir.join("h.json"))),
+            None,
+            None,
+            Some(path_str(&workdir.join("learned.json"))),
+        );
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        h.handle_current(SLUG, 1, Some(&json!({"state": "set_start"})))
+            .unwrap();
+        h.handle_ingest(SLUG, 1, &with(real_set(), &[("setId", json!("SWEEP-OK"))]))
+            .unwrap();
+        let before = h.get_set(SLUG, 1, &json!("SWEEP-OK")).unwrap();
+
+        h.sweep_reported_elsewhere(SLUG);
+
+        let after = h.get_set(SLUG, 1, &json!("SWEEP-OK")).unwrap();
+        assert_eq!(
+            after, before,
+            "nothing changed when start.gg shows nothing completed"
+        );
 
         let _ = fs::remove_dir_all(&workdir);
     }

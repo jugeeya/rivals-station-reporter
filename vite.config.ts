@@ -11,6 +11,16 @@ export default defineConfig(async () => ({
     vue()
   ],
 
+  // Relative asset URLs ("./assets/…"), not Vite's default absolute ones
+  // ("/assets/…"). Windows' WebView2 resolves the absolute form fine against
+  // Tauri's custom protocol, which is why this went unnoticed; the Linux
+  // webkit side is the one that's historically fussy about it, and it fails
+  // in exactly the shape seen on the Deck -- a white page with NOTHING on
+  // stderr, because a failed asset fetch is reported in the webview console,
+  // not by the native process. index.html sits at the bundle root, so the
+  // two forms resolve identically everywhere this does work.
+  base: './',
+
   define: {
     APP_VERSION: JSON.stringify(packageJson.version)
   },

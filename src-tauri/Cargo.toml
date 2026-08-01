@@ -13,7 +13,14 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 station-core = { path = "../crates/station-core" }
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# `devtools` is on for RELEASE builds too, not just debug, deliberately. When
+# the webview comes up blank the failure is reported in the webview's own
+# console -- which the native process cannot see, and which the in-app log
+# panel cannot reach either (it lives inside the webview that failed). With
+# no inspector there is no channel at all for that class of bug, which is
+# what made the SteamOS white screen take so many blind attempts. Costs a
+# little binary size; buys the ability to diagnose a shipped build in place.
+tauri = { version = "2", features = ["tray-icon", "image-png", "devtools"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"

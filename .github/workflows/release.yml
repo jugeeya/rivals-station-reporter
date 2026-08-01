@@ -115,6 +115,15 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Without this the cache key is only ...-Linux-x64-..., which does
+          # NOT distinguish one Ubuntu release from another. Moving this leg
+          # from ubuntu-latest (24.04) to 22.04 therefore restored a `target/`
+          # full of artifacts linked against the newer image's system libs,
+          # and the build died on `can't find crate for tauri` — a stale-cache
+          # symptom that reads nothing like its cause. Keying on the runner
+          # label keeps each image's artifacts in their own cache.
+          key: ${{ matrix.os }}
 
       # Tauri v2's webview + tray/appindicator glue, plus the bits `reqwest`
       # needs for TLS on Linux: unlike Windows (schannel) and macOS

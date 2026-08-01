@@ -3847,7 +3847,10 @@ mod tests {
             .do_start_match(SLUG, &json!("S1"), Some(2), Some("socalrivals".to_string()))
             .expect("a station and a stream at once assigns both, then starts");
         assert_eq!(res["ok"], json!(true));
-        assert_eq!(fake.assign_calls(), vec![(json!("S1"), json!("opaque-st-2"))]);
+        assert_eq!(
+            fake.assign_calls(),
+            vec![(json!("S1"), json!("opaque-st-2"))]
+        );
         assert_eq!(
             fake.assign_stream_calls(),
             vec![(json!("S1"), json!("opaque-stream-1"))]
@@ -4085,7 +4088,10 @@ mod tests {
             .do_reassign_destination(SLUG, &json!("S1"), Some(2), Some("socalrivals".to_string()))
             .expect("a station and a stream at once assigns both");
         assert_eq!(res["ok"], json!(true));
-        assert_eq!(fake.assign_calls(), vec![(json!("S1"), json!("opaque-st-2"))]);
+        assert_eq!(
+            fake.assign_calls(),
+            vec![(json!("S1"), json!("opaque-st-2"))]
+        );
         assert_eq!(
             fake.assign_stream_calls(),
             vec![(json!("S1"), json!("opaque-stream-1"))]

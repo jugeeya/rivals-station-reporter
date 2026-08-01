@@ -582,6 +582,12 @@ pub fn start(app: AppHandle, config_dir: PathBuf) -> Engine {
             // non-finite value, and a hand-edited config.json (`"poll": 1e300`)
             // must not be able to kill this thread — the window would stay up
             // while watching/forwarding silently stopped forever.
+            //
+            // clippy::manual_clamp wants `.clamp(0.5, 60.0)` here and is wrong:
+            // that is exactly the NaN-passthrough this avoids. `f64::max`
+            // returns the non-NaN operand, so NaN lands on 0.5; `clamp` would
+            // return NaN and panic one line later. Keep the two-call form.
+            #[allow(clippy::manual_clamp)]
             let poll = loop_inner.cfg.lock().unwrap().poll.max(0.5).min(60.0);
             std::thread::sleep(std::time::Duration::from_secs_f64(poll));
         }

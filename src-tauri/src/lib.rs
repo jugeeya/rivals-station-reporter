@@ -10,85 +10,165 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    // WebKitGTK's DMA-BUF renderer fails to initialize on a number of Linux
-    // GPU/compositor stacks (SteamOS's gamescope, NVIDIA proprietary drivers,
-    // some Wayland compositors) and then silently renders nothing — the app
-    // opens as a blank white window. Falling back to the shared-memory
-    // renderer costs some rendering speed, which this UI doesn't notice, and
-    // works everywhere. Must be set before the first webview is created, and
-    // only when the user hasn't already chosen a value themselves.
-    #[cfg(target_os = "linux")]
-    {
-        // AppImage: the bundle ships its own libwebkit2gtk AND WebKit's
-        // helper executables (WebKitWebProcess/WebKitNetworkProcess -- the
-        // actual page lives in those), but libwebkit2gtk spawns them from a
-        // path compiled in on the CI builder: /usr/lib/x86_64-linux-gnu/
-        // webkit2gtk-4.1, Ubuntu's Debian-multiarch layout. On any distro
-        // laid out differently -- SteamOS's Arch layout notably -- that path
-        // doesn't exist, the web process never spawns, and the app is a
-        // silent blank-white window (GTK is fine, so the window itself
-        // opens; there's just no page and no error). The AppImage runtime
-        // exports APPDIR; point WebKit at the bundled helpers explicitly.
-        // Outside an AppImage (deb install, dev) APPDIR is unset and this
-        // does nothing.
-        if std::env::var_os("WEBKIT_EXEC_PATH").is_none() {
-            if let Some(appdir) = std::env::var_os("APPDIR") {
-                let exec = std::path::Path::new(&appdir)
-                    .join("usr/lib/x86_64-linux-gnu/webkit2gtk-4.1");
-                if exec.is_dir() {
-                    let bundle = exec.join("injected-bundle");
-                    std::env::set_var("WEBKIT_EXEC_PATH", &exec);
-                    if bundle.is_dir()
-                        && std::env::var_os("WEBKIT_INJECTED_BUNDLE_PATH").is_none()
-                    {
-                        std::env::set_var("WEBKIT_INJECTED_BUNDLE_PATH", bundle);
-                    }
-                }
-            }
-        }
+/// Report a webview-setup decision on stderr.
+///
+/// This exists because of the exact shape of the bug it was written for: the
+/// symptom is a blank white window, and the app's own log panel lives INSIDE
+/// the webview that failed to come up, so it structurally cannot report a
+/// webview failure. stderr is the only channel left -- run the AppImage from
+/// a terminal to read it. Several rounds of Linux fixes shipped before this
+/// existed, with no way to tell which of them had even applied.
+fn note(msg: &str) {
+    eprintln!("[webview] {msg}");
+}
 
-        // AppImage again: WebKit 2.46+ launches WebKitWebProcess inside a
-        // bubblewrap sandbox that bind-mounts a fixed set of system paths --
-        // which does NOT include the AppImage's FUSE mount at /tmp/.mount_*.
-        // The helper is therefore "inaccessible" from inside its own sandbox
-        // and the launch SIGABRTs (confirmed via coredumpctl on a Steam
-        // Deck), leaving a silent blank-white window. The sandbox cannot
-        // work from an AppImage, so opt out of it there. The tradeoff is
-        // real but small here: the webview only ever renders this app's own
-        // bundled UI, never arbitrary web content. Installs that don't run
-        // from an AppImage (deb, dev) keep the sandbox.
-        if std::env::var_os("APPDIR").is_some()
-            && std::env::var_os("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS").is_none()
-        {
-            std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
-        }
-
-        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        }
-        // On SteamOS the DMA-BUF fallback alone still comes up white for
-        // many WebKit apps: accelerated compositing itself fails against
-        // the Deck's gamescope/KDE stack, which is a separate knob. Turning
-        // compositing off is WebKit's documented last-resort fix and costs
-        // GPU-composited rendering (fine for this UI). Scoped to SteamOS
-        // rather than all Linux so other distros keep the faster path;
-        // detected via os-release (covers Desktop Mode) or the gamescope
-        // session markers (covers Game Mode on non-SteamOS gamescope too).
-        let on_steamos_or_gamescope = std::env::var_os("SteamDeck").is_some()
-            || std::env::var("XDG_CURRENT_DESKTOP")
-                .map(|v| v.eq_ignore_ascii_case("gamescope"))
-                .unwrap_or(false)
-            || std::fs::read_to_string("/etc/os-release")
-                .map(|t| t.lines().any(|l| l.trim() == "ID=steamos"))
-                .unwrap_or(false);
-        if on_steamos_or_gamescope
-            && std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none()
-        {
-            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+/// Set `key` only when the environment hasn't already, reporting either way.
+///
+/// The "don't override" half is deliberate and load-bearing: it means every
+/// knob below can be flipped from a shell without a rebuild, so this is
+/// bisectable in place --
+/// `WEBKIT_DISABLE_COMPOSITING_MODE=0 ./Rivals*.AppImage` and so on.
+fn set_default(key: &str, value: &str, why: &str) {
+    match std::env::var(key) {
+        Ok(existing) => note(&format!("{key} already={existing} (kept; not overriding)")),
+        Err(_) => {
+            std::env::set_var(key, value);
+            note(&format!("{key}={value} ({why})"));
         }
     }
+}
+
+/// Linux webview bring-up. See [`note`] for why it narrates itself.
+///
+/// Guarded with `cfg!` rather than `#[cfg]` so it stays compiled and
+/// type-checked on every platform (the branch is a compile-time constant, so
+/// other targets optimize the whole thing away). That matters here more than
+/// usual: this code only ever *runs* on the one OS that can't be built from
+/// the machine it's developed on, so `#[cfg]` would mean shipping it to CI
+/// unchecked.
+fn linux_webview_setup() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    note(&format!("app v{}", env!("CARGO_PKG_VERSION")));
+
+    // AppImage: the bundle ships its own libwebkit2gtk AND WebKit's
+    // helper executables (WebKitWebProcess/WebKitNetworkProcess -- the
+    // actual page lives in those), but libwebkit2gtk spawns them from a
+    // path compiled in on the CI builder: /usr/lib/x86_64-linux-gnu/
+    // webkit2gtk-4.1, Ubuntu's Debian-multiarch layout. On any distro
+    // laid out differently -- SteamOS's Arch layout notably -- that path
+    // doesn't exist, the web process never spawns, and the app is a
+    // silent blank-white window (GTK is fine, so the window itself
+    // opens; there's just no page and no error). The AppImage runtime
+    // exports APPDIR; point WebKit at the bundled helpers explicitly.
+    // Outside an AppImage (deb install, dev) APPDIR is unset and this
+    // does nothing.
+    //
+    // Every branch reports, including the ones that skip: a silent skip here
+    // is indistinguishable from a fix that ran and didn't help, which is
+    // precisely the ambiguity that made this take several attempts.
+    let appdir = std::env::var_os("APPDIR");
+    match &appdir {
+        Some(d) => note(&format!("APPDIR={}", d.to_string_lossy())),
+        None => note("APPDIR unset -- not running from an AppImage"),
+    }
+    if std::env::var_os("WEBKIT_EXEC_PATH").is_some() {
+        note("WEBKIT_EXEC_PATH already set (kept; not overriding)");
+    } else if let Some(appdir) = &appdir {
+        let exec = std::path::Path::new(appdir).join("usr/lib/x86_64-linux-gnu/webkit2gtk-4.1");
+        if exec.is_dir() {
+            let bundle = exec.join("injected-bundle");
+            std::env::set_var("WEBKIT_EXEC_PATH", &exec);
+            note(&format!("WEBKIT_EXEC_PATH={}", exec.display()));
+            let helper = exec.join("WebKitWebProcess");
+            note(&format!("  WebKitWebProcess present: {}", helper.is_file()));
+            if bundle.is_dir() && std::env::var_os("WEBKIT_INJECTED_BUNDLE_PATH").is_none() {
+                std::env::set_var("WEBKIT_INJECTED_BUNDLE_PATH", &bundle);
+                note(&format!("WEBKIT_INJECTED_BUNDLE_PATH={}", bundle.display()));
+            } else {
+                note(&format!(
+                    "  injected-bundle dir present: {}",
+                    bundle.is_dir()
+                ));
+            }
+        } else {
+            note(&format!(
+                "SKIPPED WEBKIT_EXEC_PATH -- {} is not a directory, so the bundled \
+                 web-process helpers are NOT where this expects them",
+                exec.display()
+            ));
+        }
+    }
+
+    // AppImage again: WebKit 2.46+ launches WebKitWebProcess inside a
+    // bubblewrap sandbox that bind-mounts a fixed set of system paths --
+    // which does NOT include the AppImage's FUSE mount at /tmp/.mount_*.
+    // The helper is therefore "inaccessible" from inside its own sandbox
+    // and the launch SIGABRTs (confirmed via coredumpctl on a Steam
+    // Deck), leaving a silent blank-white window. The sandbox cannot
+    // work from an AppImage, so opt out of it there. The tradeoff is
+    // real but small here: the webview only ever renders this app's own
+    // bundled UI, never arbitrary web content. Installs that don't run
+    // from an AppImage (deb, dev) keep the sandbox.
+    if appdir.is_some() {
+        set_default(
+            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS",
+            "1",
+            "AppImage: bwrap can't reach the FUSE mount",
+        );
+    } else {
+        note("sandbox left on -- not an AppImage");
+    }
+
+    // WebKitGTK's DMA-BUF renderer fails to initialize on a number of Linux
+    // GPU/compositor stacks (SteamOS's gamescope, NVIDIA proprietary drivers,
+    // some Wayland compositors) and then silently renders nothing. Falling
+    // back to the shared-memory renderer costs rendering speed this UI never
+    // notices. Must be set before the first webview is created.
+    set_default(
+        "WEBKIT_DISABLE_DMABUF_RENDERER",
+        "1",
+        "DMA-BUF renderer often never paints on Linux",
+    );
+
+    // On SteamOS the DMA-BUF fallback alone still comes up white for
+    // many WebKit apps: accelerated compositing itself fails against
+    // the Deck's gamescope/KDE stack, which is a separate knob. Turning
+    // compositing off is WebKit's documented last-resort fix and costs
+    // GPU-composited rendering (fine for this UI). Scoped to SteamOS
+    // rather than all Linux so other distros keep the faster path;
+    // detected via os-release (covers Desktop Mode) or the gamescope
+    // session markers (covers Game Mode on non-SteamOS gamescope too).
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let distro_id = os_release
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ID="))
+        .unwrap_or("unknown");
+    note(&format!(
+        "distro ID={distro_id}, XDG_CURRENT_DESKTOP={desktop:?}, XDG_SESSION_TYPE={session:?}"
+    ));
+
+    let on_steamos_or_gamescope = std::env::var_os("SteamDeck").is_some()
+        || desktop.eq_ignore_ascii_case("gamescope")
+        || distro_id.trim() == "steamos";
+    note(&format!(
+        "detected SteamOS/gamescope: {on_steamos_or_gamescope}"
+    ));
+    if on_steamos_or_gamescope {
+        set_default(
+            "WEBKIT_DISABLE_COMPOSITING_MODE",
+            "1",
+            "SteamOS: accelerated compositing fails against gamescope/KDE",
+        );
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    linux_webview_setup();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {

@@ -38,6 +38,62 @@ fn set_default(key: &str, value: &str, why: &str) {
     }
 }
 
+/// Put the AppImage's own library directories at the FRONT of
+/// `LD_LIBRARY_PATH`, so anything this process spawns can find the bundled
+/// libraries.
+///
+/// This is the fix for the SteamOS white screen. `WebKitWebProcess` -- the
+/// helper the page actually lives in -- is linked with `RUNPATH=$ORIGIN`,
+/// meaning it only ever looks in its own directory,
+/// `usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/`. But the
+/// `libwebkit2gtk-4.1.so.0` it needs is bundled three levels up, in
+/// `usr/lib/`. So it cannot resolve its own library from its rpath and
+/// depends entirely on inheriting a correct `LD_LIBRARY_PATH`. Measured on
+/// the Deck: `ldd` on that helper reports `libwebkit2gtk-4.1.so.0 => not
+/// found`, and `pgrep WebKitWebProcess` finds nothing while the window is up.
+///
+/// That single fact explains the whole bug, including why it was so quiet:
+/// the helper dies in the dynamic loader before it runs a single
+/// instruction, and the loader's error goes to the child's stderr, which
+/// WebKit discards. No web process means no renderer to configure and no
+/// page to load -- which is why disabling DMA-BUF, disabling compositing,
+/// forcing XWayland, fixing asset URLs and enabling devtools all changed
+/// nothing. They were all downstream of a process that never existed.
+///
+/// linuxdeploy's AppRun does export an `LD_LIBRARY_PATH` that covers
+/// `usr/lib`, but it demonstrably is not reaching the helper. Rather than
+/// depend on that, prepend the bundle's lib dirs here in the parent, before
+/// any webview exists: children inherit the environment at spawn time.
+/// Prepending rather than defaulting matters -- the variable is normally
+/// already set, so `set_default` would decline to touch it.
+fn prepend_bundle_lib_path(appdir: &std::ffi::OsStr) {
+    let base = std::path::Path::new(appdir);
+    // usr/lib holds the bundled libwebkit2gtk/libgtk; the multiarch dir holds
+    // the webkit helper tree. Both are only added when they actually exist,
+    // so a differently-laid-out bundle degrades to a no-op rather than
+    // pointing the loader at nothing.
+    let mut parts: Vec<String> = ["usr/lib", "usr/lib/x86_64-linux-gnu"]
+        .iter()
+        .map(|d| base.join(d))
+        .filter(|p| p.is_dir())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    if parts.is_empty() {
+        note("no bundled lib dirs found -- LD_LIBRARY_PATH left alone");
+        return;
+    }
+    match std::env::var("LD_LIBRARY_PATH") {
+        Ok(existing) if !existing.is_empty() => {
+            note(&format!("inherited LD_LIBRARY_PATH={existing}"));
+            parts.push(existing);
+        }
+        _ => note("no LD_LIBRARY_PATH inherited"),
+    }
+    let joined = parts.join(":");
+    std::env::set_var("LD_LIBRARY_PATH", &joined);
+    note(&format!("LD_LIBRARY_PATH={joined}"));
+}
+
 /// Linux webview bring-up. See [`note`] for why it narrates itself.
 ///
 /// Guarded with `cfg!` rather than `#[cfg]` so it stays compiled and
@@ -70,7 +126,12 @@ fn linux_webview_setup() {
     // precisely the ambiguity that made this take several attempts.
     let appdir = std::env::var_os("APPDIR");
     match &appdir {
-        Some(d) => note(&format!("APPDIR={}", d.to_string_lossy())),
+        Some(d) => {
+            note(&format!("APPDIR={}", d.to_string_lossy()));
+            // Must happen before the webview is created: this is what lets
+            // the spawned WebKitWebProcess resolve the bundled libwebkit2gtk.
+            prepend_bundle_lib_path(d);
+        }
         None => note("APPDIR unset -- not running from an AppImage"),
     }
     if std::env::var_os("WEBKIT_EXEC_PATH").is_some() {

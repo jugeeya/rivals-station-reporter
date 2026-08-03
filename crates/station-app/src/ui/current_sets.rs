@@ -220,7 +220,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let cs = &app.current_sets;
 
     let mut col = column![row![
-        text("CURRENT SETS").size(11).color(theme::TEXT_MUTED),
+        text(theme::tracked("Current sets")).font(theme::FONT_BODY_SEMIBOLD).size(10).color(theme::TEXT_MUTED),
         text(cs.data.sets.len().to_string()).size(11).color(theme::TEXT_MUTED),
         Space::new().width(Length::Fill),
         button(text(if cs.refreshing { "…" } else { "⟳" }).size(13))
@@ -279,7 +279,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         col = col.push(
             row![
                 text("●").size(9).color(theme::ACCENT),
-                text("PLAYING NOW").size(10).color(theme::ACCENT),
+                text(theme::tracked("Playing now")).font(theme::FONT_BODY_SEMIBOLD).size(10).color(theme::ACCENT),
                 text(playing.len().to_string()).size(10).color(theme::TEXT_MUTED),
             ]
             .spacing(6)
@@ -292,7 +292,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if !startable.is_empty() {
         col = col.push(
             row![
-                text("STARTABLE").size(10).color(theme::TEXT_MUTED),
+                text(theme::tracked("Startable")).font(theme::FONT_BODY_SEMIBOLD).size(10).color(theme::TEXT_MUTED),
                 text(startable.len().to_string()).size(10).color(theme::TEXT_MUTED),
             ]
             .spacing(6),
@@ -319,7 +319,7 @@ fn set_row<'a>(app: &'a App, s: &'a AvailableSet, playing: bool) -> Element<'a, 
         .size(12)
         .color(theme::TEXT_MUTED)
         .width(Length::Fixed(150.0)),
-        text(s.players_label()).size(13).color(theme::TEXT_PRIMARY),
+        text(s.players_label()).font(theme::FONT_BODY_MEDIUM).size(13).color(theme::TEXT_PRIMARY),
         Space::new().width(Length::Fill),
     ]
     .spacing(10)

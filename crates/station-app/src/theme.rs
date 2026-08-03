@@ -277,3 +277,109 @@ pub fn drawer(_theme: &Theme) -> container::Style {
         ..container::Style::default()
     }
 }
+
+// ---- typography helpers -------------------------------------------------------
+
+/// Fakes the web app's `letter-spacing: 0.06em` on uppercase section titles:
+/// iced's text has no tracking, but a U+2009 THIN SPACE between characters
+/// reads the same at these sizes.
+pub fn tracked(s: &str) -> String {
+    let upper = s.to_uppercase();
+    let mut out = String::with_capacity(upper.len() * 2);
+    for (i, ch) in upper.chars().enumerate() {
+        if i > 0 {
+            out.push('\u{2009}');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+// ---- richer surfaces -----------------------------------------------------------
+
+fn vertical_gradient(top: Color, bottom: Color) -> Background {
+    Background::Gradient(
+        iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI))
+            .add_stop(0.0, top)
+            .add_stop(1.0, bottom)
+            .into(),
+    )
+}
+
+/// The glassy main card, take two: without backdrop-blur (not a thing
+/// outside a browser), a soft vertical gradient + a brighter hairline reads
+/// as the same material.
+pub fn card_rich(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(vertical_gradient(
+            rgba(214, 216, 255, 0.085),
+            rgba(150, 150, 210, 0.035),
+        )),
+        border: Border {
+            color: rgba(255, 255, 255, 0.10),
+            width: 1.0,
+            radius: Radius::new(RADIUS_CARD),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+            offset: iced::Vector::new(0.0, 24.0),
+            blur_radius: 64.0,
+        },
+        text_color: Some(TEXT_PRIMARY),
+        ..container::Style::default()
+    }
+}
+
+/// The live "Now playing" card: the accent bleeds into the panel itself.
+pub fn panel_live(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(vertical_gradient(
+            Color { a: 0.13, ..ACCENT },
+            Color { a: 0.04, ..ACCENT },
+        )),
+        border: Border {
+            color: Color { a: 0.35, ..ACCENT },
+            width: 1.0,
+            radius: Radius::new(RADIUS_PANEL),
+        },
+        text_color: Some(TEXT_PRIMARY),
+        ..container::Style::default()
+    }
+}
+
+/// Primary button with depth: accent gradient + a soft accent glow.
+pub fn button_primary_rich(_theme: &Theme, status: button::Status) -> button::Style {
+    let (top, bottom) = match status {
+        button::Status::Hovered | button::Status::Pressed => (
+            rgba(140, 143, 255, 0.95),
+            rgba(112, 114, 245, 0.95),
+        ),
+        button::Status::Disabled => (
+            Color { a: 0.30, ..ACCENT },
+            Color { a: 0.25, ..ACCENT },
+        ),
+        _ => (rgba(118, 121, 250, 0.95), rgba(88, 91, 233, 0.95)),
+    };
+    button::Style {
+        background: Some(vertical_gradient(top, bottom)),
+        text_color: if matches!(status, button::Status::Disabled) {
+            TEXT_MUTED
+        } else {
+            TEXT_PRIMARY
+        },
+        border: Border {
+            color: rgba(255, 255, 255, 0.14),
+            width: 1.0,
+            radius: Radius::new(RADIUS_BUTTON),
+        },
+        shadow: Shadow {
+            color: Color {
+                a: if matches!(status, button::Status::Disabled) { 0.0 } else { 0.35 },
+                ..ACCENT
+            },
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 14.0,
+        },
+        ..button::Style::default()
+    }
+}

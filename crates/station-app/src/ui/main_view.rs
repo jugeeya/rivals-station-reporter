@@ -28,8 +28,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
     }
     title_row = title_row.push(
-        text(cfg.mode.to_uppercase())
-            .size(11)
+        text(theme::tracked(&cfg.mode))
+            .font(theme::FONT_BODY_SEMIBOLD)
+            .size(10)
             .color(theme::TEXT_MUTED),
     );
     if cfg.dry_run {
@@ -199,7 +200,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         ]
         .spacing(14),
     )
-    .style(theme::card)
+    .style(theme::card_rich)
     .padding(24)
     .width(Length::Fixed(920.0))
     .height(Length::Fill)
@@ -256,7 +257,7 @@ fn live_set_card(app: &App) -> Element<'_, Message> {
 
     let mut head = row![
         text("●").size(11).color(theme::ACCENT),
-        text("Now playing").size(12).color(theme::TEXT_MUTED),
+        text(theme::tracked("Now playing")).font(theme::FONT_BODY_SEMIBOLD).size(10).color(theme::TEXT_MUTED),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
@@ -317,9 +318,9 @@ fn live_set_card(app: &App) -> Element<'_, Message> {
                 .unwrap_or_default()
         )
         .font(theme::FONT_DISPLAY)
-        .size(34)
+        .size(42)
         .color(theme::TEXT_PRIMARY),
-        text("–").size(28).color(theme::TEXT_MUTED),
+        text("–").font(theme::FONT_DISPLAY_MEDIUM).size(32).color(theme::TEXT_MUTED),
         text(
             live.players
                 .get(1)
@@ -327,7 +328,7 @@ fn live_set_card(app: &App) -> Element<'_, Message> {
                 .unwrap_or_default()
         )
         .font(theme::FONT_DISPLAY)
-        .size(34)
+        .size(42)
         .color(theme::TEXT_PRIMARY),
     ]
     .spacing(12)
@@ -352,7 +353,7 @@ fn live_set_card(app: &App) -> Element<'_, Message> {
     }
 
     container(col)
-        .style(theme::panel)
+        .style(theme::panel_live)
         .padding(18)
         .width(Length::Fill)
         .into()
@@ -364,7 +365,7 @@ fn station_sets(app: &App) -> Element<'_, Message> {
     sets.reverse();
 
     let mut col = column![row![
-        text("Sets today").size(12).color(theme::TEXT_MUTED),
+        text(theme::tracked("Sets today")).font(theme::FONT_BODY_SEMIBOLD).size(10).color(theme::TEXT_MUTED),
         text(if sets.is_empty() {
             String::new()
         } else {

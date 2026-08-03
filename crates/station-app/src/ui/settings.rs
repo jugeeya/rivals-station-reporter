@@ -463,7 +463,7 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
             .width(Length::Fill)
             .align_x(Alignment::Center),
     )
-    .style(theme::button_primary)
+    .style(theme::button_primary_rich)
     .padding([9, 0])
     .width(Length::Fill);
     if !s.saving {
@@ -495,7 +495,7 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
         UpdateFlow::Available(u) => {
             update_row = update_row.push(
                 button(text(format!("Update to v{}", u.version)).size(11))
-                    .style(theme::button_primary)
+                    .style(theme::button_primary_rich)
                     .padding([3, 10])
                     .on_press(Message::Settings(Msg::ApplyUpdate)),
             );
@@ -510,7 +510,7 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
         UpdateFlow::Staged => {
             update_row = update_row.push(
                 button(text("Restart to finish update").size(11))
-                    .style(theme::button_primary)
+                    .style(theme::button_primary_rich)
                     .padding([3, 10])
                     .on_press(Message::Settings(Msg::RestartNow)),
             );

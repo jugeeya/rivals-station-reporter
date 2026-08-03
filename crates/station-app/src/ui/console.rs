@@ -148,7 +148,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let count = sets.len();
     col = col.push(
         row![
-            text("ALL STATIONS").size(11).color(theme::TEXT_MUTED),
+            text(theme::tracked("All stations")).font(theme::FONT_BODY_SEMIBOLD).size(10).color(theme::TEXT_MUTED),
             text(format!("{count} set{}", if count == 1 { "" } else { "s" }))
                 .size(11)
                 .color(theme::TEXT_MUTED),
@@ -211,11 +211,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if !other.is_empty() {
         let toggle = button(
             text(format!(
-                "REPORTED / NOT ACTIONABLE  {} {}",
+                "{}  {} {}",
+                theme::tracked("Reported / not actionable"),
                 other.len(),
                 if app.console.show_other { "▾" } else { "▸" }
             ))
-            .size(11),
+            .font(theme::FONT_BODY_SEMIBOLD)
+            .size(10),
         )
         .style(theme::button_linkish)
         .padding(0)
@@ -242,7 +244,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 fn group_head(title: &str, n: usize, color: iced::Color) -> Element<'static, Message> {
     row![
         text("●").size(9).color(color),
-        text(title.to_string()).size(11).color(color),
+        text(theme::tracked(title)).font(theme::FONT_BODY_SEMIBOLD).size(10).color(color),
         text(n.to_string()).size(11).color(theme::TEXT_MUTED),
     ]
     .spacing(6)
@@ -288,7 +290,7 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
             .style(theme::panel)
             .padding([2, 8]),
         text(time_label).font(theme::FONT_MONO).size(12).color(time_color),
-        text(format::hub_players_label(r)).size(14).color(theme::TEXT_PRIMARY),
+        text(format::hub_players_label(r)).font(theme::FONT_BODY_MEDIUM).size(14).color(theme::TEXT_PRIMARY),
         Space::new().width(Length::Fill),
     ]
     .spacing(10)
@@ -345,7 +347,7 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
         container(
             row![
                 text("●").size(7).color(badge_color),
-                text(status.to_uppercase()).size(10).color(badge_color),
+                text(theme::tracked(status)).font(theme::FONT_BODY_SEMIBOLD).size(9).color(badge_color),
             ]
             .spacing(4)
             .align_y(Alignment::Center),
@@ -533,7 +535,7 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
         let mut actions = row![].spacing(8).align_y(Alignment::Center);
         if reportable && status != "reported" {
             let mut b = button(text("Report").size(13))
-                .style(theme::button_primary)
+                .style(theme::button_primary_rich)
                 .padding([6, 16]);
             if !busy {
                 b = b.on_press(Message::Console(Msg::OpenPicker(key.clone())));

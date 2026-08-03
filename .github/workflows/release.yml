@@ -121,9 +121,16 @@ jobs:
         shell: bash
         run: |
           v='${{ steps.mode.outputs.version }}-beta.${{ github.run_number }}'
-          sed -i.bak "0,/^version = \".*\"/s//version = \"$v\"/" crates/station-app/Cargo.toml
+          # python, not sed: the GNU `0,/re/` address silently doesn't apply
+          # on macOS's BSD sed, which shipped beta zips with no beta suffix.
+          python3 - "$v" <<'PY'
+          import re, sys
+          p = "crates/station-app/Cargo.toml"
+          s = open(p).read()
+          open(p, "w").write(re.sub(r'^version = ".*?"', f'version = "{sys.argv[1]}"', s, count=1, flags=re.M))
+          PY
+          grep -m1 '^version' crates/station-app/Cargo.toml
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "stamped $v"
 
       - name: Build
         shell: bash

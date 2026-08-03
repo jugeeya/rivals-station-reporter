@@ -197,7 +197,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     container(inner)
-        .style(theme::card)
+        .style(theme::card_rich)
         .padding(32)
         .width(Length::Fixed(640.0))
         .into()
@@ -243,7 +243,7 @@ fn step_one(ob: &State) -> Element<'_, Message> {
                 .width(Length::Fill)
                 .align_x(Alignment::Center)
         )
-        .style(theme::button_primary)
+        .style(theme::button_primary_rich)
         .padding([10, 0])
         .width(Length::Fill)
         .on_press(Message::Onboarding(Msg::Continue)),
@@ -409,7 +409,7 @@ fn step_two(ob: &State) -> Element<'_, Message> {
     }
 
     let mut start = button(text(if ob.saving { "Starting…" } else { "Start" }).size(15))
-        .style(theme::button_primary)
+        .style(theme::button_primary_rich)
         .padding([10, 28]);
     if !ob.saving {
         start = start.on_press(Message::Onboarding(Msg::Finish));

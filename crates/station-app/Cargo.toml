@@ -25,12 +25,20 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 rfd = "0.15"          # file/dir pickers (plugin-dialog)
 auto-launch = "0.5"   # start-with-OS toggle (plugin-autostart)
 open = "5"            # open URLs in the default browser (plugin-opener)
-tray-icon = "0.21"    # tray + close-to-tray (tauri tray)
 dirs = "6"            # config dir resolution (app.path())
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 chrono = "0.4.45"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Tray + close-to-tray, on Windows/macOS only. On Linux, tray-icon needs the
+# whole GTK/appindicator stack at BUILD time (and a gtk event loop on the
+# tray's thread at runtime, which iced/winit doesn't run) — dragging GTK back
+# into the one platform we rewrote this app to escape from. Linux builds get
+# the designed fallback instead: no tray, closing the window quits (see
+# ui/tray.rs), which is also the only sane behavior on a Deck in Game Mode.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = "0.21"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"   # embed the app icon into the .exe

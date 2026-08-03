@@ -1,5 +1,5 @@
 //! Character stock icons — the native CharIcon.vue. Icons are embedded from
-//! public/characters/ (see ATTRIBUTION.md there for provenance) and looked up
+//! assets/characters/ (see ATTRIBUTION.md there for provenance) and looked up
 //! by slugified character name; an unknown character falls back to a text
 //! chip, because a future character will ship in station data before its
 //! icon lands here, and a hole would be a worse failure mode than a name.
@@ -14,7 +14,7 @@ use crate::theme;
 
 macro_rules! icons {
     ($($slug:literal),+ $(,)?) => {
-        [$(($slug, include_bytes!(concat!("../../../../public/characters/", $slug, ".png")).as_slice())),+]
+        [$(($slug, include_bytes!(concat!("../../assets/characters/", $slug, ".png")).as_slice())),+]
     };
 }
 

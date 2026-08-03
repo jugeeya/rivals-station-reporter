@@ -10,25 +10,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: pnpm install
-      # vue-tsc typecheck + vite build (legacy Tauri UI, still in-tree)
-      - run: pnpm build
-      - run: pnpm lint
       # every ported behavior test lives in station-core; station-app carries
-      # the engine-layer tests and — critically — proves the NATIVE app
-      # actually compiles, which the release workflow otherwise discovers
-      # only at packaging time (the src-tauri/src/lib.rs mishap).
+      # the engine-layer tests and — critically — proves the app actually
+      # compiles on Linux, which the release workflow otherwise discovers
+      # only at packaging time.
       - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-      - run: cargo test -p station-core -p station-app
+      - run: cargo test --workspace
       - run: cargo check -p station-app
 
   # The README screenshots, rendered by the app itself on a virtual display.
@@ -42,8 +31,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config xvfb
+      # `bash` explicitly: the web-UI upload path drops the executable bit,
+      # and the script shouldn't depend on a mode bit to run anyway.
       - name: Render screenshots
-        run: xvfb-run -a env ICED_BACKEND=tiny-skia ./scripts/screenshots/native.sh
+        run: xvfb-run -a env ICED_BACKEND=tiny-skia bash ./scripts/screenshots/native.sh
       - uses: actions/upload-artifact@v4
         with:
           name: screenshots

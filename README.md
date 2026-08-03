@@ -82,29 +82,19 @@ update checker, all editable without restarting.
 
 ## Install
 
-Grab the installer from the latest GitHub release (Windows NSIS `.exe`;
-macOS `.dmg`; Linux/SteamOS `.AppImage` or `.deb`). First run walks through
-setup: pick what this PC is, paste the start.gg event link (it echoes back
-the tournament name so a wrong paste is caught immediately), enter the shared
-key from whoever runs the event — done. Save/replay paths are auto-detected.
+Grab the build from the latest GitHub release: Windows portable `.zip`,
+macOS `.app` zip, Linux/SteamOS `.AppImage`. The UI is native (Iced — pure
+Rust, no webview), so there is no browser engine to configure on any
+platform. First run walks through setup: pick what this PC is, paste the
+start.gg event link (it echoes back the tournament name so a wrong paste is
+caught immediately), enter the shared key from whoever runs the event —
+done. Save/replay paths are auto-detected. Updates: Settings → "Check for
+updates" downloads and applies the newest release in place.
 
-On Linux the app applies three WebKitGTK workarounds at startup, all
-override-able by setting the variable yourself before launching:
-
-- **AppImage helper paths** (`WEBKIT_EXEC_PATH`): the AppImage bundles
-  WebKit's helper processes, but WebKit looks for them at the Ubuntu build
-  machine's compiled-in path. On a distro with a different layout — SteamOS
-  in particular — they're never found, the web process never spawns, and the
-  app is a silent blank-white window. The app points WebKit at the bundled
-  helpers whenever it's running from an AppImage.
-- **DMA-BUF renderer off** (`WEBKIT_DISABLE_DMABUF_RENDERER=1`, all Linux):
-  fails silently on NVIDIA and some Wayland compositors, same blank-white
-  symptom.
-- **Accelerated compositing off** (`WEBKIT_DISABLE_COMPOSITING_MODE=1`,
-  SteamOS/gamescope only): fails separately against the Deck's stack.
-
-Closing the window sends the app to the tray; reporting keeps running.
-"Start with Windows" is in Settings.
+On Windows and macOS, closing the window sends the app to the tray and
+reporting keeps running ("Start with Windows" is in Settings). On Linux
+there is no tray (that would drag the GTK stack back in); closing quits, so
+leave the window open — or minimized — while sets are being played.
 
 An existing `config.json` from the Python reporter uses the same keys and can
 be pasted into Settings field-by-field (the file lives at the app config dir
@@ -113,25 +103,22 @@ once saved).
 ## Development
 
 ```sh
-cargo run -p station-app     # the desktop app (native Iced UI, no webview)
+cargo run -p station-app     # the desktop app (native Iced UI)
 cargo test -p station-core   # every ported behavior test (matching, stats,
                              # set machine, hub, forwarder, startgg client)
 cargo test -p station-app    # engine-layer tests
-
-# Legacy Tauri/Vue UI (kept in-tree until the native port has run an event):
-pnpm install && pnpm dev     # Vue UI in a browser, scripted fake tournament
-pnpm tauri dev               # the old Tauri shell
+./scripts/screenshots/native.sh   # regenerate the README screenshots
 ```
 
-Dev tricks for the native app: `RSR_CONFIG_DIR=/tmp/profile` runs against a
-scratch profile instead of the real one, and `RSR_SCREENSHOT=out.png` renders
-the app, saves a screenshot after ~2s, and exits — a visual check that needs
-no eyes on the window.
+Dev tricks: `RSR_CONFIG_DIR=/tmp/profile` runs against a scratch profile
+instead of the real one; `RSR_SCREENSHOT=out.png` renders the app, saves a
+screenshot after ~2s, and exits; `RSR_SEED_STATE=seed.json` freezes fixture
+data into the UI; `RSR_OPEN=settings|log` opens a drawer on launch.
 
-All logic lives in `crates/station-core` (no Tauri dependency) — 1:1 ports of
-the Python modules with their tests. `src-tauri` is a thin shell: an engine
-thread that owns the producer/forwarder/hub and pushes state to the UI over
-one event.
+All logic lives in `crates/station-core` (no UI dependency) — 1:1 ports of
+the Python modules with their tests. `crates/station-app` is the Iced shell:
+an engine thread that owns the producer/forwarder/hub and pushes state
+snapshots to the UI over one channel.
 
 ### Screenshots
 

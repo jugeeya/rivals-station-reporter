@@ -17,3 +17,5 @@ dist/
 /test-results/
 /playwright-report/
 /blob-report/
+.claude/
+.DS_Store

@@ -145,7 +145,7 @@ jobs:
           APP="Rivals Station Reporter.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" dist
           cp target/release/rivals-station-reporter "$APP/Contents/MacOS/"
-          cp src-tauri/icons/icon.icns "$APP/Contents/Resources/icon.icns"
+          cp crates/station-app/assets/icons/icon.icns "$APP/Contents/Resources/icon.icns"
           cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -171,7 +171,7 @@ jobs:
           v="$(grep -m1 '^version' crates/station-app/Cargo.toml | sed 's/.*"\(.*\)"/\1/')"
           mkdir -p AppDir/usr/bin dist
           cp target/release/rivals-station-reporter AppDir/usr/bin/
-          cp src-tauri/icons/128x128.png AppDir/rivals-station-reporter.png
+          cp crates/station-app/assets/icons/128x128.png AppDir/rivals-station-reporter.png
           cat > AppDir/rivals-station-reporter.desktop <<EOF
           [Desktop Entry]
           Name=Rivals Station Reporter

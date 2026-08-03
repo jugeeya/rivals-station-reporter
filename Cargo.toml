@@ -1,9 +1,7 @@
-# Virtual workspace: the native Iced app, the (legacy) Tauri shell, and the
-# UI-free core library that holds every ported piece of the Python station
-# reporter. station-app is the app being shipped going forward; src-tauri
-# stays in-tree until the native port has fully proven itself at an event.
+# Virtual workspace: the native Iced app and the UI-free core library that
+# holds every ported piece of the Python station reporter.
 [workspace]
-members = ["src-tauri", "crates/station-core", "crates/station-app"]
+members = ["crates/station-core", "crates/station-app"]
 resolver = "2"
 
 [workspace.dependencies]

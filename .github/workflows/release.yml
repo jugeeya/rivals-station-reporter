@@ -247,7 +247,13 @@ jobs:
   # never appears at /releases/latest incomplete.
   publish-release:
     needs: build
-    if: github.ref_type == 'tag' || inputs.tag != ''
+    # `!cancelled()` + explicit build check, NOT the implicit success():
+    # prepare-beta is skipped on tag runs, and GitHub skips any job whose
+    # transitive needs include a skipped job unless the condition opts out —
+    # which silently left v0.6.0 AND v0.6.1 sitting as drafts.
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success'
+          && (github.ref_type == 'tag' || inputs.tag != '') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

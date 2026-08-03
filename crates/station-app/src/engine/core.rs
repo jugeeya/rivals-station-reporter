@@ -97,6 +97,13 @@ pub struct EngineInner {
     // calls, e.g. unreachable while the hub restarts, then a bad key once
     // it's back up with different config).
     forward_bad: Mutex<Option<(String, i64)>>, // (message, first-seen t)
+
+    /// Screenshot/dev only (`seed_dev_state`): replaces the computed health
+    /// block wholesale so captures don't show this machine's missing game
+    /// paths. Never set in normal operation.
+    dev_health: Mutex<Option<Value>>,
+    /// Same dev-only mechanism for the status line.
+    dev_status: Mutex<Option<Value>>,
 }
 
 impl EngineInner {
@@ -271,7 +278,12 @@ impl EngineInner {
         // clock skew corrupts matching/timeouts but games are still being
         // recorded; a forwarder outage means games are still recorded and
         // matched locally, just not yet sent anywhere, so it's shown last.
-        let status = match (
+        let status = if let Some(s) = self.dev_status.lock().unwrap().clone() {
+            // Screenshot/dev seed: pinned status, bypassing the health
+            // latches (which would otherwise report this machine's real,
+            // irrelevant problems into the capture).
+            s
+        } else { match (
             &*self.replay_autosave_bad.lock().unwrap(),
             &*self.clock_skew_bad.lock().unwrap(),
             &*self.forward_bad.lock().unwrap(),
@@ -292,7 +304,7 @@ impl EngineInner {
                 "t": first_seen_t,
             }),
             _ => self.status.lock().unwrap().clone(),
-        };
+        } };
         json!({
             "config": cfg,
             "status": status,
@@ -300,14 +312,14 @@ impl EngineInner {
             "hubSnapshot": *self.hub_snapshot.lock().unwrap(),
             "hubUrl": *self.hub_url.lock().unwrap(),
             "log": self.log.lock().unwrap().iter().cloned().collect::<Vec<_>>(),
-            "health": {
+            "health": self.dev_health.lock().unwrap().clone().unwrap_or_else(|| json!({
                 "savePath": save.to_string_lossy(),
                 "saveExists": save.is_file(),
                 "saveArmed": self.armed.load(Ordering::Relaxed),
                 "replaysPath": replays.to_string_lossy(),
                 "replaysExists": replays.is_dir(),
                 "outDir": out_dir.to_string_lossy(),
-            },
+            })),
         })
     }
 
@@ -333,12 +345,24 @@ impl EngineInner {
     /// snapshot with fixture data (the native counterpart of the browser
     /// mock's `__RSR_SEED__`). Only ever called when RSR_SEED_STATE is set —
     /// never in normal operation, where the producer/hub own these.
-    pub fn seed_dev_state(&self, snapshot: Option<Value>, hub_snapshot: Option<Value>) {
+    pub fn seed_dev_state(
+        &self,
+        snapshot: Option<Value>,
+        hub_snapshot: Option<Value>,
+        health: Option<Value>,
+        status: Option<Value>,
+    ) {
         if let Some(s) = snapshot {
             *self.snapshot.lock().unwrap() = s;
         }
         if let Some(h) = hub_snapshot {
             *self.hub_snapshot.lock().unwrap() = h;
+        }
+        if health.is_some() {
+            *self.dev_health.lock().unwrap() = health;
+        }
+        if status.is_some() {
+            *self.dev_status.lock().unwrap() = status;
         }
         self.emit_state();
     }
@@ -560,6 +584,8 @@ pub fn start(config_dir: PathBuf) -> Engine {
         replay_autosave_bad: Mutex::new(None),
         clock_skew_bad: Mutex::new(None),
         forward_bad: Mutex::new(None),
+        dev_health: Mutex::new(None),
+        dev_status: Mutex::new(None),
     });
 
     // Background refresher — its own thread, its own schedule, never the

@@ -137,7 +137,12 @@ impl App {
             if let Ok(text) = std::fs::read_to_string(path) {
                 if let Ok(v) = serde_json::from_str::<Value>(&text) {
                     app.engine
-                        .seed_dev_state(v.get("snapshot").cloned(), v.get("hubSnapshot").cloned());
+                        .seed_dev_state(
+                            v.get("snapshot").cloned(),
+                            v.get("hubSnapshot").cloned(),
+                            v.get("health").cloned(),
+                            v.get("status").cloned(),
+                        );
                     app.st = EngineState::from_value(&commands::get_state(&app.engine));
                     // Not part of EngineState in the real app either — it's
                     // the list_available_sets query; seeded straight into the

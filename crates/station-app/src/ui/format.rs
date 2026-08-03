@@ -38,6 +38,19 @@ pub fn hub_players_label(rec: &Value) -> String {
         .cloned()
         .unwrap_or_default();
     if players.is_empty() {
+        // No games yet -> no station-side tags; the bracket entrants are the
+        // only names there are. The raw set id is a last resort, never a
+        // first impression.
+        let entrants: Vec<String> = rec
+            .get("entrants")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .collect();
+        if !entrants.is_empty() {
+            return entrants.join(" vs ");
+        }
         return crate::model::id_str(rec.get("id").unwrap_or(&Value::Null));
     }
     players

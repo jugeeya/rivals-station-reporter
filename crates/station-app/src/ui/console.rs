@@ -129,17 +129,32 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("—")
                     .to_string();
-                chips = chips.push(
+                // Icon instead of the raw state word; the word survives as
+                // the hover text. ▶ = a set is open here, ○ = idle.
+                let (glyph, color) = match state.as_str() {
+                    "set_open" | "set_start" => ("▶", theme::ACCENT),
+                    "idle" => ("○", theme::TEXT_MUTED),
+                    _ => ("·", theme::TEXT_MUTED),
+                };
+                chips = chips.push(tooltip(
                     container(
                         row![
-                            text(format!("Stn {n}")).font(theme::FONT_BODY_SEMIBOLD).size(11).color(theme::TEXT_PRIMARY),
-                            text(state).size(11).color(theme::TEXT_MUTED),
+                            text(format!("Stn {n}"))
+                                .font(theme::FONT_BODY_SEMIBOLD)
+                                .size(11)
+                                .color(theme::TEXT_PRIMARY),
+                            text(glyph).size(10).color(color),
                         ]
-                        .spacing(6),
+                        .spacing(6)
+                        .align_y(Alignment::Center),
                     )
                     .style(theme::panel)
                     .padding([3, 8]),
-                );
+                    container(text(state).size(12))
+                        .style(theme::tooltip_bubble)
+                        .padding(6),
+                    tooltip::Position::Bottom,
+                ));
             }
             col = col.push(chips);
         }
@@ -285,12 +300,72 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
     } else {
         theme::TEXT_MUTED
     };
+    // Players line: each in-game tag with its start.gg entrant inline
+    // ("BRUJITA @Brujita vs LOOM @Loom") — one place for the association
+    // instead of a separate mapping section — and the WINNER's tag in green
+    // once the set is decided (same rule the station views use). A set with
+    // no games yet has no station-side players, so the bracket entrants
+    // stand alone.
+    let players_line: Element<'_, Message> = {
+        let entrant_of = |slot: i64| -> Option<String> {
+            r.get("slotEntrants")
+                .and_then(|v| v.as_array())
+                .and_then(|ss| {
+                    ss.iter()
+                        .find(|s| s.get("slot").and_then(|x| x.as_i64()) == Some(slot))
+                })
+                .and_then(|s| s.get("entrantName").and_then(|v| v.as_str()))
+                .map(str::to_string)
+        };
+        let complete = r
+            .pointer("/set/complete")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let winner_slot = r.pointer("/set/winnerSlot").and_then(|v| v.as_i64());
+        let mut players = r
+            .pointer("/set/players")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        players.sort_by_key(|p| p.get("slot").and_then(|s| s.as_i64()).unwrap_or(0));
+
+        if players.is_empty() {
+            text(format::hub_players_label(r))
+                .font(theme::FONT_BODY_BOLD)
+                .size(14)
+                .color(theme::TEXT_PRIMARY)
+                .into()
+        } else {
+            let mut line = row![].spacing(6).align_y(Alignment::Center);
+            for (i, p) in players.iter().enumerate() {
+                if i > 0 {
+                    line = line.push(text("vs").size(11).color(theme::TEXT_MUTED));
+                }
+                let slot = p.get("slot").and_then(|s| s.as_i64()).unwrap_or(0);
+                let tag = p.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                let won = complete && winner_slot == Some(slot);
+                line = line.push(
+                    text(tag.to_string())
+                        .font(theme::FONT_BODY_BOLD)
+                        .size(14)
+                        .color(if won { theme::TEXT_SUCCESS } else { theme::TEXT_PRIMARY }),
+                );
+                if let Some(ent) = entrant_of(slot) {
+                    line = line.push(
+                        text(format!("@{ent}")).size(11).color(theme::TEXT_MUTED),
+                    );
+                }
+            }
+            line.into()
+        }
+    };
+
     let mut head = row![
         container(text(station.to_string()).font(theme::FONT_BODY_BOLD).size(13).color(theme::TEXT_PRIMARY))
             .style(theme::panel)
             .padding([2, 8]),
         text(time_label).font(theme::FONT_MONO).size(12).color(time_color),
-        text(format::hub_players_label(r)).font(theme::FONT_BODY_BOLD).size(14).color(theme::TEXT_PRIMARY),
+        players_line,
         Space::new().width(Length::Fill),
     ]
     .spacing(10)
@@ -426,66 +501,24 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
         text("no games yet").size(11).color(theme::TEXT_MUTED).into()
     };
 
-    // The mapping block: one row per player, right-aligned, its COLOR
-    // carrying the match confidence (the web .oc-match tiers) — green when
-    // high, yellow when it's a low-confidence guess, muted when there's no
-    // match to speak of. A guess must never read as a confirmed fact.
-    let confidence = r
-        .get("confidence")
-        .and_then(|v| v.as_str())
-        .unwrap_or("none");
-    let tier_color = match confidence {
-        "high" => theme::TEXT_SUCCESS,
-        "low" => theme::TEXT_WARNING,
-        _ => theme::TEXT_MUTED,
-    };
-    let mapping: Element<'_, Message> =
-        if let Some(slots) = r.get("slotEntrants").and_then(|v| v.as_array()) {
-            let tag_of = |slot: i64| -> String {
-                r.pointer("/set/players")
-                    .and_then(|v| v.as_array())
-                    .and_then(|ps| {
-                        ps.iter()
-                            .find(|p| p.get("slot").and_then(|s| s.as_i64()) == Some(slot))
-                    })
-                    .and_then(|p| p.get("name").and_then(|n| n.as_str()))
-                    .unwrap_or("?")
-                    .to_string()
-            };
-            let mut rows = column![].spacing(1).align_x(Alignment::End);
-            for s in slots {
-                let slot = s.get("slot").and_then(|v| v.as_i64()).unwrap_or(0);
-                let ent = s.get("entrantName").and_then(|v| v.as_str()).unwrap_or("?");
-                rows = rows.push(
-                    row![
-                        text(tag_of(slot)).size(11).font(theme::FONT_BODY_BOLD).color(tier_color),
-                        text("→").size(11).color(theme::TEXT_MUTED),
-                        text(ent.to_string()).size(11).color(tier_color),
-                    ]
-                    .spacing(4)
-                    .align_y(Alignment::Center),
-                );
-            }
-            rows.into()
-        } else if reportable {
-            text("not matched to start.gg").size(11).color(theme::TEXT_MUTED).into()
-        } else {
-            text(
-                r.get("notReportableReason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("·")
-                    .to_string(),
-            )
-            .size(11)
-            .color(theme::TEXT_MUTED)
-            .into()
-        };
-
-    body = body.push(
-        row![strip, Space::new().width(Length::Fill), mapping]
-            .spacing(12)
-            .align_y(Alignment::Start),
-    );
+    // The tag→entrant association now lives inline on the players line (one
+    // "@entrant" per tag); the only thing worth a right-side note here is
+    // why a grey row can't be reported.
+    let mut detail = row![strip, Space::new().width(Length::Fill)]
+        .spacing(12)
+        .align_y(Alignment::Start);
+    if !reportable {
+        if let Some(reason) = r.get("notReportableReason").and_then(|v| v.as_str()) {
+            detail = detail.push(text(reason.to_string()).size(11).color(theme::TEXT_MUTED));
+        }
+    } else if r.get("slotEntrants").and_then(|v| v.as_array()).is_none()
+        && r.pointer("/set/players").and_then(|v| v.as_array()).is_some_and(|p| !p.is_empty())
+    {
+        detail = detail.push(
+            text("not matched to start.gg").size(11).color(theme::TEXT_MUTED),
+        );
+    }
+    body = body.push(detail);
 
     // Winner picker (inline, replaces the action row while open).
     if app.console.picker_for.as_deref() == Some(&key) {

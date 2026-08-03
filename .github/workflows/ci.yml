@@ -20,8 +20,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install
-      # vue-tsc typecheck + vite build
+      # vue-tsc typecheck + vite build (legacy Tauri UI, still in-tree)
       - run: pnpm build
       - run: pnpm lint
-      # every ported behavior test lives in station-core
-      - run: cargo test -p station-core
+      # every ported behavior test lives in station-core; station-app carries
+      # the engine-layer tests and — critically — proves the NATIVE app
+      # actually compiles, which the release workflow otherwise discovers
+      # only at packaging time (the src-tauri/src/lib.rs mishap).
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - run: cargo test -p station-core -p station-app
+      - run: cargo check -p station-app
+
+  # The README screenshots, rendered by the app itself on a virtual display.
+  # ICED_BACKEND=tiny-skia forces CPU rendering (no GPU on runners); xvfb
+  # provides the X server. Uploaded as an artifact so any PR that touches the
+  # UI can be eyeballed without checking out the branch.
+  screenshots:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config xvfb
+      - name: Render screenshots
+        run: xvfb-run -a env ICED_BACKEND=tiny-skia ./scripts/screenshots/native.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: docs/screenshots/*.png
+          retention-days: 14

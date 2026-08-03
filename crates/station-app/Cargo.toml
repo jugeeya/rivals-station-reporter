@@ -1,0 +1,36 @@
+[package]
+name = "station-app"
+version = "0.6.0"
+edition = "2021"
+description = "Rivals Station Reporter: native Iced UI over station-core (no webview)"
+
+[[bin]]
+name = "rivals-station-reporter"
+path = "src/main.rs"
+
+[dependencies]
+station-core = { path = "../station-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# `tokio` gives Task::perform an executor that can spawn_blocking the
+# hub/start.gg HTTP calls; `canvas` draws the background blooms and the
+# per-game character strips; `svg`/`image` cover icons and the tray art;
+# `advanced` unlocks the custom-widget API the themed dropdown needs;
+# `lazy` for responsive lists.
+iced = { version = "0.14", features = ["tokio", "canvas", "svg", "image", "advanced", "lazy"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+
+# Native pieces that used to be Tauri plugins:
+rfd = "0.15"          # file/dir pickers (plugin-dialog)
+auto-launch = "0.5"   # start-with-OS toggle (plugin-autostart)
+open = "5"            # open URLs in the default browser (plugin-opener)
+tray-icon = "0.21"    # tray + close-to-tray (tauri tray)
+dirs = "6"            # config dir resolution (app.path())
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+chrono = "0.4.45"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"   # embed the app icon into the .exe

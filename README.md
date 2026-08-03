@@ -33,46 +33,47 @@ and never touch the bracket.
 
 ## Screenshots
 
-Sample data below, not a live event: the operator console watching three
-stations at once, then one station through the three stages a set actually
-goes through (waiting, mid-set, just finished), then Settings open.
-Regenerate these with `pnpm screenshots` (see Development).
+Sample data below, not a live event — the NATIVE app (Iced), captured by the
+app itself: `./scripts/screenshots/native.sh` regenerates every image here
+(see Development).
+
+![First-run onboarding](docs/screenshots/onboarding.png)
+
+First run: pick what this PC is; everything else is auto-detected or
+validated inline.
 
 ![Operator console, three stations](docs/screenshots/operator-console.png)
 
 The operator console watching three stations at once: live sets grouped
-separately from finished-and-unreported ones, elapsed time against an
-absolute clock, best-of shown next to the score, a per-game character strip
-with the winner marked, and the tag-to-entrant mapping the hub would actually
-report, per player.
+separately from finished-and-unreported ones, elapsed time and best-of taken
+from start.gg's own data when present (station 1 reads 18m and "first to 4"
+from the bracket, not the station's local guess), a per-game character strip
+with each game's winner ringed, and the tag-to-entrant mapping the hub would
+actually report, per player.
 
-![Current Sets panel, open by default](docs/screenshots/available-sets.png)
+![Current Sets panel](docs/screenshots/available-sets.png)
 
 The Current Sets panel, below the console: everything start.gg's bracket
-shows happening right now, across the whole event, not just what this app's
-own stations report. Playing now (with elapsed time and best-of, the same
-way the console shows its own live sets) and startable (both entrants
-determined) are shown separately. A station can be assigned or changed for
-either group; for a startable set, picking one and clicking Start Match
-happens as a single action.
+shows happening right now, across the whole event. Playing now and startable
+sets are grouped separately, each with its own station AND stream picker (a
+set can sit at a station and on a stream at once); for a startable set,
+picking and clicking Start Match happens as a single action.
 
 ![Station, idle between sets](docs/screenshots/station-idle.png)
 
-A station between sets: health checks green, waiting for the next game, two
-finished sets already logged (one local, one online ladder game that's
-greyed out since it never reaches the bracket).
+A station between sets: health chips up top, waiting for the next game.
 
 ![Station, set in progress](docs/screenshots/station-live.png)
 
-A station mid-set: live score, both tags, current characters, and the
-online/ranked note when it applies.
+A station mid-set: live score, both tags, current characters, resolved
+start.gg handles, and earlier sets below (online ladder games greyed out —
+they never reach the bracket).
 
 ![Station, set just finished](docs/screenshots/station-finished.png)
 
-The same station right after a set ends: this is station 3's LOOM/KIM set
-from the operator screenshot above, seen from its own PC. A station only
-ever knows "this just finished"; whether it's still awaiting report is state
-the operator's hub tracks, not something a station has any way to know.
+The same station right after a set ends — station 3's LOOM/KIM set from the
+operator screenshot, seen from its own PC. A station only ever knows "this
+just finished"; awaiting-report status lives on the operator's hub.
 
 ![Settings drawer open](docs/screenshots/settings.png)
 
@@ -82,10 +83,25 @@ update checker, all editable without restarting.
 ## Install
 
 Grab the installer from the latest GitHub release (Windows NSIS `.exe`;
-macOS `.dmg`). First run walks through setup: pick what this PC is, paste the
-start.gg event link (it echoes back the tournament name so a wrong paste is
-caught immediately), enter the shared key from whoever runs the event — done.
-Save/replay paths are auto-detected.
+macOS `.dmg`; Linux/SteamOS `.AppImage` or `.deb`). First run walks through
+setup: pick what this PC is, paste the start.gg event link (it echoes back
+the tournament name so a wrong paste is caught immediately), enter the shared
+key from whoever runs the event — done. Save/replay paths are auto-detected.
+
+On Linux the app applies three WebKitGTK workarounds at startup, all
+override-able by setting the variable yourself before launching:
+
+- **AppImage helper paths** (`WEBKIT_EXEC_PATH`): the AppImage bundles
+  WebKit's helper processes, but WebKit looks for them at the Ubuntu build
+  machine's compiled-in path. On a distro with a different layout — SteamOS
+  in particular — they're never found, the web process never spawns, and the
+  app is a silent blank-white window. The app points WebKit at the bundled
+  helpers whenever it's running from an AppImage.
+- **DMA-BUF renderer off** (`WEBKIT_DISABLE_DMABUF_RENDERER=1`, all Linux):
+  fails silently on NVIDIA and some Wayland compositors, same blank-white
+  symptom.
+- **Accelerated compositing off** (`WEBKIT_DISABLE_COMPOSITING_MODE=1`,
+  SteamOS/gamescope only): fails separately against the Deck's stack.
 
 Closing the window sends the app to the tray; reporting keeps running.
 "Start with Windows" is in Settings.
@@ -97,12 +113,20 @@ once saved).
 ## Development
 
 ```sh
-pnpm install
-pnpm dev          # UI in a plain browser — a scripted fake tournament drives it
-pnpm tauri dev    # the real desktop app
+cargo run -p station-app     # the desktop app (native Iced UI, no webview)
 cargo test -p station-core   # every ported behavior test (matching, stats,
                              # set machine, hub, forwarder, startgg client)
+cargo test -p station-app    # engine-layer tests
+
+# Legacy Tauri/Vue UI (kept in-tree until the native port has run an event):
+pnpm install && pnpm dev     # Vue UI in a browser, scripted fake tournament
+pnpm tauri dev               # the old Tauri shell
 ```
+
+Dev tricks for the native app: `RSR_CONFIG_DIR=/tmp/profile` runs against a
+scratch profile instead of the real one, and `RSR_SCREENSHOT=out.png` renders
+the app, saves a screenshot after ~2s, and exits — a visual check that needs
+no eyes on the window.
 
 All logic lives in `crates/station-core` (no Tauri dependency) — 1:1 ports of
 the Python modules with their tests. `src-tauri` is a thin shell: an engine

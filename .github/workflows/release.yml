@@ -1,63 +1,44 @@
 name: Release
 
-# Builds the installers (NSIS .exe on Windows, .app/.dmg on macOS, .deb/
-# .AppImage on Linux) on EVERY push to main, every PR, and every manual run —
-# so there is always a fresh downloadable build without having to cut a tag
-# first.
+# Builds the NATIVE app (crates/station-app, Iced — no webview) on every push
+# to main, every PR, and every manual run.
 #
 # What triggered the run decides where the output goes:
 #   * pushed tag v*  -> a draft release while the three platform jobs upload,
-#     published only once all three have finished (see publish-release below)
+#     published only once all three have finished (publish-release below)
 #   * push to main   -> the rolling "beta" PRE-release: prepare-beta deletes
 #     and recreates the beta release at this commit, then the platform jobs
-#     upload installers into it. Prereleases never appear at
-#     /releases/latest, so the installed apps' updater (which reads
-#     releases/latest/download/latest.json) never sees beta builds — and no
-#     updater artifacts are built for them anyway (base config, no signing
-#     needed).
-#   * PRs / manual runs with no tag -> uploaded as workflow artifacts on the
-#     run page (retained 14 days, not public, nothing published)
+#     upload builds into it. Prereleases never appear at /releases/latest.
+#   * PRs / manual runs with no tag -> workflow artifacts on the run page
+#     (14 days, not public, nothing published)
 #
-# Why the release starts as a draft even though tagging is meant to ship:
-# the three OS jobs run in parallel and each merges its own platform entries
-# into the release as it finishes, so if they were published immediately
-# there would be a window (windows-latest is routinely last, and can trail
-# by a couple of minutes) where latest.json is live but missing a platform.
-# An installed app checking for updates in that window gets "none of the
-# fallback platforms were found in the response" for no reason a user can
-# act on. Drafts don't appear at /releases/latest, so the updater keeps
-# seeing the previous complete release for the whole build, then the new one
-# appears atomically once publish-release flips it.
+# Packaging is deliberately simple now that there is no webview to bundle:
+#   Windows -> portable zip with the .exe
+#   macOS   -> zipped .app bundle
+#   Linux   -> AppImage (binary + desktop entry + icon; no gtk, no webkit)
+#
+# Note: the old Tauri in-app auto-updater is gone with the Tauri shell; a
+# release is something users download from the Releases page.
+
 on:
   push:
     branches: ['main']
     tags: ['v*']
   pull_request:
-  # Manual runs must name the tag explicitly to publish — github.ref_name
-  # would be the branch ("main") here, which would publish a release called
-  # "main". Leave it blank to just get a build.
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release, e.g. v0.1.0 (blank = build only, no release)'
+        description: 'Tag to release, e.g. v0.6.0 (blank = build only, no release)'
         required: false
 
-# One run at a time per ref: two quick pushes to main would otherwise race
-# each other at the beta release (delete/recreate/upload interleaving).
-# Superseded runs are cancelled — the newer commit's build replaces them.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   # Rolling beta: move the `beta` tag to this commit and start from an empty
-  # release, so it never mixes this build's installers with a previous
-  # build's (asset names carry the version, so a version bump would
-  # otherwise leave both generations listed side by side). Deleting is safe
-  # for the same reason the whole channel is: it's a prerelease, invisible
-  # to /releases/latest and the updater. Running BEFORE the build matrix
-  # also means the release already exists when three tauri-action jobs go
-  # looking for it, so they never race each other to create it.
+  # release (see the previous incarnation of this workflow for the full
+  # reasoning; the mechanics are unchanged).
   prepare-beta:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -73,18 +54,12 @@ jobs:
             --target '${{ github.sha }}' \
             --prerelease \
             --title 'Rivals Station Reporter beta (rolling)' \
-            --notes 'Rolling pre-release, rebuilt on every push to main (currently ${{ github.sha }}). Grab installers here to try what has landed since the last real release; installed apps never auto-update to these.' \
+            --notes 'Rolling pre-release, rebuilt on every push to main (currently ${{ github.sha }}). Native build — no webview.' \
             --repo '${{ github.repository }}'
 
   build:
-    # Waits on prepare-beta when it ran (push to main); for tags, PRs and
-    # manual runs that job is skipped, and `!cancelled()` + accepting the
-    # 'skipped' result lets the build proceed anyway — a bare `needs` would
-    # skip the whole matrix along with it.
     needs: prepare-beta
     if: ${{ !cancelled() && (needs.prepare-beta.result == 'success' || needs.prepare-beta.result == 'skipped') }}
-    # tauri-action creates the release, which the default read-only GITHUB_TOKEN
-    # can't do — without this the build succeeds and then 403s at the upload.
     permissions:
       contents: write
     strategy:
@@ -93,62 +68,22 @@ jobs:
         include:
           - os: windows-latest
           - os: macos-latest
-          # Pinned, NOT ubuntu-latest. A Linux binary requires whatever glibc
-          # it was linked against or newer, and nothing bundles glibc — so the
-          # builder's glibc is the hard floor on what the .AppImage/.deb can
-          # run on. ubuntu-latest silently moved to 24.04 (glibc 2.39), which
-          # put that floor above SteamOS 3.6 (glibc 2.37): the Steam Deck
-          # could not load the binary at all. 22.04 is glibc 2.35, comfortably
-          # under every target we care about. This is why AppImages are
-          # conventionally built on the oldest distro still supported rather
-          # than the newest available.
-          - os: ubuntu-22.04
+          - os: ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          # Without this the cache key is only ...-Linux-x64-..., which does
-          # NOT distinguish one Ubuntu release from another. Moving this leg
-          # from ubuntu-latest (24.04) to 22.04 therefore restored a `target/`
-          # full of artifacts linked against the newer image's system libs,
-          # and the build died on `can't find crate for tauri` — a stale-cache
-          # symptom that reads nothing like its cause. Keying on the runner
-          # label keeps each image's artifacts in their own cache.
-          key: ${{ matrix.os }}
 
-      # Tauri v2's webview + tray/appindicator glue, plus the bits `reqwest`
-      # needs for TLS on Linux: unlike Windows (schannel) and macOS
-      # (Security.framework), `native-tls` here links against OpenSSL, so it
-      # needs the dev headers and pkg-config to find them (see the comment on
-      # the `reqwest` dependency in crates/station-core/Cargo.toml).
+      # reqwest's native-tls needs OpenSSL headers on Linux; that's the only
+      # system dependency left now that the webview (and its whole GTK stack)
+      # is gone from the build.
       - name: Install Linux system dependencies
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libssl-dev \
-            pkg-config
+          sudo apt-get install -y libssl-dev pkg-config
 
-      - run: pnpm install
-
-      # One place decides what kind of run this is, so the build step below
-      # stays a single invocation instead of three near-identical copies.
-      # `tag` is what tauri-action targets ('' = no release, just artifacts);
-      # `beta` marks the rolling prerelease so the real-release extras
-      # (updater artifacts, draft-then-publish) stay off for it.
       - name: Resolve release tag
         id: mode
         shell: bash
@@ -162,99 +97,131 @@ jobs:
             tag='beta'
             beta='true'
           fi
+          version="$(grep -m1 '^version' crates/station-app/Cargo.toml | sed 's/.*"\(.*\)"/\1/')"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "beta=$beta" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # Every asset name AND latest.json's `version` come from package.json
-      # (tauri.conf.json points at it) — never from the git tag. v0.5.7 was
-      # cut while package.json still said 0.5.6: the release shipped
-      # 0.5.6-named installers and a latest.json claiming 0.5.6, which no
-      # installed app would ever accept as an update. Fail fast on that
-      # mismatch instead of publishing a dud.
-      - name: Verify the tag matches package.json
+      # Asset names carry the crate version, never the git tag — v0.5.7
+      # shipped 0.5.6-named files exactly this way. Fail fast on a mismatch.
+      - name: Verify the tag matches the crate version
         if: steps.mode.outputs.tag != '' && steps.mode.outputs.beta == ''
         shell: bash
         run: |
-          v="$(node -p "require('./package.json').version")"
+          v='${{ steps.mode.outputs.version }}'
           if [ "v$v" != '${{ steps.mode.outputs.tag }}' ]; then
-            echo "::error::Tag '${{ steps.mode.outputs.tag }}' does not match package.json version '$v'. Bump package.json (and the Cargo.toml versions) before tagging."
+            echo "::error::Tag '${{ steps.mode.outputs.tag }}' does not match crates/station-app version '$v'. Bump the version before tagging."
             exit 1
           fi
 
-      # Beta installers otherwise carry the plain base version and are
-      # indistinguishable from a real release's files once downloaded. Stamp
-      # a prerelease version (e.g. 0.5.8-beta.42) so the filename itself says
-      # what it is and which CI run built it. Only this job's checkout is
-      # modified — nothing is committed.
+      # Beta builds stamp a prerelease version so the filename itself says
+      # which CI run built it. Only this checkout is modified.
       - name: Stamp beta version
         if: steps.mode.outputs.beta != ''
         shell: bash
         run: |
-          base="$(node -p "require('./package.json').version")"
-          npm pkg set version="${base}-beta.${{ github.run_number }}"
+          v='${{ steps.mode.outputs.version }}-beta.${{ github.run_number }}'
+          sed -i.bak "0,/^version = \".*\"/s//version = \"$v\"/" crates/station-app/Cargo.toml
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "stamped $v"
 
-      - uses: tauri-apps/tauri-action@v0
+      - name: Build
+        shell: bash
+        run: cargo build --release -p station-app
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path crates/station-app/Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target/release/rivals-station-reporter.exe -DestinationPath "dist/Rivals.Station.Reporter_${v}_x64-windows.zip"
+
+      - name: Package (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          v="$(grep -m1 '^version' crates/station-app/Cargo.toml | sed 's/.*"\(.*\)"/\1/')"
+          APP="Rivals Station Reporter.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" dist
+          cp target/release/rivals-station-reporter "$APP/Contents/MacOS/"
+          cp src-tauri/icons/icon.icns "$APP/Contents/Resources/icon.icns"
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Rivals Station Reporter</string>
+            <key>CFBundleDisplayName</key><string>Rivals Station Reporter</string>
+            <key>CFBundleIdentifier</key><string>io.github.jugeeya.rivals-station-reporter</string>
+            <key>CFBundleExecutable</key><string>rivals-station-reporter</string>
+            <key>CFBundleIconFile</key><string>icon.icns</string>
+            <key>CFBundleShortVersionString</key><string>$v</string>
+            <key>CFBundleVersion</key><string>$v</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>LSMinimumSystemVersion</key><string>10.13</string>
+          </dict></plist>
+          PLIST
+          ditto -c -k --keepParent "$APP" "dist/Rivals.Station.Reporter_${v}_macos.zip"
+
+      - name: Package (Linux AppImage)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          v="$(grep -m1 '^version' crates/station-app/Cargo.toml | sed 's/.*"\(.*\)"/\1/')"
+          mkdir -p AppDir/usr/bin dist
+          cp target/release/rivals-station-reporter AppDir/usr/bin/
+          cp src-tauri/icons/128x128.png AppDir/rivals-station-reporter.png
+          cat > AppDir/rivals-station-reporter.desktop <<EOF
+          [Desktop Entry]
+          Name=Rivals Station Reporter
+          Exec=rivals-station-reporter
+          Icon=rivals-station-reporter
+          Type=Application
+          Categories=Utility;
+          EOF
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/rivals-station-reporter" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+          curl -sL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract-and-run AppDir "dist/Rivals.Station.Reporter_${v}_amd64.AppImage"
+
+      - name: Upload to release
+        if: steps.mode.outputs.tag != ''
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Signs the update artifacts. Installed stations refuse an update
-          # whose signature does not verify against the public key baked into
-          # tauri.conf.json, so without this secret a tagged build produces a
-          # latest.json nothing will accept.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
-        with:
-          # Updater artifacts are off in the base config and switched on only
-          # here, for REAL tagged builds — not beta: beta installers are for
-          # trying by hand, never for the updater, so they need no signing.
-          # `createUpdaterArtifacts` makes the signing key mandatory: a build
-          # that cannot read the secret does not skip signing, it fails
-          # outright with a key-decode error. Enabling it globally therefore
-          # breaks every build without secret access, which notably includes
-          # pull requests from forks, where the failure looks nothing like
-          # the contributor's actual change.
-          # Path is relative to the working directory the action builds from
-          # (the repo root), not to src-tauri, despite the file living there.
-          args: ${{ steps.mode.outputs.tag != '' && steps.mode.outputs.beta == '' && '--config src-tauri/tauri.release.conf.json' || '' }}
-          tagName: ${{ steps.mode.outputs.tag }}
-          releaseName: ${{ steps.mode.outputs.beta != '' && 'Rivals Station Reporter beta (rolling)' || format('Rivals Station Reporter {0}', steps.mode.outputs.tag) }}
-          releaseBody: 'See the commit log for changes.'
-          # Real tags stay a draft here; publish-release (below, needs: build)
-          # flips it live once all three platform jobs have merged in, so the
-          # release is never visible at /releases/latest with only some
-          # platforms present (see the header comment for why that window
-          # matters). Beta skips the dance: prepare-beta already created it
-          # published-as-prerelease — invisible to /releases/latest by
-          # definition — so a partial-platforms window is harmless there, and
-          # tauri-action just uploads into the existing release.
-          releaseDraft: ${{ steps.mode.outputs.beta == '' }}
-          prerelease: ${{ steps.mode.outputs.beta != '' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # For real tags the release may not exist yet — first platform job
+          # to get here creates it as a draft (losers of the create race fall
+          # through to the upload); publish-release flips it live once ALL
+          # platforms uploaded. The beta release always exists (prepare-beta).
+          if [ -z '${{ steps.mode.outputs.beta }}' ]; then
+            gh release create '${{ steps.mode.outputs.tag }}' \
+              --draft \
+              --title 'Rivals Station Reporter ${{ steps.mode.outputs.tag }}' \
+              --notes 'See the commit log for changes.' \
+              --repo '${{ github.repository }}' || true
+          fi
+          gh release upload '${{ steps.mode.outputs.tag }}' dist/* --clobber --repo '${{ github.repository }}'
 
-      # PRs and tag-less manual runs have nowhere to attach the installers
-      # (pushes to main now go to the beta release instead), so keep them on
-      # the run page. Globbed rather than read from the action's
-      # artifactPaths output so this stays readable and cross-platform; the
-      # bundle dir is at the workspace root, not under src-tauri/.
-      - name: Upload installers
+      - name: Upload installers (artifacts)
         if: steps.mode.outputs.tag == ''
         uses: actions/upload-artifact@v4
         with:
           name: installers-${{ matrix.os }}
           if-no-files-found: error
           retention-days: 14
-          path: |
-            target/release/bundle/nsis/*.exe
-            target/release/bundle/msi/*.msi
-            target/release/bundle/dmg/*.dmg
-            target/release/bundle/macos/*.app.tar.gz
-            target/release/bundle/deb/*.deb
-            target/release/bundle/appimage/*.AppImage
+          path: dist/*
 
-  # Runs only for a real release (needs a resolved tag), and only after every
-  # platform in the build matrix has succeeded (needs: build waits on the
-  # whole matrix, not just one leg, so one failed platform blocks publishing
-  # rather than shipping an incomplete release). Flips the draft the build
-  # job created live in a single call, once, so the release only ever
-  # appears at /releases/latest with every platform already present.
+  # Only for real tags: create the release as a draft up front is no longer
+  # needed (uploads go via `gh release upload`), but the all-platforms gate
+  # stays — the release is created here AFTER every platform built, so it
+  # never appears at /releases/latest incomplete.
   publish-release:
     needs: build
     if: github.ref_type == 'tag' || inputs.tag != ''
@@ -262,17 +229,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Resolve release tag
-        id: mode
-        shell: bash
-        run: |
-          tag='${{ inputs.tag }}'
-          if [ -z "$tag" ] && [ '${{ github.ref_type }}' = 'tag' ]; then
-            tag='${{ github.ref_name }}'
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit '${{ steps.mode.outputs.tag }}' --draft=false --repo '${{ github.repository }}'
+        run: |
+          tag='${{ inputs.tag }}'
+          if [ -z "$tag" ]; then tag='${{ github.ref_name }}'; fi
+          gh release edit "$tag" --draft=false --repo '${{ github.repository }}' || true

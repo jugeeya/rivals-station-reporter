@@ -57,9 +57,34 @@ jobs:
             --notes 'Rolling pre-release, rebuilt on every push to main (currently ${{ github.sha }}). Native build — no webview.' \
             --repo '${{ github.repository }}'
 
+  # Real tags: create the draft release ONCE before the matrix fans out.
+  # Three parallel `gh release create || true` calls each minted a fresh
+  # draft (drafts are NOT unique per tag), littering the Releases page with
+  # empty duplicates — v0.6.0 shipped with two of them.
+  prepare-release:
+    if: github.ref_type == 'tag' || inputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag='${{ inputs.tag }}'
+          if [ -z "$tag" ]; then tag='${{ github.ref_name }}'; fi
+          gh release view "$tag" --repo '${{ github.repository }}' >/dev/null 2>&1 || \
+          gh release create "$tag" --draft \
+            --title "Rivals Station Reporter $tag" \
+            --notes 'See the commit log for changes.' \
+            --repo '${{ github.repository }}'
+
   build:
-    needs: prepare-beta
-    if: ${{ !cancelled() && (needs.prepare-beta.result == 'success' || needs.prepare-beta.result == 'skipped') }}
+    needs: [prepare-beta, prepare-release]
+    if: >-
+      ${{ !cancelled()
+          && (needs.prepare-beta.result == 'success' || needs.prepare-beta.result == 'skipped')
+          && (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') }}
     permissions:
       contents: write
     strategy:
@@ -203,17 +228,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # For real tags the release may not exist yet — first platform job
-          # to get here creates it as a draft (losers of the create race fall
-          # through to the upload); publish-release flips it live once ALL
-          # platforms uploaded. The beta release always exists (prepare-beta).
-          if [ -z '${{ steps.mode.outputs.beta }}' ]; then
-            gh release create '${{ steps.mode.outputs.tag }}' \
-              --draft \
-              --title 'Rivals Station Reporter ${{ steps.mode.outputs.tag }}' \
-              --notes 'See the commit log for changes.' \
-              --repo '${{ github.repository }}' || true
-          fi
+          # The release always exists by now: prepare-beta made the rolling
+          # one, prepare-release made the tag's draft. This job only uploads.
           gh release upload '${{ steps.mode.outputs.tag }}' dist/* --clobber --repo '${{ github.repository }}'
 
       - name: Upload installers (artifacts)

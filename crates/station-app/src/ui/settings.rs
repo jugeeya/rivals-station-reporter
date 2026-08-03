@@ -204,7 +204,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             let cfg = Config {
                 mode: s.mode.clone(),
                 station: s.station.trim().parse().unwrap_or(1),
-                slug: s.slug.trim().to_string(),
+                // Accept a full start.gg URL here too — saved as the bare
+                // slug the API actually wants.
+                slug: station_core::forwarder::normalize_slug(s.slug.trim()),
                 broker: s.broker.trim().to_string(),
                 key: s.key.trim().to_string(),
                 startgg_token: s.token.trim().to_string(),

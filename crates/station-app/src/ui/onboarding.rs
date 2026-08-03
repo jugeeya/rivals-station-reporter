@@ -158,7 +158,23 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             let cfg = Config {
                 mode: ob.mode.as_str().to_string(),
                 station: ob.station.trim().parse().unwrap_or(1),
-                slug: ob.event_info.as_ref().map(|e| e.slug.clone()).unwrap_or_default(),
+                // A pasted URL must survive even when the user never pressed
+                // Check (or the echo failed on venue wifi): fall back to
+                // normalizing the raw URL instead of silently dropping it —
+                // which left operators staring at an empty bracket panel.
+                slug: ob
+                    .event_info
+                    .as_ref()
+                    .map(|e| e.slug.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        let raw = ob.event_url.trim();
+                        if raw.is_empty() {
+                            String::new()
+                        } else {
+                            station_core::forwarder::normalize_slug(raw)
+                        }
+                    }),
                 broker: if ob.broker.trim().is_empty() {
                     app.st.config.broker.clone()
                 } else {

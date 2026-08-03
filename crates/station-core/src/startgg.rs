@@ -486,6 +486,15 @@ impl Startgg {
     /// numbering already uses.
     pub fn available_sets(&self, slug: &str) -> Result<Value, StartggError> {
         let data = self.gql_all_set_pages(AVAILABLE_SETS_QUERY, slug)?;
+        // An unknown slug is NOT an empty bracket: start.gg answers a bad
+        // slug with `event: null`, and parsing that as zero sets showed a
+        // misconfigured operator "Nothing happening on the bracket right
+        // now" instead of the actual problem.
+        if data.get("event").map(|e| e.is_null()).unwrap_or(true) {
+            return Err(StartggError(format!(
+                "start.gg has no event at \"{slug}\" — check the event link in Settings"
+            )));
+        }
         Ok(parse_available_sets(&data))
     }
 

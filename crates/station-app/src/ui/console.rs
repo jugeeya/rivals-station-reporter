@@ -132,7 +132,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 chips = chips.push(
                     container(
                         row![
-                            text(format!("Stn {n}")).size(11).color(theme::TEXT_PRIMARY),
+                            text(format!("Stn {n}")).font(theme::FONT_BODY_SEMIBOLD).size(11).color(theme::TEXT_PRIMARY),
                             text(state).size(11).color(theme::TEXT_MUTED),
                         ]
                         .spacing(6),
@@ -286,11 +286,11 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
         theme::TEXT_MUTED
     };
     let mut head = row![
-        container(text(station.to_string()).size(13).color(theme::TEXT_PRIMARY))
+        container(text(station.to_string()).font(theme::FONT_BODY_BOLD).size(13).color(theme::TEXT_PRIMARY))
             .style(theme::panel)
             .padding([2, 8]),
         text(time_label).font(theme::FONT_MONO).size(12).color(time_color),
-        text(format::hub_players_label(r)).font(theme::FONT_BODY_MEDIUM).size(14).color(theme::TEXT_PRIMARY),
+        text(format::hub_players_label(r)).font(theme::FONT_BODY_BOLD).size(14).color(theme::TEXT_PRIMARY),
         Space::new().width(Length::Fill),
     ]
     .spacing(10)
@@ -458,7 +458,7 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
                 let ent = s.get("entrantName").and_then(|v| v.as_str()).unwrap_or("?");
                 rows = rows.push(
                     row![
-                        text(tag_of(slot)).size(11).font(theme::FONT_BODY_SEMIBOLD).color(tier_color),
+                        text(tag_of(slot)).size(11).font(theme::FONT_BODY_BOLD).color(tier_color),
                         text("→").size(11).color(theme::TEXT_MUTED),
                         text(ent.to_string()).size(11).color(tier_color),
                     ]

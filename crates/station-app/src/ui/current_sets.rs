@@ -319,7 +319,7 @@ fn set_row<'a>(app: &'a App, s: &'a AvailableSet, playing: bool) -> Element<'a, 
         .size(12)
         .color(theme::TEXT_MUTED)
         .width(Length::Fixed(150.0)),
-        text(s.players_label()).font(theme::FONT_BODY_MEDIUM).size(13).color(theme::TEXT_PRIMARY),
+        text(s.players_label()).font(theme::FONT_BODY_BOLD).size(13).color(theme::TEXT_PRIMARY),
         Space::new().width(Length::Fill),
     ]
     .spacing(10)

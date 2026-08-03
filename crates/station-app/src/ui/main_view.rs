@@ -406,6 +406,7 @@ fn station_sets(app: &App) -> Element<'_, Message> {
             // and green would overstate it.
             players = players.push(
                 text(p.tag.clone())
+                    .font(theme::FONT_BODY_BOLD)
                     .size(13)
                     .color(if p.won && reportable {
                         theme::TEXT_SUCCESS

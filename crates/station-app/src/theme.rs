@@ -65,14 +65,19 @@ pub const FONT_BODY_SEMIBOLD: iced::Font = iced::Font {
     weight: Weight::Semibold,
     ..iced::Font::with_name("Inter")
 };
+pub const FONT_BODY_BOLD: iced::Font = iced::Font {
+    weight: Weight::Bold,
+    ..iced::Font::with_name("Inter")
+};
 pub const FONT_MONO: iced::Font = iced::Font::with_name("Ubuntu Sans Mono");
 
-pub const FONT_BYTES: [&[u8]; 6] = [
+pub const FONT_BYTES: [&[u8]; 7] = [
     include_bytes!("../assets/fonts/SpaceGrotesk-Medium.ttf"),
     include_bytes!("../assets/fonts/SpaceGrotesk-Bold.ttf"),
     include_bytes!("../assets/fonts/Inter-Regular.ttf"),
     include_bytes!("../assets/fonts/Inter-Medium.ttf"),
     include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/Inter-Bold.ttf"),
     include_bytes!("../assets/fonts/UbuntuSansMono-Regular.ttf"),
 ];
 

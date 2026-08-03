@@ -30,7 +30,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config xvfb
+      # libxkbcommon-x11 is winit's keyboard glue under X11 — not preinstalled
+      # on the runner, and it panics at startup without it.
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config xvfb libxkbcommon-x11-0
       # `bash` explicitly: the web-UI upload path drops the executable bit,
       # and the script shouldn't depend on a mode bit to run anyway.
       - name: Render screenshots

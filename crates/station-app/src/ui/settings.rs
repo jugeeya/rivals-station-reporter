@@ -121,6 +121,32 @@ impl State {
 }
 
 pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
+    // Handled before the drawer borrow: a successful save closes the drawer
+    // AND immediately refreshes Current Sets for an operator — the engine
+    // rebuild is wake-driven now, but the panel's own 20s cycle would still
+    // sit on stale (or stale-empty) bracket data for its full period. The
+    // 300ms grace lets the hub finish rebuilding before the query lands.
+    if let Msg::Saved(r) = msg {
+        let Some(s) = app.settings.as_mut() else {
+            return Task::none();
+        };
+        s.saving = false;
+        match r {
+            Ok(()) => {
+                let was_operator = s.mode != "station";
+                app.settings = None;
+                if was_operator {
+                    return Task::perform(
+                        tokio::time::sleep(std::time::Duration::from_millis(300)),
+                        |_| Message::SetsAutoRefresh,
+                    );
+                }
+            }
+            Err(e) => s.err = e,
+        }
+        return Task::none();
+    }
+
     let Some(s) = app.settings.as_mut() else {
         return Task::none();
     };
@@ -225,13 +251,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 |r| Message::Settings(Msg::Saved(r)),
             );
         }
-        Msg::Saved(r) => {
-            s.saving = false;
-            match r {
-                Ok(()) => app.settings = None,
-                Err(e) => s.err = e,
-            }
-        }
+        // Saved is handled above, before the drawer borrow.
+        Msg::Saved(_) => unreachable!("handled before the match"),
         Msg::CheckUpdate => {
             s.update = UpdateFlow::Checking;
             return Task::perform(blocking(super::updater::check), |r| {

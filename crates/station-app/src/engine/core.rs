@@ -58,6 +58,10 @@ pub struct EngineInner {
     pub config_dir: PathBuf,
     pub cfg: Mutex<Config>,
     rebuild: AtomicBool,
+    /// Pokes the loop thread awake so a config save applies NOW instead of
+    /// after the current poll sleep runs out (the wake is the sender half;
+    /// the loop parks in `recv_timeout` on the other end).
+    rebuild_wake: Mutex<std::sync::mpsc::Sender<()>>,
     status: Mutex<Value>, // {msg, error, t}
     log: Mutex<VecDeque<String>>,
     snapshot: Mutex<Value>,     // station producer snapshot {history, live}
@@ -339,6 +343,7 @@ impl EngineInner {
 
     pub fn request_rebuild(&self) {
         self.rebuild.store(true, Ordering::SeqCst);
+        let _ = self.rebuild_wake.lock().unwrap().send(());
     }
 
     /// Dev/screenshot hook: overwrite the station snapshot and/or hub
@@ -565,11 +570,13 @@ pub fn start(config_dir: PathBuf) -> Engine {
     // Disk-only, never the network (see `TagDb::load`) — safe to run inline
     // here rather than deferring it into the loop thread below.
     let tagdb = TagDb::load(&config_dir);
+    let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
     let inner = Arc::new(EngineInner {
         emitter: Mutex::new(None),
         config_dir,
         cfg: Mutex::new(cfg),
         rebuild: AtomicBool::new(true),
+        rebuild_wake: Mutex::new(wake_tx),
         status: Mutex::new(
             json!({ "msg": "starting…", "error": false, "t": station_core::now_sec() }),
         ),
@@ -639,7 +646,12 @@ pub fn start(config_dir: PathBuf) -> Engine {
             // must not be able to kill this thread — the window would stay up
             // while watching/forwarding silently stopped forever.
             let poll = loop_inner.cfg.lock().unwrap().poll.max(0.5).min(60.0);
-            std::thread::sleep(std::time::Duration::from_secs_f64(poll));
+            // Parks for one poll interval OR until request_rebuild pokes the
+            // wake channel — a settings save takes effect in milliseconds
+            // instead of "whenever the sleep ends". A closed channel can't
+            // happen (the sender lives inside EngineInner), but if it ever
+            // did, timing out is the correct degraded behavior anyway.
+            let _ = wake_rx.recv_timeout(std::time::Duration::from_secs_f64(poll));
         }
     });
 

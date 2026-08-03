@@ -47,14 +47,29 @@ pub struct State {
     gen: u64,
 }
 
+// Picker values carry their own kind ("Station 2" / "Stream: socalrivals" —
+// the labels the old combined dropdown used), so a closed picker never reads
+// as a bare, ambiguous "2" or "socalrivals" next to its sibling.
+fn station_key(n: i64) -> String {
+    format!("Station {n}")
+}
+
+fn stream_key(name: &str) -> String {
+    format!("Stream: {name}")
+}
+
 fn current_station_key(s: &AvailableSet) -> String {
     s.station
-        .map(|n| n.to_string())
+        .map(station_key)
         .unwrap_or_else(|| NONE_STATION.to_string())
 }
 
 fn current_stream_key(s: &AvailableSet) -> String {
-    s.stream.clone().filter(|v| !v.is_empty()).unwrap_or_else(|| NONE_STREAM.to_string())
+    s.stream
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .map(stream_key)
+        .unwrap_or_else(|| NONE_STREAM.to_string())
 }
 
 impl State {
@@ -63,13 +78,13 @@ impl State {
         let st = self
             .picked_station
             .get(&k)
-            .filter(|v| v.as_str() != NONE_STATION)
+            .and_then(|v| v.strip_prefix("Station "))
             .and_then(|v| v.parse::<i64>().ok());
         let sm = self
             .picked_stream
             .get(&k)
-            .filter(|v| v.as_str() != NONE_STREAM)
-            .cloned();
+            .and_then(|v| v.strip_prefix("Stream: "))
+            .map(str::to_string);
         (st, sm)
     }
 
@@ -341,7 +356,7 @@ fn set_row<'a>(app: &'a App, s: &'a AvailableSet, playing: bool) -> Element<'a, 
 
     // Station picker.
     let mut station_opts: Vec<String> = vec![NONE_STATION.to_string()];
-    station_opts.extend(cs.data.stations.iter().map(|st| st.number.to_string()));
+    station_opts.extend(cs.data.stations.iter().map(|st| station_key(st.number)));
     let picked_st = cs
         .picked_station
         .get(&k)
@@ -361,7 +376,7 @@ fn set_row<'a>(app: &'a App, s: &'a AvailableSet, playing: bool) -> Element<'a, 
     // Stream picker — only when the tournament has stream setups.
     if !cs.data.streams.is_empty() {
         let mut stream_opts: Vec<String> = vec![NONE_STREAM.to_string()];
-        stream_opts.extend(cs.data.streams.iter().map(|st| st.name.clone()));
+        stream_opts.extend(cs.data.streams.iter().map(|st| stream_key(&st.name)));
         let picked_sm = cs
             .picked_stream
             .get(&k)

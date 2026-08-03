@@ -330,11 +330,36 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
         players.sort_by_key(|p| p.get("slot").and_then(|s| s.as_i64()).unwrap_or(0));
 
         if players.is_empty() {
-            text(format::hub_players_label(r))
-                .font(theme::FONT_BODY_BOLD)
-                .size(14)
-                .color(theme::TEXT_PRIMARY)
-                .into()
+            // No games yet: the bracket entrants stand alone — styled the
+            // same as the tagged path (muted "vs"), not one flat string.
+            let entrants: Vec<String> = r
+                .get("entrants")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                .collect();
+            if entrants.is_empty() {
+                text(format::hub_players_label(r))
+                    .font(theme::FONT_BODY_BOLD)
+                    .size(14)
+                    .color(theme::TEXT_PRIMARY)
+                    .into()
+            } else {
+                let mut line = row![].spacing(6).align_y(Alignment::Center);
+                for (i, name) in entrants.iter().enumerate() {
+                    if i > 0 {
+                        line = line.push(text("vs").size(11).color(theme::TEXT_MUTED));
+                    }
+                    line = line.push(
+                        text(name.clone())
+                            .font(theme::FONT_BODY_BOLD)
+                            .size(14)
+                            .color(theme::TEXT_PRIMARY),
+                    );
+                }
+                line.into()
+            }
         } else {
             let mut line = row![].spacing(6).align_y(Alignment::Center);
             for (i, p) in players.iter().enumerate() {

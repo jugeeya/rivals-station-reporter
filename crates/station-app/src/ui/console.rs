@@ -21,7 +21,13 @@ pub enum Msg {
     /// stand-in for the old confirm dialog, one fewer window).
     AskDelete(String),
     Delete { station: i64, set_id: String },
-    Done(Result<String, String>),
+    Done {
+        result: Result<String, String>,
+        /// True when the action changed the bracket itself (a report):
+        /// Current Sets refreshes right after instead of waiting out its
+        /// 20s cycle with the just-finished set still listed as playing.
+        bracket_changed: bool,
+    },
     ToggleOther,
 }
 
@@ -57,7 +63,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     crate::engine::commands::report_winner(&engine, station, &set_id, &winner)
                         .map(|_| "Reported to start.gg.".to_string())
                 }),
-                |r| Message::Console(Msg::Done(r)),
+                |r| Message::Console(Msg::Done { result: r, bracket_changed: true }),
             );
         }
         Msg::Swap { station, set_id } => {
@@ -69,7 +75,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     crate::engine::commands::swap_players(&engine, station, &set_id)
                         .map(|_| "Players switched. Remembered for future sets.".to_string())
                 }),
-                |r| Message::Console(Msg::Done(r)),
+                |r| Message::Console(Msg::Done { result: r, bracket_changed: false }),
             );
         }
         Msg::Delete { station, set_id } => {
@@ -82,16 +88,25 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     crate::engine::commands::delete_set(&engine, station, &set_id)
                         .map(|_| "Set deleted.".to_string())
                 }),
-                |r| Message::Console(Msg::Done(r)),
+                |r| Message::Console(Msg::Done { result: r, bracket_changed: false }),
             );
         }
-        Msg::Done(r) => {
+        Msg::Done { result, bracket_changed } => {
             c.busy = false;
             c.picker_for = None;
-            match r {
+            match result {
                 Ok(m) => {
                     c.action_msg = m;
                     c.action_err = false;
+                    if bracket_changed {
+                        // Grace period for start.gg to settle the new set
+                        // state before re-reading; the 20s cycle cleans up
+                        // any eventual-consistency stragglers.
+                        return Task::perform(
+                            tokio::time::sleep(std::time::Duration::from_millis(800)),
+                            |_| Message::SetsAutoRefresh,
+                        );
+                    }
                 }
                 Err(e) => {
                     c.action_msg = e;

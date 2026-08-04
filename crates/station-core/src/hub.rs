@@ -287,11 +287,16 @@ fn slot_entrants(
     summary: &Value,
     entrants: Option<&Value>,
     tag_map: &HashMap<String, String>,
+    swap: bool,
 ) -> Value {
     let Some(entrants) = entrants.filter(|e| truthy(Some(e))) else {
         return Value::Null;
     };
-    let probe = json!({ "set": summary, "entrants": entrants });
+    // `swap` must ride on the probe: map_slots_to_entrants inverts on it, and
+    // this stored view is what the console renders — an operator's swap that
+    // flips the REAL report mapping but not the displayed one shows the
+    // backwards pairing as if the correction never happened.
+    let probe = json!({ "set": summary, "entrants": entrants, "swap": swap });
     let Some(map) = matching::map_slots_to_entrants(&probe, None, Some(tag_map)) else {
         return Value::Null;
     };
@@ -729,6 +734,9 @@ impl Hub {
         } else if !truthy(Some(&sg)) {
             reason = Some("no start.gg set at this station".to_string());
         }
+        // The operator's swap survives rebuilds, so the displayed mapping
+        // below must be computed under it too.
+        let swap = truthy(prev.get("swap"));
         let mut rec = json!({
             "id": st.get("setId"),
             "station": station,
@@ -740,7 +748,7 @@ impl Hub {
             "candidateWinnerEntrantId": cand,
             "confidence": wm.confidence,
             "status": if prev["status"] == *"reported" { "reported" } else { status },
-            "swap": prev.get("swap").cloned().unwrap_or(json!(false)),
+            "swap": json!(swap),
             "mode": st.get("mode"),
             "startggState": sg.get("state"),
             // start.gg's authoritative versions of the station's own
@@ -759,7 +767,7 @@ impl Hub {
             // even though the pairing is already known here. Same call the
             // report path uses, so what the operator sees is what would be
             // sent.
-            "slotEntrants": slot_entrants(&summary, sg.get("entrants"), &s.tag_map),
+            "slotEntrants": slot_entrants(&summary, sg.get("entrants"), &s.tag_map, swap),
         });
         // Not a tournament game, or the match isn't underway yet: keep the
         // record (the operator still wants to see it) but don't let it borrow
@@ -1561,7 +1569,17 @@ impl Hub {
                 Some(r) => r,
                 None => return Err((json!({"error": "Set not found."}), 404)),
             };
-            rec["swap"] = json!(!truthy(rec.get("swap")));
+            let now_swapped = !truthy(rec.get("swap"));
+            rec["swap"] = json!(now_swapped);
+            // The stored display mapping must flip WITH the flag — the report
+            // path computes its mapping fresh (and honors swap), but the
+            // console renders this stored view, and leaving it stale showed
+            // the backwards pairing as if the swap never happened.
+            {
+                let summary = rec.get("set").cloned().unwrap_or_else(|| json!({}));
+                rec["slotEntrants"] =
+                    slot_entrants(&summary, rec.get("entrants"), &s.tag_map, now_swapped);
+            }
             if truthy(rec.get("candidateWinnerEntrantId")) {
                 let ents = rec.get("entrants").cloned().unwrap_or_else(|| json!([]));
                 if let Some(arr) = ents.as_array().filter(|a| a.len() == 2) {
@@ -2008,7 +2026,7 @@ mod tests {
         let entrants = json!([{"id": "E3", "name": "Brujita"}, {"id": "E1", "name": "jugeeya"}]);
         let tag_map = matching::build_tag_map(Some(&json!({"JUGZ!": "jugeeya"})));
 
-        let got = slot_entrants(&summary, Some(&entrants), &tag_map);
+        let got = slot_entrants(&summary, Some(&entrants), &tag_map, false);
         assert_eq!(
             got,
             json!([
@@ -2025,10 +2043,39 @@ mod tests {
     fn slot_entrants_are_null_without_entrants() {
         let summary = json!({"players": [{"slot": 0, "name": "A"}, {"slot": 1, "name": "B"}]});
         let tag_map = HashMap::new();
-        assert_eq!(slot_entrants(&summary, None, &tag_map), Value::Null);
+        assert_eq!(slot_entrants(&summary, None, &tag_map, false), Value::Null);
         assert_eq!(
-            slot_entrants(&summary, Some(&json!([])), &tag_map),
+            slot_entrants(&summary, Some(&json!([])), &tag_map, false),
             Value::Null
+        );
+    }
+
+    /// The operator's swap must flip the STORED display mapping, not just the
+    /// fresh mapping the report path computes — a stale slotEntrants showed
+    /// the backwards pairing in the console as if the swap never happened.
+    #[test]
+    fn do_swap_flips_the_stored_slot_entrants() {
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        h.handle_current(SLUG, 1, Some(&json!({"state": "set_start"})))
+            .unwrap();
+        h.handle_ingest(SLUG, 1, &with(real_set(), &[("setId", json!("SWAPUI"))]))
+            .unwrap();
+        let before = h.get_set(SLUG, 1, &json!("SWAPUI")).unwrap();
+        let before_first = before["slotEntrants"][0]["entrantName"].clone();
+        assert!(!before_first.is_null(), "mapping resolved before the swap");
+
+        h.do_swap(SLUG, 1, &json!("SWAPUI")).unwrap();
+        let after = h.get_set(SLUG, 1, &json!("SWAPUI")).unwrap();
+        assert_eq!(
+            after["slotEntrants"][0]["entrantName"], before["slotEntrants"][1]["entrantName"],
+            "slot 0 now shows the entrant slot 1 had  [{after}]"
+        );
+        assert_eq!(
+            after["slotEntrants"][1]["entrantName"], before_first,
+            "and vice versa"
         );
     }
 

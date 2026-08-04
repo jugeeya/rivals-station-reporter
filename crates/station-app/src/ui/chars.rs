@@ -28,6 +28,7 @@ fn table() -> &'static HashMap<&'static str, image::Handle> {
             "fleet",
             "forsburn",
             "galvan",
+            "gouie",
             "kragg",
             "la-reina",
             "loxodont",

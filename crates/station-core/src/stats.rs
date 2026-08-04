@@ -37,13 +37,14 @@ pub const SYNTHETIC: [&str; 2] = ["ALL TAGS", "CUM"];
 
 /// The save/replays store characters as the first 3 letters of the
 /// ImmutableName (verified against the game pak's Characters/<Name>/ folders).
-pub const CHARACTERS: [(&str, &str); 17] = [
+pub const CHARACTERS: [(&str, &str); 18] = [
     ("Abs", "Absa"),
     ("Cla", "Clairen"),
     ("Eta", "Etalus"),
     ("Fle", "Fleet"),
     ("For", "Forsburn"),
     ("Gal", "Galvan"),
+    ("Gou", "Gouie"),
     ("Kra", "Kragg"),
     ("Lar", "La Reina"),
     ("Lox", "Loxodont"),

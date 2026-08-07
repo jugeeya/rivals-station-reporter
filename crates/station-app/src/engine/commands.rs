@@ -117,3 +117,39 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
 pub fn get_autostart() -> Result<bool, String> {
     launcher()?.is_enabled().map_err(|e| e.to_string())
 }
+
+// ---- learned tags ---------------------------------------------------------------
+// The hub's remembered tag -> entrant corrections (learned-tags.json, flat
+// object; see hub.rs's learn_aliases). Exposed so a wrong correction can be
+// forgotten from Settings instead of hand-editing JSON on the operator PC.
+
+pub fn learned_tags(engine: &Arc<EngineInner>) -> Vec<(String, String)> {
+    let path = engine.config_dir.join("learned-tags.json");
+    let map: serde_json::Map<String, Value> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let mut out: Vec<(String, String)> = map
+        .into_iter()
+        .map(|(tag, v)| (tag, v.as_str().unwrap_or_default().to_string()))
+        .collect();
+    out.sort();
+    out
+}
+
+pub fn forget_learned_tag(engine: &Arc<EngineInner>, tag: &str) -> Result<(), String> {
+    let path = engine.config_dir.join("learned-tags.json");
+    let mut map: serde_json::Map<String, Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    map.remove(tag);
+    let tmp = path.with_extension("json.tmp");
+    let body = serde_json::to_string_pretty(&Value::Object(map)).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    // The running hub keeps its own in-memory copy; a rebuild (instant now)
+    // reloads from disk so the forgotten pairing stops applying immediately.
+    engine.request_rebuild();
+    Ok(())
+}

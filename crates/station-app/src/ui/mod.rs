@@ -157,7 +157,7 @@ impl App {
             }
         }
         match std::env::var("RSR_OPEN").as_deref() {
-            Ok("settings") => app.settings = Some(settings::State::new(&app.st.config)),
+            Ok("settings") => app.settings = Some(settings::State::new(&app.st.config, &app.engine)),
             Ok("log") => app.show_log = true,
             _ => {}
         }
@@ -219,7 +219,7 @@ impl App {
             Message::Sets(msg) => current_sets::update(self, msg),
             Message::Settings(msg) => settings::update(self, msg),
             Message::OpenSettings => {
-                self.settings = Some(settings::State::new(&self.st.config));
+                self.settings = Some(settings::State::new(&self.st.config, &self.engine));
                 Task::none()
             }
             Message::ToggleLog => {

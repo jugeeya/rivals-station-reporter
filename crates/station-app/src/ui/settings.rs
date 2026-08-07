@@ -41,6 +41,8 @@ pub enum Msg {
     ScanHubs,
     HubsFound(Vec<FoundHub>),
     UseHub(String),
+    ForgetTag(String),
+    TagForgotten(Result<(), String>),
 }
 
 /// One hub the LAN sweep found — url plus what its /health advertises.
@@ -91,10 +93,11 @@ pub struct State {
     scanning: bool,
     scanned: bool,
     hubs: Vec<FoundHub>,
+    learned: Vec<(String, String)>,
 }
 
 impl State {
-    pub fn new(cfg: &Config) -> Self {
+    pub fn new(cfg: &Config, engine: &std::sync::Arc<crate::engine::EngineInner>) -> Self {
         Self {
             mode: cfg.mode.clone(),
             station: cfg.station.to_string(),
@@ -116,6 +119,7 @@ impl State {
             scanning: false,
             scanned: false,
             hubs: Vec::new(),
+            learned: commands::learned_tags(engine),
         }
     }
 }
@@ -321,6 +325,19 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::UseHub(url) => {
             s.broker = url;
         }
+        Msg::ForgetTag(tag) => {
+            let engine = app.engine.clone();
+            return Task::perform(
+                blocking(move || commands::forget_learned_tag(&engine, &tag)),
+                |r| Message::Settings(Msg::TagForgotten(r)),
+            );
+        }
+        Msg::TagForgotten(r) => {
+            match r {
+                Ok(()) => s.learned = commands::learned_tags(&app.engine),
+                Err(e) => s.err = e,
+            }
+        }
     }
     Task::none()
 }
@@ -475,6 +492,31 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
             .size(16)
             .on_toggle(|v| Message::Settings(Msg::Autostart(v))),
     );
+
+    if is_operator && !s.learned.is_empty() {
+        let mut sec = column![
+            label("Learned tags (corrections remembered from Switch Players)"),
+        ]
+        .spacing(4);
+        for (tag, gg) in &s.learned {
+            let tag_c = tag.clone();
+            sec = sec.push(
+                row![
+                    text(tag.clone()).font(theme::FONT_BODY_BOLD).size(12).color(theme::TEXT_PRIMARY),
+                    text("→").size(12).color(theme::TEXT_MUTED),
+                    text(gg.clone()).size(12).color(theme::TEXT_PRIMARY),
+                    Space::new().width(Length::Fill),
+                    button(text("forget").size(11))
+                        .style(theme::button_linkish)
+                        .padding([2, 4])
+                        .on_press(Message::Settings(Msg::ForgetTag(tag_c))),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            );
+        }
+        col = col.push(container(sec).style(theme::panel).padding(10).width(Length::Fill));
+    }
 
     if !s.err.is_empty() {
         col = col.push(text(s.err.clone()).size(12).color(theme::TEXT_FAILURE));

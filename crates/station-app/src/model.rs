@@ -141,6 +141,13 @@ pub struct AvailableSet {
     pub station: Option<i64>,
     #[serde(default)]
     pub stream: Option<String>,
+    /// Set from a bracket that hasn't been started on start.gg yet, which
+    /// start.gg reports with a placeholder id ("preview_3396320_1_0"). It
+    /// can't be assigned or started -- the attempt fails with a bare "An
+    /// unknown error has occurred" -- so the row stays visible but its
+    /// actions are disabled and labelled.
+    #[serde(default)]
+    pub preview: bool,
     #[serde(default)]
     pub entrants: Vec<AvailableEntrant>,
     #[serde(default, rename = "startggStartedAt")]

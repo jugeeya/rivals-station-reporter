@@ -581,6 +581,22 @@ impl StartggApi for Startgg {
     }
 }
 
+/// Is this a placeholder id for a bracket that hasn't been started yet?
+///
+/// start.gg hands back sets for an unstarted bracket with ids like
+/// `preview_3396320_1_0` instead of a numeric id. They are projections, not
+/// records: no mutation will accept one, and start.gg rejects the attempt with
+/// a bare "An unknown error has occurred".
+///
+/// Matches the observed `preview` prefix specifically rather than "anything
+/// non-numeric". The looser rule is tempting -- real ids are numeric -- but it
+/// asserts something about every id start.gg might ever mint, and wrongly
+/// refusing a startable set would block an operator mid-bracket, which is a
+/// worse failure than the one this guards against.
+pub fn is_preview_set_id(id: &Value) -> bool {
+    id.as_str().is_some_and(|s| s.starts_with("preview"))
+}
+
 /// Parsing half of [`Startgg::station_set`], split out from the network call
 /// so it's testable against a hand-built GraphQL response shape without a
 /// live token. Mirrors [`parse_available_sets`]'s split.
@@ -669,6 +685,11 @@ fn parse_available_sets(data: &Value) -> Value {
         }
         sets.push(json!({
             "id": n.get("id").cloned().unwrap_or(Value::Null),
+            // A bracket not yet started on start.gg reports its sets with
+            // PLACEHOLDER ids ("preview_3396320_1_0"). They can't be assigned
+            // or started, and start.gg only says "An unknown error has
+            // occurred" -- so flag them and let the UI disable the actions.
+            "preview": is_preview_set_id(n.get("id").unwrap_or(&Value::Null)),
             "state": n.get("state").cloned().unwrap_or(Value::Null),
             "fullRoundText": or_empty_string(n.get("fullRoundText")),
             "station": n

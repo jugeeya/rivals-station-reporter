@@ -105,9 +105,8 @@ pub fn refresh(app: &mut App) -> Task<Message> {
     let engine = app.engine.clone();
     Task::perform(
         blocking(move || {
-            commands::list_available_sets(&engine).and_then(|v| {
-                serde_json::from_value::<AvailableSets>(v).map_err(|e| e.to_string())
-            })
+            commands::list_available_sets(&engine)
+                .and_then(|v| serde_json::from_value::<AvailableSets>(v).map_err(|e| e.to_string()))
         }),
         move |r| Message::Sets(Msg::Loaded(gen, r)),
     )
@@ -235,8 +234,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let cs = &app.current_sets;
 
     let mut col = column![row![
-        text(theme::tracked("Current sets")).font(theme::FONT_BODY_SEMIBOLD).size(10).color(theme::TEXT_MUTED),
-        text(cs.data.sets.len().to_string()).size(11).color(theme::TEXT_MUTED),
+        text(theme::tracked("Current sets"))
+            .font(theme::FONT_BODY_SEMIBOLD)
+            .size(10)
+            .color(theme::TEXT_MUTED),
+        text(cs.data.sets.len().to_string())
+            .size(11)
+            .color(theme::TEXT_MUTED),
         Space::new().width(Length::Fill),
         button(text(if cs.refreshing { "…" } else { "⟳" }).size(13))
             .style(theme::button_linkish)
@@ -248,16 +252,24 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .spacing(8);
 
     if !cs.action_msg.is_empty() {
-        col = col.push(text(cs.action_msg.clone()).size(12).color(if cs.action_err {
-            theme::TEXT_FAILURE
-        } else {
-            theme::TEXT_SUCCESS
-        }));
+        col = col.push(
+            text(cs.action_msg.clone())
+                .size(12)
+                .color(if cs.action_err {
+                    theme::TEXT_FAILURE
+                } else {
+                    theme::TEXT_SUCCESS
+                }),
+        );
     }
 
     if !cs.load_err.is_empty() && cs.data.sets.is_empty() {
         return col
-            .push(text(cs.load_err.clone()).size(12).color(theme::TEXT_FAILURE))
+            .push(
+                text(cs.load_err.clone())
+                    .size(12)
+                    .color(theme::TEXT_FAILURE),
+            )
             .into();
     }
     if !cs.load_err.is_empty() {
@@ -294,8 +306,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
         col = col.push(
             row![
                 text("●").size(9).color(theme::ACCENT),
-                text(theme::tracked("Playing now")).font(theme::FONT_BODY_SEMIBOLD).size(10).color(theme::ACCENT),
-                text(playing.len().to_string()).size(10).color(theme::TEXT_MUTED),
+                text(theme::tracked("Playing now"))
+                    .font(theme::FONT_BODY_SEMIBOLD)
+                    .size(10)
+                    .color(theme::ACCENT),
+                text(playing.len().to_string())
+                    .size(10)
+                    .color(theme::TEXT_MUTED),
             ]
             .spacing(6)
             .align_y(Alignment::Center),
@@ -307,8 +324,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if !startable.is_empty() {
         col = col.push(
             row![
-                text(theme::tracked("Startable")).font(theme::FONT_BODY_SEMIBOLD).size(10).color(theme::TEXT_MUTED),
-                text(startable.len().to_string()).size(10).color(theme::TEXT_MUTED),
+                text(theme::tracked("Startable"))
+                    .font(theme::FONT_BODY_SEMIBOLD)
+                    .size(10)
+                    .color(theme::TEXT_MUTED),
+                text(startable.len().to_string())
+                    .size(10)
+                    .color(theme::TEXT_MUTED),
             ]
             .spacing(6),
         );
@@ -334,7 +356,10 @@ fn set_row<'a>(app: &'a App, s: &'a AvailableSet, playing: bool) -> Element<'a, 
         .size(12)
         .color(theme::TEXT_MUTED)
         .width(Length::Fixed(150.0)),
-        text(s.players_label()).font(theme::FONT_BODY_BOLD).size(13).color(theme::TEXT_PRIMARY),
+        text(s.players_label())
+            .font(theme::FONT_BODY_BOLD)
+            .size(13)
+            .color(theme::TEXT_PRIMARY),
         Space::new().width(Length::Fill),
     ]
     .spacing(10)
@@ -352,6 +377,18 @@ fn set_row<'a>(app: &'a App, s: &'a AvailableSet, playing: bool) -> Element<'a, 
         if let Some(b) = format::best_of(s.startgg_total_games) {
             r = r.push(text(b).size(11).color(theme::TEXT_MUTED));
         }
+    }
+
+    // A set whose bracket hasn't been started on start.gg can't be assigned or
+    // started -- start.gg rejects the mutation with a bare "An unknown error
+    // has occurred". Say so on the row, because the disabled buttons below
+    // otherwise look like an app fault rather than a bracket that isn't ready.
+    if s.preview {
+        r = r.push(
+            text("bracket not started")
+                .size(11)
+                .color(theme::TEXT_WARNING),
+        );
     }
 
     // Station picker.
@@ -395,8 +432,10 @@ fn set_row<'a>(app: &'a App, s: &'a AvailableSet, playing: bool) -> Element<'a, 
     }
 
     if playing {
-        let mut change = button(text("Change").size(12)).style(theme::button_linkish).padding([4, 8]);
-        if cs.busy.is_none() && cs.selection_changed(s) {
+        let mut change = button(text("Change").size(12))
+            .style(theme::button_linkish)
+            .padding([4, 8]);
+        if cs.busy.is_none() && !s.preview && cs.selection_changed(s) {
             change = change.on_press(Message::Sets(Msg::Change(k.clone())));
         }
         r = r.push(change);
@@ -404,7 +443,7 @@ fn set_row<'a>(app: &'a App, s: &'a AvailableSet, playing: bool) -> Element<'a, 
         let mut start = button(text(if busy_here { "…" } else { "Start Match" }).size(12))
             .style(theme::button_surface)
             .padding([5, 12]);
-        if cs.busy.is_none() {
+        if cs.busy.is_none() && !s.preview {
             start = start.on_press(Message::Sets(Msg::Start(k.clone())));
         }
         r = r.push(start);

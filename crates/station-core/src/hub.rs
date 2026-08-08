@@ -177,6 +177,25 @@ pub(crate) fn preferred_started_at(sg: &Value) -> Value {
 /// fresh `available_sets` read -- shared by `Hub::do_start_match` and
 /// `Hub::do_reassign_station`, neither of which ever trusts a raw id
 /// supplied by the frontend, only a plain number cross-checked here.
+/// Refuse to mutate a set from a bracket that hasn't been started yet.
+///
+/// start.gg reports such sets with placeholder ids (`preview_3396320_1_0`),
+/// and both `assignStation` and `markSetInProgress` fail against them --
+/// answering only "An unknown error has occurred", which told the operator
+/// nothing and left no useful log line: the assignment simply never landed.
+/// Catching it here yields an accurate message and skips a pointless round
+/// trip. Reported from a real event whose bracket had not been started; the
+/// same actions work once it has. See [`crate::startgg::is_preview_set_id`].
+fn reject_preview_set(set_id: &Value) -> Result<(), (Value, u16)> {
+    if crate::startgg::is_preview_set_id(set_id) {
+        return Err((
+            json!({"error": "This bracket hasn't been started on start.gg yet, so its                              sets don't exist there and can't be assigned or started.                              Start the bracket (or phase) on start.gg first."}),
+            409,
+        ));
+    }
+    Ok(())
+}
+
 fn resolve_station_id(data: &Value, num: i64) -> Result<Value, (Value, u16)> {
     let stations = data
         .get("stations")
@@ -1405,6 +1424,7 @@ impl Hub {
                 ))
             }
         };
+        reject_preview_set(set_id)?;
 
         // A set can carry both a station and a stream at once; assign each
         // requested one that differs from what's already set (an unchanged
@@ -1476,6 +1496,7 @@ impl Hub {
                 ))
             }
         };
+        reject_preview_set(set_id)?;
         // Same both-at-once rule as do_start_match: assign each requested
         // destination that differs from the set's current one, skipping any
         // that already match (no redundant start.gg mutation).
@@ -3797,6 +3818,71 @@ mod tests {
             .expect_err("a set not in the available list must not be started blindly");
         assert_eq!(err.1, 404);
         assert!(fake.start_calls().is_empty());
+    }
+
+    /// A bracket not yet started on start.gg reports placeholder set ids
+    /// ("preview_3396320_1_0"). Mutating one always fails upstream, and
+    /// start.gg says only "An unknown error has occurred" -- so refuse it here
+    /// with something true, and don't spend the round trip.
+    #[test]
+    fn do_start_match_refuses_a_preview_set_from_an_unstarted_bracket() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("preview_3396320_1_0", Value::Null)],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let err = h
+            .do_start_match(SLUG, &json!("preview_3396320_1_0"), Some(2), None)
+            .expect_err("a preview set cannot be started");
+        assert_eq!(err.1, 409);
+        assert!(
+            err.0["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("hasn't been started"),
+            "the message must name the real cause, got: {}",
+            err.0["error"]
+        );
+        assert!(
+            fake.assign_calls().is_empty() && fake.start_calls().is_empty(),
+            "nothing may be sent to start.gg for a set that cannot accept it"
+        );
+    }
+
+    #[test]
+    fn do_reassign_destination_refuses_a_preview_set() {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("preview_3396320_1_1", Value::Null)],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let err = h
+            .do_reassign_destination(SLUG, &json!("preview_3396320_1_1"), Some(2), None)
+            .expect_err("a preview set cannot be reassigned");
+        assert_eq!(err.1, 409);
+        assert!(fake.assign_calls().is_empty());
+    }
+
+    /// Only the observed `preview` prefix counts. Real ids -- numeric in
+    /// practice, but the guard must not assume that -- all pass through.
+    /// Anything stricter would risk blocking a live bracket, which is worse
+    /// than the failure being guarded against.
+    #[test]
+    fn only_preview_prefixed_set_ids_are_treated_as_preview() {
+        use crate::startgg::is_preview_set_id;
+        assert!(is_preview_set_id(&json!("preview_3396320_1_0")));
+        assert!(!is_preview_set_id(&json!(105639152)));
+        assert!(!is_preview_set_id(&json!("105639152")));
+        assert!(!is_preview_set_id(&json!("S1")));
+        assert!(!is_preview_set_id(&Value::Null));
     }
 
     #[test]

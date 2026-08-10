@@ -38,6 +38,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
 
     let actions = row![
+        button(text("VOD Splitter").size(13))
+            .style(theme::button_linkish)
+            .on_press(Message::OpenVodSplitter),
         button(text(if app.show_log { "Log ▾" } else { "Log" }).size(13))
             .style(theme::button_linkish)
             .on_press(Message::ToggleLog),
@@ -47,8 +50,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     ]
     .spacing(4);
 
-    let header = row![title_row, Space::new().width(Length::Fill), actions]
-        .align_y(Alignment::Center);
+    let header =
+        row![title_row, Space::new().width(Length::Fill), actions].align_y(Alignment::Center);
 
     // ---- health strip ----------------------------------------------------------
     let mut chips = row![].spacing(6);
@@ -123,7 +126,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
             body = body.push(
                 container(
                     row![
-                        text("Stations point here:").size(13).color(theme::TEXT_MUTED),
+                        text("Stations point here:")
+                            .size(13)
+                            .color(theme::TEXT_MUTED),
                         text(url.clone())
                             .font(theme::FONT_MONO)
                             .size(16)
@@ -230,8 +235,14 @@ fn chip<'a>(label: &'a str, ok: bool, warn: bool, detail: String) -> Element<'a,
     .style(theme::panel)
     .padding([4, 10]);
 
-    tooltip(chip, container(text(detail).size(12)).style(theme::tooltip_bubble).padding(8), tooltip::Position::Bottom)
-        .into()
+    tooltip(
+        chip,
+        container(text(detail).size(12))
+            .style(theme::tooltip_bubble)
+            .padding(8),
+        tooltip::Position::Bottom,
+    )
+    .into()
 }
 
 // ---- station widgets -----------------------------------------------------------
@@ -240,7 +251,9 @@ fn chip<'a>(label: &'a str, ok: bool, warn: bool, detail: String) -> Element<'a,
 fn live_set_card(app: &App) -> Element<'_, Message> {
     let Some(live) = &app.st.snapshot.live else {
         return container(
-            text("Waiting for a game…").size(14).color(theme::TEXT_MUTED),
+            text("Waiting for a game…")
+                .size(14)
+                .color(theme::TEXT_MUTED),
         )
         .style(theme::panel)
         .padding(24)
@@ -257,7 +270,10 @@ fn live_set_card(app: &App) -> Element<'_, Message> {
 
     let mut head = row![
         text("●").size(11).color(theme::ACCENT),
-        text(theme::tracked("Now playing")).font(theme::FONT_BODY_SEMIBOLD).size(10).color(theme::TEXT_MUTED),
+        text(theme::tracked("Now playing"))
+            .font(theme::FONT_BODY_SEMIBOLD)
+            .size(10)
+            .color(theme::TEXT_MUTED),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
@@ -290,24 +306,29 @@ fn live_set_card(app: &App) -> Element<'_, Message> {
         let mut tag_row = row![text(p.tag.clone())
             .font(theme::FONT_DISPLAY)
             .size(22)
-            .color(if p.won { theme::TEXT_SUCCESS } else { theme::TEXT_PRIMARY })]
+            .color(if p.won {
+                theme::TEXT_SUCCESS
+            } else {
+                theme::TEXT_PRIMARY
+            })]
         .spacing(8)
         .align_y(Alignment::Center);
         if let Some(sgg) = &p.sgg {
-            tag_row = tag_row.push(
-                tooltip(
-                    text(format!("@{sgg}")).size(12).color(theme::TEXT_MUTED),
-                    container(text(format::sgg_title(&p.tag, sgg)).size(12))
-                        .style(theme::tooltip_bubble)
-                        .padding(8)
-                        .max_width(360),
-                    tooltip::Position::Bottom,
-                ),
-            );
+            tag_row = tag_row.push(tooltip(
+                text(format!("@{sgg}")).size(12).color(theme::TEXT_MUTED),
+                container(text(format::sgg_title(&p.tag, sgg)).size(12))
+                    .style(theme::tooltip_bubble)
+                    .padding(8)
+                    .max_width(360),
+                tooltip::Position::Bottom,
+            ));
         }
-        column![tag_row, text(p.character.clone()).size(13).color(theme::TEXT_MUTED)]
-            .spacing(2)
-            .into()
+        column![
+            tag_row,
+            text(p.character.clone()).size(13).color(theme::TEXT_MUTED)
+        ]
+        .spacing(2)
+        .into()
     };
 
     let score = row![
@@ -320,7 +341,10 @@ fn live_set_card(app: &App) -> Element<'_, Message> {
         .font(theme::FONT_DISPLAY)
         .size(42)
         .color(theme::TEXT_PRIMARY),
-        text("–").font(theme::FONT_DISPLAY_MEDIUM).size(32).color(theme::TEXT_MUTED),
+        text("–")
+            .font(theme::FONT_DISPLAY_MEDIUM)
+            .size(32)
+            .color(theme::TEXT_MUTED),
         text(
             live.players
                 .get(1)
@@ -365,7 +389,10 @@ fn station_sets(app: &App) -> Element<'_, Message> {
     sets.reverse();
 
     let mut col = column![row![
-        text(theme::tracked("Sets today")).font(theme::FONT_BODY_SEMIBOLD).size(10).color(theme::TEXT_MUTED),
+        text(theme::tracked("Sets today"))
+            .font(theme::FONT_BODY_SEMIBOLD)
+            .size(10)
+            .color(theme::TEXT_MUTED),
         text(if sets.is_empty() {
             String::new()
         } else {
@@ -379,7 +406,11 @@ fn station_sets(app: &App) -> Element<'_, Message> {
 
     if sets.is_empty() {
         return col
-            .push(text("Finished sets will appear here.").size(13).color(theme::TEXT_MUTED))
+            .push(
+                text("Finished sets will appear here.")
+                    .size(13)
+                    .color(theme::TEXT_MUTED),
+            )
             .into();
     }
 
@@ -417,7 +448,9 @@ fn station_sets(app: &App) -> Element<'_, Message> {
                     }),
             );
             players = players.push(
-                text(format!("({})", p.character)).size(11).color(theme::TEXT_MUTED),
+                text(format!("({})", p.character))
+                    .size(11)
+                    .color(theme::TEXT_MUTED),
             );
         }
         r = r.push(players);

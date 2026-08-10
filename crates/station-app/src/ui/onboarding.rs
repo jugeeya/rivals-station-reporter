@@ -224,7 +224,10 @@ fn step_one(ob: &State) -> Element<'_, Message> {
         let active = ob.mode == m;
         button(
             column![
-                text(m.title()).font(theme::FONT_DISPLAY).size(15).color(theme::TEXT_PRIMARY),
+                text(m.title())
+                    .font(theme::FONT_DISPLAY)
+                    .size(15)
+                    .color(theme::TEXT_PRIMARY),
                 text(m.desc()).size(12).color(theme::TEXT_MUTED),
             ]
             .spacing(6),
@@ -232,7 +235,10 @@ fn step_one(ob: &State) -> Element<'_, Message> {
         .style(move |t, status| {
             let mut s = theme::button_surface(t, status);
             if active {
-                s.border.color = iced::Color { a: 0.8, ..theme::ACCENT };
+                s.border.color = iced::Color {
+                    a: 0.8,
+                    ..theme::ACCENT
+                };
             }
             s
         })
@@ -246,7 +252,9 @@ fn step_one(ob: &State) -> Element<'_, Message> {
             .font(theme::FONT_DISPLAY)
             .size(26)
             .color(theme::TEXT_PRIMARY),
-        text("What is this PC at your event?").size(14).color(theme::TEXT_MUTED),
+        text("What is this PC at your event?")
+            .size(14)
+            .color(theme::TEXT_MUTED),
         row![
             mode_card(Mode::Station),
             mode_card(Mode::Operator),
@@ -329,7 +337,9 @@ fn step_two(ob: &State) -> Element<'_, Message> {
         );
     } else if !ob.event_error.is_empty() {
         event_field = event_field.push(
-            text(ob.event_error.clone()).size(12).color(theme::TEXT_FAILURE),
+            text(ob.event_error.clone())
+                .size(12)
+                .color(theme::TEXT_FAILURE),
         );
     }
     col = col.push(event_field);
@@ -338,11 +348,16 @@ fn step_two(ob: &State) -> Element<'_, Message> {
         col = col.push(
             column![
                 label("Hub / broker URL"),
-                text_input("http://192.168.…:8787 (from the operator's screen)", &ob.broker)
-                    .style(theme::input)
-                    .padding(9)
-                    .on_input(|s| Message::Onboarding(Msg::Broker(s))),
-                help("Shown big on the operator's screen, or leave the cloud broker default.".into()),
+                text_input(
+                    "http://192.168.…:8787 (from the operator's screen)",
+                    &ob.broker
+                )
+                .style(theme::input)
+                .padding(9)
+                .on_input(|s| Message::Onboarding(Msg::Broker(s))),
+                help(
+                    "Shown big on the operator's screen, or leave the cloud broker default.".into()
+                ),
             ]
             .spacing(6),
         );
@@ -417,11 +432,20 @@ fn step_two(ob: &State) -> Element<'_, Message> {
                     .color(theme::TEXT_WARNING),
             );
         }
-        col = col.push(container(detect).style(theme::panel).padding(12).width(Length::Fill));
+        col = col.push(
+            container(detect)
+                .style(theme::panel)
+                .padding(12)
+                .width(Length::Fill),
+        );
     }
 
     if !ob.save_error.is_empty() {
-        col = col.push(text(ob.save_error.clone()).size(12).color(theme::TEXT_FAILURE));
+        col = col.push(
+            text(ob.save_error.clone())
+                .size(12)
+                .color(theme::TEXT_FAILURE),
+        );
     }
 
     let mut start = button(text(if ob.saving { "Starting…" } else { "Start" }).size(15))

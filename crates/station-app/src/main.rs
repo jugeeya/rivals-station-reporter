@@ -7,6 +7,7 @@ mod engine;
 mod model;
 mod theme;
 mod ui;
+mod vodsplit;
 
 use ui::{App, Message};
 

@@ -65,7 +65,11 @@ pub fn report_winner(
     hub_glue::do_report(engine, station, set_id, winner_entrant_id)
 }
 
-pub fn swap_players(engine: &Arc<EngineInner>, station: i64, set_id: &str) -> Result<Value, String> {
+pub fn swap_players(
+    engine: &Arc<EngineInner>,
+    station: i64,
+    set_id: &str,
+) -> Result<Value, String> {
     hub_glue::do_swap(engine, station, set_id)
 }
 

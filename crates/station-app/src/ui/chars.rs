@@ -47,7 +47,11 @@ fn table() -> &'static HashMap<&'static str, image::Handle> {
 }
 
 fn slugify(name: &str) -> String {
-    name.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join("-")
+    name.trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// The icon (or text fallback), wrapped in a tooltip naming the character.

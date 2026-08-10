@@ -31,8 +31,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # libxkbcommon-x11 is winit's keyboard glue under X11 — not preinstalled
-      # on the runner, and it panics at startup without it.
-      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config xvfb libxkbcommon-x11-0
+      # on the runner, and it panics at startup without it. ffmpeg synthesises
+      # the VOD Splitter shot's stand-in recording and its preview frames.
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config xvfb libxkbcommon-x11-0 ffmpeg
       # `bash` explicitly: the web-UI upload path drops the executable bit,
       # and the script shouldn't depend on a mode bit to run anyway.
       - name: Render screenshots

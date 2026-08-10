@@ -12,6 +12,7 @@ pub mod onboarding;
 pub mod settings;
 pub mod tray;
 pub mod updater;
+pub mod vod_splitter;
 
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +45,8 @@ pub enum Message {
     Console(console::Msg),
     Sets(current_sets::Msg),
     Settings(settings::Msg),
+    Vod(vod_splitter::Msg),
+    OpenVodSplitter,
     OpenSettings,
     ToggleLog,
     CopyHubUrl,
@@ -69,6 +72,14 @@ impl std::hash::Hash for Feed {
     }
 }
 
+/// Which full-screen view is showing. Settings and the log stay overlays;
+/// the VOD Splitter is a real second screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Reporter,
+    VodSplitter,
+}
+
 pub struct App {
     pub engine: Arc<EngineInner>,
     feed: Feed,
@@ -76,9 +87,11 @@ pub struct App {
     pub st: EngineState,
     /// First snapshot received — nothing renders before it.
     pub ready: bool,
+    pub screen: Screen,
     pub onboarding: onboarding::State,
     pub console: console::State,
     pub current_sets: current_sets::State,
+    pub vod: vod_splitter::State,
     pub settings: Option<settings::State>,
     pub show_log: bool,
     pub now_s: i64,
@@ -102,7 +115,7 @@ impl App {
                     .expect("no config dir on this platform")
                     .join("io.github.jugeeya.rivals-station-reporter")
             });
-        let engine::Engine(inner) = engine::start(config_dir);
+        let engine::Engine(inner) = engine::start(config_dir.clone());
 
         let (tx, rx) = fmpsc::unbounded();
         inner.set_emitter(Box::new(move |v| {
@@ -118,9 +131,11 @@ impl App {
             feed: Feed(Arc::new(Mutex::new(Some(rx)))),
             st,
             ready: true,
+            screen: Screen::Reporter,
             onboarding,
             console: console::State::default(),
             current_sets: current_sets::State::default(),
+            vod: vod_splitter::State::new(config_dir),
             settings: None,
             show_log: false,
             now_s: station_core::now_sec(),
@@ -133,16 +148,16 @@ impl App {
         // with optional `snapshot`/`hubSnapshot` keys) and open a drawer
         // (RSR_OPEN=settings|log) so automated captures can reach every
         // screen without a live tournament.
+        let mut seed_task = Task::none();
         if let Some(path) = std::env::var_os("RSR_SEED_STATE") {
             if let Ok(text) = std::fs::read_to_string(path) {
                 if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                    app.engine
-                        .seed_dev_state(
-                            v.get("snapshot").cloned(),
-                            v.get("hubSnapshot").cloned(),
-                            v.get("health").cloned(),
-                            v.get("status").cloned(),
-                        );
+                    app.engine.seed_dev_state(
+                        v.get("snapshot").cloned(),
+                        v.get("hubSnapshot").cloned(),
+                        v.get("health").cloned(),
+                        v.get("status").cloned(),
+                    );
                     app.st = EngineState::from_value(&commands::get_state(&app.engine));
                     // Not part of EngineState in the real app either — it's
                     // the list_available_sets query; seeded straight into the
@@ -153,20 +168,32 @@ impl App {
                             app.current_sets.loaded = true;
                         }
                     }
+                    // VOD Splitter fixture — its own screen, its own seed.
+                    if let Some(vs) = v.get("vodSplitter") {
+                        if let Ok(seed) = serde_json::from_value::<vod_splitter::Seed>(vs.clone()) {
+                            seed_task = vod_splitter::apply_seed(&mut app, seed);
+                        }
+                    }
                 }
             }
         }
         match std::env::var("RSR_OPEN").as_deref() {
-            Ok("settings") => app.settings = Some(settings::State::new(&app.st.config, &app.engine)),
+            Ok("settings") => {
+                app.settings = Some(settings::State::new(&app.st.config, &app.engine))
+            }
             Ok("log") => app.show_log = true,
+            Ok("vod") => app.screen = Screen::VodSplitter,
             _ => {}
         }
 
-        let mut boot = if configured_operator && !app.frozen {
-            current_sets::refresh(&mut app)
-        } else {
-            Task::none()
-        };
+        let mut boot = Task::batch([
+            seed_task,
+            if configured_operator && !app.frozen {
+                current_sets::refresh(&mut app)
+            } else {
+                Task::none()
+            },
+        ]);
         // Screenshot hook: RSR_SCROLL=end snaps the main body to the bottom
         // so below-the-fold panels (Current Sets) can be captured.
         if std::env::var("RSR_SCROLL").as_deref() == Ok("end") {
@@ -218,6 +245,11 @@ impl App {
             Message::Console(msg) => console::update(self, msg),
             Message::Sets(msg) => current_sets::update(self, msg),
             Message::Settings(msg) => settings::update(self, msg),
+            Message::Vod(msg) => vod_splitter::update(self, msg),
+            Message::OpenVodSplitter => {
+                self.screen = Screen::VodSplitter;
+                vod_splitter::opened(self)
+            }
             Message::OpenSettings => {
                 self.settings = Some(settings::State::new(&self.st.config, &self.engine));
                 Task::none()
@@ -242,21 +274,24 @@ impl App {
                     iced::exit()
                 }
             }
-            Message::TrayPoll => {
-                match self.tray.as_ref().and_then(|t| t.poll()) {
-                    Some(tray::TrayEvent::Show) => iced::window::latest().then(|id| match id {
-                        Some(id) => Task::batch([
-                            iced::window::set_mode(id, iced::window::Mode::Windowed),
-                            iced::window::gain_focus(id),
-                        ]),
-                        None => Task::none(),
-                    }),
-                    Some(tray::TrayEvent::Quit) => iced::exit(),
+            Message::TrayPoll => match self.tray.as_ref().and_then(|t| t.poll()) {
+                Some(tray::TrayEvent::Show) => iced::window::latest().then(|id| match id {
+                    Some(id) => Task::batch([
+                        iced::window::set_mode(id, iced::window::Mode::Windowed),
+                        iced::window::gain_focus(id),
+                    ]),
                     None => Task::none(),
-                }
-            }
+                }),
+                Some(tray::TrayEvent::Quit) => iced::exit(),
+                None => Task::none(),
+            },
             Message::ScreenshotTick => {
-                if self.started.elapsed().as_secs() >= 2 {
+                // On the splitter screen, wait for the preview thumbnails to
+                // finish so the shot never shows empty frame placeholders —
+                // with a ceiling so a stuck ffmpeg can't hang the capture.
+                let vod_busy = self.screen == Screen::VodSplitter && !self.vod.thumbs_idle();
+                let waited = self.started.elapsed().as_secs();
+                if (waited >= 2 && !vod_busy) || waited >= 20 {
                     return iced::window::latest()
                         .then(|id| match id {
                             Some(id) => iced::window::screenshot(id).map(Some),
@@ -298,8 +333,7 @@ impl App {
         ];
         if self.tray.is_some() {
             subs.push(
-                iced::time::every(std::time::Duration::from_millis(300))
-                    .map(|_| Message::TrayPoll),
+                iced::time::every(std::time::Duration::from_millis(300)).map(|_| Message::TrayPoll),
             );
         }
         if self.is_operator() {
@@ -324,6 +358,8 @@ impl App {
                 .into()
         } else if !self.st.config.configured {
             onboarding::view(self)
+        } else if self.screen == Screen::VodSplitter {
+            vod_splitter::view(self)
         } else {
             main_view::view(self)
         };
@@ -364,7 +400,10 @@ fn log_overlay(app: &App) -> Element<'_, Message> {
     let panel = container(
         column![
             row![
-                text("Log").font(theme::FONT_DISPLAY).size(16).color(theme::TEXT_PRIMARY),
+                text("Log")
+                    .font(theme::FONT_DISPLAY)
+                    .size(16)
+                    .color(theme::TEXT_PRIMARY),
                 Space::new().width(Length::Fill),
                 button(text("✕").size(14))
                     .style(theme::button_linkish)

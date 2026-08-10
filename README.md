@@ -25,6 +25,16 @@ widget. The full design is in `rivals-station-reporter-architecture.md`
   nothing ever advances the bracket on its own.
 - **Both** — one PC doing both jobs.
 
+There's also a built-in **VOD Splitter** (header → VOD Splitter): point it at
+a station's full OBS recording after the event and it cuts one clip per set,
+named `[Tournament] P1 (Char) vs. P2 (Char) - Round`. It fetches the
+bracket's set times from start.gg (no API token needed) and — because it
+lives inside the reporter — automatically overlays this app's own
+station-measured set times wherever a set was tracked, so those cuts land
+where games actually started and ended instead of on whenever someone
+clicked Start Match / Submit. Splitting on a different PC than the operator's?
+Copy `hub-state.json` over (it's small) and pick it with "Choose file…".
+
 The hub speaks the same `/matchlogger/*` HTTP API as the Cloudflare broker
 (`jugeeya.github.io/broker/worker.js`), so stations can point at either, and
 old Python stations interoperate with a Rust hub (and vice versa) during
@@ -80,6 +90,16 @@ just finished"; awaiting-report status lives on the operator's hub.
 Settings: mode, event, hub/broker (with LAN auto-discovery), paths, and the
 update checker, all editable without restarting.
 
+![VOD Splitter](docs/screenshots/vod-splitter.png)
+
+The VOD Splitter, after the event: station 3's recording cut into one clip
+per set, with real preview frames at each edge and ±nudge buttons. Sets the
+hub tracked carry a green ⏱ hub mark — their edges come from the station's
+own measurements and rarely need touching — while the flagged row shows the
+failure mode the warning exists for: start.gg never got a proper end time,
+so the clip runs 57 minutes. Split in place with ffmpeg (lossless stream
+copy), or export the cut list as CSV (LosslessCut), JSON, or a shell script.
+
 ## Install
 
 Grab the build from the latest GitHub release: Windows portable `.zip`,
@@ -113,31 +133,13 @@ cargo test -p station-app    # engine-layer tests
 Dev tricks: `RSR_CONFIG_DIR=/tmp/profile` runs against a scratch profile
 instead of the real one; `RSR_SCREENSHOT=out.png` renders the app, saves a
 screenshot after ~2s, and exits; `RSR_SEED_STATE=seed.json` freezes fixture
-data into the UI; `RSR_OPEN=settings|log` opens a drawer on launch.
+data into the UI (a `vodSplitter` key seeds the splitter screen);
+`RSR_OPEN=settings|log|vod` opens a drawer — or the VOD Splitter — on launch.
 
 All logic lives in `crates/station-core` (no UI dependency) — 1:1 ports of
 the Python modules with their tests. `crates/station-app` is the Iced shell:
 an engine thread that owns the producer/forwarder/hub and pushes state
 snapshots to the UI over one channel.
-
-### Screenshots
-
-`pnpm screenshots` boots the same browser-mock UI as `pnpm dev`, but seeds an
-exact fixture state instead of letting the scripted fake tournament run, and
-writes PNGs to `docs/screenshots/`. It starts the dev server itself if one
-isn't already listening on :1420, and shuts down anything it started when
-it's done.
-
-```sh
-pnpm screenshots:setup   # once: installs the Chromium build Playwright needs
-pnpm screenshots
-```
-
-The fixtures live in `scripts/screenshots/fixtures.mjs`; the capture script
-(viewport, frozen clock, disabled animations, PNG output) is
-`scripts/screenshots/capture.mjs`. See `src/dev/browserMock.ts`'s
-`window.__RSR_SEED__` / `__RSR_SEED_DATA__` for how a fixture reaches the UI
-without the real Tauri backend.
 
 To check save-parsing parity against a real save:
 

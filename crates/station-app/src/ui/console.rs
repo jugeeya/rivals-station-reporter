@@ -15,12 +15,22 @@ use crate::theme;
 pub enum Msg {
     OpenPicker(String),
     ClosePicker,
-    Report { station: i64, set_id: String, winner: Value },
-    Swap { station: i64, set_id: String },
+    Report {
+        station: i64,
+        set_id: String,
+        winner: Value,
+    },
+    Swap {
+        station: i64,
+        set_id: String,
+    },
     /// First click arms; the confirming second click deletes (the native
     /// stand-in for the old confirm dialog, one fewer window).
     AskDelete(String),
-    Delete { station: i64, set_id: String },
+    Delete {
+        station: i64,
+        set_id: String,
+    },
     Done {
         result: Result<String, String>,
         /// True when the action changed the bracket itself (a report):
@@ -54,7 +64,11 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             c.confirm_delete = Some(k);
             c.picker_for = None;
         }
-        Msg::Report { station, set_id, winner } => {
+        Msg::Report {
+            station,
+            set_id,
+            winner,
+        } => {
             c.busy = true;
             c.action_msg.clear();
             let engine = app.engine.clone();
@@ -63,7 +77,12 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     crate::engine::commands::report_winner(&engine, station, &set_id, &winner)
                         .map(|_| "Reported to start.gg.".to_string())
                 }),
-                |r| Message::Console(Msg::Done { result: r, bracket_changed: true }),
+                |r| {
+                    Message::Console(Msg::Done {
+                        result: r,
+                        bracket_changed: true,
+                    })
+                },
             );
         }
         Msg::Swap { station, set_id } => {
@@ -75,7 +94,12 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     crate::engine::commands::swap_players(&engine, station, &set_id)
                         .map(|_| "Players switched. Remembered for future sets.".to_string())
                 }),
-                |r| Message::Console(Msg::Done { result: r, bracket_changed: false }),
+                |r| {
+                    Message::Console(Msg::Done {
+                        result: r,
+                        bracket_changed: false,
+                    })
+                },
             );
         }
         Msg::Delete { station, set_id } => {
@@ -88,10 +112,18 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     crate::engine::commands::delete_set(&engine, station, &set_id)
                         .map(|_| "Set deleted.".to_string())
                 }),
-                |r| Message::Console(Msg::Done { result: r, bracket_changed: false }),
+                |r| {
+                    Message::Console(Msg::Done {
+                        result: r,
+                        bracket_changed: false,
+                    })
+                },
             );
         }
-        Msg::Done { result, bracket_changed } => {
+        Msg::Done {
+            result,
+            bracket_changed,
+        } => {
             c.busy = false;
             c.picker_for = None;
             match result {
@@ -178,7 +210,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let count = sets.len();
     col = col.push(
         row![
-            text(theme::tracked("All stations")).font(theme::FONT_BODY_SEMIBOLD).size(10).color(theme::TEXT_MUTED),
+            text(theme::tracked("All stations"))
+                .font(theme::FONT_BODY_SEMIBOLD)
+                .size(10)
+                .color(theme::TEXT_MUTED),
             text(format!("{count} set{}", if count == 1 { "" } else { "s" }))
                 .size(11)
                 .color(theme::TEXT_MUTED),
@@ -187,15 +222,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
     );
 
     if !app.console.action_msg.is_empty() {
-        col = col.push(
-            text(app.console.action_msg.clone()).size(12).color(
-                if app.console.action_err {
-                    theme::TEXT_FAILURE
-                } else {
-                    theme::TEXT_SUCCESS
-                },
-            ),
-        );
+        col = col.push(text(app.console.action_msg.clone()).size(12).color(
+            if app.console.action_err {
+                theme::TEXT_FAILURE
+            } else {
+                theme::TEXT_SUCCESS
+            },
+        ));
     }
 
     let status_of = |r: &Value| {
@@ -274,7 +307,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
 fn group_head(title: &str, n: usize, color: iced::Color) -> Element<'static, Message> {
     row![
         text("●").size(9).color(color),
-        text(theme::tracked(title)).font(theme::FONT_BODY_SEMIBOLD).size(10).color(color),
+        text(theme::tracked(title))
+            .font(theme::FONT_BODY_SEMIBOLD)
+            .size(10)
+            .color(color),
         text(n.to_string()).size(11).color(theme::TEXT_MUTED),
     ]
     .spacing(6)
@@ -287,7 +323,10 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
     let station = r.get("station").and_then(|v| v.as_i64()).unwrap_or(0);
     let set_id = id_str(r.get("id").unwrap_or(&Value::Null));
     let status = r.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    let reportable = r.get("reportable").and_then(|v| v.as_bool()).unwrap_or(false);
+    let reportable = r
+        .get("reportable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let busy = app.console.busy;
 
     // header line: station, time, players, round, score, status badge
@@ -388,12 +427,14 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
                     text(tag.to_string())
                         .font(theme::FONT_BODY_BOLD)
                         .size(14)
-                        .color(if won { theme::TEXT_SUCCESS } else { theme::TEXT_PRIMARY }),
+                        .color(if won {
+                            theme::TEXT_SUCCESS
+                        } else {
+                            theme::TEXT_PRIMARY
+                        }),
                 );
                 if let Some(ent) = entrant_of(slot) {
-                    line = line.push(
-                        text(format!("@{ent}")).size(11).color(theme::TEXT_MUTED),
-                    );
+                    line = line.push(text(format!("@{ent}")).size(11).color(theme::TEXT_MUTED));
                 }
             }
             line.into()
@@ -401,10 +442,18 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
     };
 
     let mut head = row![
-        container(text(station.to_string()).font(theme::FONT_BODY_BOLD).size(13).color(theme::TEXT_PRIMARY))
-            .style(theme::panel)
-            .padding([2, 8]),
-        text(time_label).font(theme::FONT_MONO).size(12).color(time_color),
+        container(
+            text(station.to_string())
+                .font(theme::FONT_BODY_BOLD)
+                .size(13)
+                .color(theme::TEXT_PRIMARY)
+        )
+        .style(theme::panel)
+        .padding([2, 8]),
+        text(time_label)
+            .font(theme::FONT_MONO)
+            .size(12)
+            .color(time_color),
         players_line,
         Space::new().width(Length::Fill),
     ]
@@ -442,13 +491,14 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
             .get("liveConfirmed")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        head = head.push(
-            text("✓").size(12).color(if confirmed {
-                theme::TEXT_SUCCESS
-            } else {
-                iced::Color { a: 0.35, ..theme::TEXT_SUCCESS }
-            }),
-        );
+        head = head.push(text("✓").size(12).color(if confirmed {
+            theme::TEXT_SUCCESS
+        } else {
+            iced::Color {
+                a: 0.35,
+                ..theme::TEXT_SUCCESS
+            }
+        }));
     }
     let badge_color = match status {
         "live" => theme::ACCENT,
@@ -462,7 +512,10 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
         container(
             row![
                 text("●").size(7).color(badge_color),
-                text(theme::tracked(status)).font(theme::FONT_BODY_SEMIBOLD).size(9).color(badge_color),
+                text(theme::tracked(status))
+                    .font(theme::FONT_BODY_SEMIBOLD)
+                    .size(9)
+                    .color(badge_color),
             ]
             .spacing(4)
             .align_y(Alignment::Center),
@@ -473,7 +526,10 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
                 ..badge_color
             })),
             border: iced::Border {
-                color: iced::Color { a: 0.7, ..badge_color },
+                color: iced::Color {
+                    a: 0.7,
+                    ..badge_color
+                },
                 width: 1.0,
                 radius: iced::border::Radius::new(999.0),
             },
@@ -538,7 +594,10 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
         }
         strip.into()
     } else {
-        text("no games yet").size(11).color(theme::TEXT_MUTED).into()
+        text("no games yet")
+            .size(11)
+            .color(theme::TEXT_MUTED)
+            .into()
     };
 
     // The tag→entrant association now lives inline on the players line (one
@@ -552,24 +611,39 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
             detail = detail.push(text(reason.to_string()).size(11).color(theme::TEXT_MUTED));
         }
     } else if r.get("slotEntrants").and_then(|v| v.as_array()).is_none()
-        && r.pointer("/set/players").and_then(|v| v.as_array()).is_some_and(|p| !p.is_empty())
+        && r.pointer("/set/players")
+            .and_then(|v| v.as_array())
+            .is_some_and(|p| !p.is_empty())
     {
         detail = detail.push(
-            text("not matched to start.gg").size(11).color(theme::TEXT_MUTED),
+            text("not matched to start.gg")
+                .size(11)
+                .color(theme::TEXT_MUTED),
         );
     }
     body = body.push(detail);
 
     // Winner picker (inline, replaces the action row while open).
     if app.console.picker_for.as_deref() == Some(&key) {
-        let entrants = r.get("entrants").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        let suggested = r.get("candidateWinnerEntrantId").cloned().unwrap_or(Value::Null);
+        let entrants = r
+            .get("entrants")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let suggested = r
+            .get("candidateWinnerEntrantId")
+            .cloned()
+            .unwrap_or(Value::Null);
         let mut pick_row = row![text("Winner:").size(12).color(theme::TEXT_MUTED)]
             .spacing(8)
             .align_y(Alignment::Center);
         for e in &entrants {
             let id = e.get("id").cloned().unwrap_or(Value::Null);
-            let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+            let name = e
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string();
             let is_suggested = id_str(&id) == id_str(&suggested) && !id.is_null();
             // The name-matched candidate leads with a star and an accent
             // border — emphasized, never pre-selected (web .oc-btn--suggested).
@@ -664,10 +738,12 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
             }
             actions = actions.push(tooltip(
                 del,
-                container(text("Delete this set from the console (start.gg is untouched)").size(12))
-                    .style(theme::tooltip_bubble)
-                    .padding(8)
-                    .max_width(320),
+                container(
+                    text("Delete this set from the console (start.gg is untouched)").size(12),
+                )
+                .style(theme::tooltip_bubble)
+                .padding(8)
+                .max_width(320),
                 tooltip::Position::Top,
             ));
         }

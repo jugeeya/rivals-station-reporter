@@ -62,7 +62,10 @@ fn platform_asset_marker() -> &'static str {
 fn client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         // GitHub's API rejects requests with no User-Agent.
-        .user_agent(concat!("rivals-station-reporter/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(
+            "rivals-station-reporter/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| e.to_string())
@@ -71,7 +74,9 @@ fn client() -> Result<reqwest::blocking::Client, String> {
 /// Blocking. `Ok(None)` = already up to date.
 pub fn check() -> Result<Option<Update>, String> {
     let resp: serde_json::Value = client()?
-        .get(format!("https://api.github.com/repos/{REPO}/releases/latest"))
+        .get(format!(
+            "https://api.github.com/repos/{REPO}/releases/latest"
+        ))
         .send()
         .map_err(|e| format!("update check failed: {e}"))?
         .error_for_status()

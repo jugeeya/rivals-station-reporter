@@ -1,6 +1,6 @@
 [package]
 name = "station-app"
-version = "0.6.6"
+version = "0.7.0"
 edition = "2021"
 description = "Rivals Station Reporter: native Iced UI over station-core (no webview)"
 
@@ -19,7 +19,9 @@ serde_json = { workspace = true }
 # `advanced` unlocks the custom-widget API the themed dropdown needs;
 # `lazy` for responsive lists.
 iced = { version = "0.14", features = ["tokio", "canvas", "svg", "image", "advanced", "lazy"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+# `process`/`fs` are for the VOD Splitter screen, which shells out to
+# ffmpeg/ffprobe and writes exported cut lists.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "fs"] }
 
 # Native pieces that used to be Tauri plugins:
 rfd = "0.15"          # file/dir pickers (plugin-dialog)
@@ -39,6 +41,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # ui/tray.rs), which is also the only sane behavior on a Deck in Game Mode.
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = "0.21"
+
+[dev-dependencies]
+# Headless view/interaction testing (VOD Splitter screen smoke test).
+iced_test = "0.14"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"   # embed the app icon into the .exe

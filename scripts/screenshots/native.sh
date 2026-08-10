@@ -115,4 +115,63 @@ RSR_SCROLL=end shot "$WORK/operator" "$WORK/operator/available-seed.json" "" ava
 # ---- settings drawer ------------------------------------------------------------
 shot "$WORK/st-idle" "$WORK/idle-seed.json" settings settings.png
 
+# ---- VOD Splitter -----------------------------------------------------------------
+# A stand-in recording synthesised with ffmpeg, so the preview frames are
+# genuine ffmpeg output rather than mock-ups and no tournament footage ends up
+# in the repo. testsrc2 carries a moving pattern and a frame counter, so a
+# clip's start and end previews visibly differ — which is the whole point of
+# showing both. Long enough that the deliberately-broken set stays over the
+# 45-minute warning threshold (build_clips clamps clip ends to the recording,
+# so a short VOD would quietly pull it back under the line).
+if command -v ffmpeg >/dev/null; then
+  VOD="$WORK/vod.mp4"
+  echo "synthesising a stand-in VOD…"
+  ffmpeg -v error -y \
+    -f lavfi -i "testsrc2=size=640x360:rate=5:duration=$((80 * 60))" \
+    -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 50 \
+    "$VOD"
+
+  # Recording starts at a fixed instant and every set is an offset into it, so
+  # the timecodes in the shot are identical on every regeneration.
+  REC=$(date -d '2026-03-07 17:07:10' +%s 2>/dev/null \
+    || date -j -f '%Y-%m-%d %H:%M:%S' '2026-03-07 17:07:10' +%s)
+
+  # Station 3's evening, same cast as the other shots. Two sets carry
+  # hub-measured times (precise -> the ⏱ badge); the Quarter-Final's end time
+  # is deliberately ~57 minutes after its start — results submitted long after
+  # the set actually ended is the exact case the too-long warning (and the hub
+  # overlay) exists for, and that station copy never covered it.
+  cat > "$WORK/vod-seed.json" <<EOF
+{"vodSplitter": {
+  "slug": "$SLUG",
+  "tournament": "The Hangout #47",
+  "vod": "$VOD",
+  "vod_display": "C:\\\\Users\\\\Station3\\\\Videos\\\\2026-03-07 17-07-10.mp4",
+  "recording_start_epoch": $REC,
+  "station": 3,
+  "pre": 5,
+  "post": 8,
+  "build": true,
+  "hub_timed": 4,
+  "sets": [
+    {"started_at": $((REC + 120)), "completed_at": $((REC + 585)), "station": 3,
+     "full_round_text": "Winners Round 2", "precise": true,
+     "players": [{"name": "KAZE", "character": "Orcane"},
+                 {"name": "PIP", "character": "Etalus"}]},
+    {"started_at": $((REC + 700)), "completed_at": $((REC + 4100)), "station": 3,
+     "full_round_text": "Winners Quarter-Final",
+     "players": [{"name": "BRUJITA", "character": "Maypul"},
+                 {"name": "NAVI", "character": "Fleet"}]},
+    {"started_at": $((REC + 4250)), "completed_at": $((REC + 4720)), "station": 3,
+     "full_round_text": "Winners Semi-Final", "precise": true,
+     "players": [{"name": "LOOM", "character": "Zetterburn"},
+                 {"name": "SLADE", "character": "Kragg"}]}
+  ]
+}}
+EOF
+  shot "$WORK/operator" "$WORK/vod-seed.json" vod vod-splitter.png
+else
+  echo "ffmpeg not found — skipping vod-splitter.png" >&2
+fi
+
 echo "done — $(ls "$OUT" | wc -l | tr -d ' ') screenshots in $OUT"

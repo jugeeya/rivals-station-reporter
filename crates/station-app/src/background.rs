@@ -59,9 +59,6 @@ fn bloom(frame: &mut canvas::Frame, center: Point, radius: f32, color: Color) {
         let r = radius * (1.0 - t);
         let ease = (1.0 - t) * (1.0 - t);
         let a = color.a * (1.0 - ease) / STEPS as f32 * 2.2;
-        frame.fill(
-            &canvas::Path::circle(center, r),
-            Color { a, ..color },
-        );
+        frame.fill(&canvas::Path::circle(center, r), Color { a, ..color });
     }
 }

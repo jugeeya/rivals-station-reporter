@@ -55,7 +55,12 @@ pub fn hub_players_label(rec: &Value) -> String {
     }
     players
         .iter()
-        .map(|p| p.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string())
+        .map(|p| {
+            p.get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string()
+        })
         .collect::<Vec<_>>()
         .join(" vs ")
 }
@@ -69,7 +74,12 @@ pub fn hub_score(rec: &Value) -> String {
         .unwrap_or_default();
     players
         .iter()
-        .map(|p| p.get("wins").and_then(|v| v.as_i64()).unwrap_or(0).to_string())
+        .map(|p| {
+            p.get("wins")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .to_string()
+        })
         .collect::<Vec<_>>()
         .join("–")
 }

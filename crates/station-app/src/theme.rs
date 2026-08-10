@@ -6,7 +6,11 @@ use iced::border::Radius;
 use iced::widget::{button, container, text_input};
 use iced::{Background, Border, Color, Shadow, Theme};
 
-pub const COLOR_BG: Color = Color::from_rgb(0x0e as f32 / 255.0, 0x0c as f32 / 255.0, 0x24 as f32 / 255.0);
+pub const COLOR_BG: Color = Color::from_rgb(
+    0x0e as f32 / 255.0,
+    0x0c as f32 / 255.0,
+    0x24 as f32 / 255.0,
+);
 
 const fn rgba(r: u8, g: u8, b: u8, a: f32) -> Color {
     Color {
@@ -167,7 +171,10 @@ pub fn button_linkish(_theme: &Theme, status: button::Status) -> button::Style {
         background: None,
         text_color: match status {
             button::Status::Hovered | button::Status::Pressed => TEXT_PRIMARY,
-            button::Status::Disabled => Color { a: 0.35, ..TEXT_MUTED },
+            button::Status::Disabled => Color {
+                a: 0.35,
+                ..TEXT_MUTED
+            },
             _ => TEXT_MUTED,
         },
         border: Border {
@@ -193,7 +200,10 @@ pub fn input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
             radius: Radius::new(RADIUS_BUTTON),
         },
         icon: TEXT_MUTED,
-        placeholder: Color { a: 0.4, ..Color::WHITE },
+        placeholder: Color {
+            a: 0.4,
+            ..Color::WHITE
+        },
         value: TEXT_PRIMARY,
         selection: Color { a: 0.35, ..ACCENT },
     }
@@ -283,6 +293,62 @@ pub fn drawer(_theme: &Theme) -> container::Style {
     }
 }
 
+// ---- VOD Splitter pieces --------------------------------------------------------
+
+/// A clip whose length says start.gg never closed the set out properly.
+pub fn panel_warning(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(vertical_gradient(
+            Color {
+                a: 0.10,
+                ..TEXT_FAILURE
+            },
+            Color {
+                a: 0.03,
+                ..TEXT_FAILURE
+            },
+        )),
+        border: Border {
+            color: Color {
+                a: 0.35,
+                ..TEXT_FAILURE
+            },
+            width: 1.0,
+            radius: Radius::new(RADIUS_PANEL),
+        },
+        text_color: Some(TEXT_PRIMARY),
+        ..container::Style::default()
+    }
+}
+
+/// The numbered step circle in the splitter's setup column.
+pub fn step_badge(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color { a: 0.22, ..ACCENT })),
+        border: Border {
+            color: Color { a: 0.45, ..ACCENT },
+            width: 1.0,
+            radius: Radius::new(999.0),
+        },
+        text_color: Some(TEXT_PRIMARY),
+        ..container::Style::default()
+    }
+}
+
+/// Placeholder box where a preview frame hasn't arrived yet.
+pub fn thumb_placeholder(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(SURFACE_INSET)),
+        border: Border {
+            color: LINE_SUBTLE,
+            width: 1.0,
+            radius: Radius::new(6.0),
+        },
+        text_color: Some(TEXT_MUTED),
+        ..container::Style::default()
+    }
+}
+
 // ---- typography helpers -------------------------------------------------------
 
 /// Fakes the web app's `letter-spacing: 0.06em` on uppercase section titles:
@@ -355,14 +421,10 @@ pub fn panel_live(_theme: &Theme) -> container::Style {
 /// Primary button with depth: accent gradient + a soft accent glow.
 pub fn button_primary_rich(_theme: &Theme, status: button::Status) -> button::Style {
     let (top, bottom) = match status {
-        button::Status::Hovered | button::Status::Pressed => (
-            rgba(140, 143, 255, 0.95),
-            rgba(112, 114, 245, 0.95),
-        ),
-        button::Status::Disabled => (
-            Color { a: 0.30, ..ACCENT },
-            Color { a: 0.25, ..ACCENT },
-        ),
+        button::Status::Hovered | button::Status::Pressed => {
+            (rgba(140, 143, 255, 0.95), rgba(112, 114, 245, 0.95))
+        }
+        button::Status::Disabled => (Color { a: 0.30, ..ACCENT }, Color { a: 0.25, ..ACCENT }),
         _ => (rgba(118, 121, 250, 0.95), rgba(88, 91, 233, 0.95)),
     };
     button::Style {
@@ -379,7 +441,11 @@ pub fn button_primary_rich(_theme: &Theme, status: button::Status) -> button::St
         },
         shadow: Shadow {
             color: Color {
-                a: if matches!(status, button::Status::Disabled) { 0.0 } else { 0.35 },
+                a: if matches!(status, button::Status::Disabled) {
+                    0.0
+                } else {
+                    0.35
+                },
                 ..ACCENT
             },
             offset: iced::Vector::new(0.0, 4.0),

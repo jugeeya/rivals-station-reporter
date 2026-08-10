@@ -287,28 +287,30 @@ impl EngineInner {
             // latches (which would otherwise report this machine's real,
             // irrelevant problems into the capture).
             s
-        } else { match (
-            &*self.replay_autosave_bad.lock().unwrap(),
-            &*self.clock_skew_bad.lock().unwrap(),
-            &*self.forward_bad.lock().unwrap(),
-        ) {
-            (Some((raw, first_seen_t)), _, _) => json!({
-                "msg": replay_autosave_warning(raw),
-                "error": true,
-                "t": first_seen_t,
-            }),
-            (_, Some((msg, first_seen_t)), _) => json!({
-                "msg": msg,
-                "error": true,
-                "t": first_seen_t,
-            }),
-            (_, _, Some((msg, first_seen_t))) => json!({
-                "msg": msg,
-                "error": true,
-                "t": first_seen_t,
-            }),
-            _ => self.status.lock().unwrap().clone(),
-        } };
+        } else {
+            match (
+                &*self.replay_autosave_bad.lock().unwrap(),
+                &*self.clock_skew_bad.lock().unwrap(),
+                &*self.forward_bad.lock().unwrap(),
+            ) {
+                (Some((raw, first_seen_t)), _, _) => json!({
+                    "msg": replay_autosave_warning(raw),
+                    "error": true,
+                    "t": first_seen_t,
+                }),
+                (_, Some((msg, first_seen_t)), _) => json!({
+                    "msg": msg,
+                    "error": true,
+                    "t": first_seen_t,
+                }),
+                (_, _, Some((msg, first_seen_t))) => json!({
+                    "msg": msg,
+                    "error": true,
+                    "t": first_seen_t,
+                }),
+                _ => self.status.lock().unwrap().clone(),
+            }
+        };
         json!({
             "config": cfg,
             "status": status,

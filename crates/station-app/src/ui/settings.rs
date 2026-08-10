@@ -1,7 +1,9 @@
 //! Settings drawer — port of SettingsDrawer.vue. Edits a draft of the
 //! config; nothing applies until Save (which rebuilds the engine).
 
-use iced::widget::{button, checkbox, column, container, pick_list, row, scrollable, text, text_input, Space};
+use iced::widget::{
+    button, checkbox, column, container, pick_list, row, scrollable, text, text_input, Space,
+};
 use iced::{Alignment, Element, Length, Task};
 
 use super::{blocking, App, Message};
@@ -243,7 +245,12 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 save: s.save.trim().to_string(),
                 replays: s.replays.trim().to_string(),
                 dir: s.dir.trim().to_string(),
-                idle: s.idle.trim().parse::<f64>().unwrap_or(420.0).clamp(30.0, 3600.0),
+                idle: s
+                    .idle
+                    .trim()
+                    .parse::<f64>()
+                    .unwrap_or(420.0)
+                    .clamp(30.0, 3600.0),
                 poll: s.poll.trim().parse::<f64>().unwrap_or(2.0).clamp(0.5, 60.0),
                 hub_port: s.hub_port.trim().parse().unwrap_or(8787),
                 dry_run: s.dry_run,
@@ -274,10 +281,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             if let UpdateFlow::Available(u) = &s.update {
                 let u = u.clone();
                 s.update = UpdateFlow::Downloading(u.clone());
-                return Task::perform(
-                    blocking(move || super::updater::apply(&u)),
-                    |r| Message::Settings(Msg::UpdateApplied(r)),
-                );
+                return Task::perform(blocking(move || super::updater::apply(&u)), |r| {
+                    Message::Settings(Msg::UpdateApplied(r))
+                });
             }
         }
         Msg::UpdateApplied(r) => {
@@ -332,21 +338,17 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 |r| Message::Settings(Msg::TagForgotten(r)),
             );
         }
-        Msg::TagForgotten(r) => {
-            match r {
-                Ok(()) => s.learned = commands::learned_tags(&app.engine),
-                Err(e) => s.err = e,
-            }
-        }
+        Msg::TagForgotten(r) => match r {
+            Ok(()) => s.learned = commands::learned_tags(&app.engine),
+            Err(e) => s.err = e,
+        },
     }
     Task::none()
 }
 
 pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
     let label = |t: &'static str| text(t).size(12).color(theme::TEXT_MUTED);
-    let field = |l: &'static str, input: Element<'a, Message>| {
-        column![label(l), input].spacing(4)
-    };
+    let field = |l: &'static str, input: Element<'a, Message>| column![label(l), input].spacing(4);
     let ti = |placeholder: &'a str, value: &'a str, f: fn(String) -> Msg| {
         text_input(placeholder, value)
             .style(theme::input)
@@ -359,7 +361,10 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
     let is_operator = s.mode != "station";
 
     let mut col = column![row![
-        text("Settings").font(theme::FONT_DISPLAY).size(18).color(theme::TEXT_PRIMARY),
+        text("Settings")
+            .font(theme::FONT_DISPLAY)
+            .size(18)
+            .color(theme::TEXT_PRIMARY),
         Space::new().width(Length::Fill),
         button(text("✕").size(14))
             .style(theme::button_linkish)
@@ -371,7 +376,11 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
     col = col.push(field(
         "Mode",
         pick_list(
-            vec!["station".to_string(), "operator".to_string(), "both".to_string()],
+            vec![
+                "station".to_string(),
+                "operator".to_string(),
+                "both".to_string(),
+            ],
             Some(s.mode.clone()),
             |v| Message::Settings(Msg::Mode(v)),
         )
@@ -383,20 +392,31 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
     ));
 
     if is_station {
-        col = col.push(field("Station number", ti("1", &s.station, Msg::Station).into()));
+        col = col.push(field(
+            "Station number",
+            ti("1", &s.station, Msg::Station).into(),
+        ));
     }
-    col = col.push(field("start.gg event slug", ti("tournament/…/event/…", &s.slug, Msg::Slug).into()));
+    col = col.push(field(
+        "start.gg event slug",
+        ti("tournament/…/event/…", &s.slug, Msg::Slug).into(),
+    ));
     if is_station {
         let mut hub_field = column![
             label("Hub / broker URL"),
             row![
                 ti("http://…:8787", &s.broker, Msg::Broker),
-                button(text(if s.scanning { "Scanning…" } else { "Find hub" }).size(12))
-                    .style(theme::button_surface)
-                    .padding([7, 10])
-                    .on_press_maybe(
-                        (!s.scanning).then_some(Message::Settings(Msg::ScanHubs))
-                    ),
+                button(
+                    text(if s.scanning {
+                        "Scanning…"
+                    } else {
+                        "Find hub"
+                    })
+                    .size(12)
+                )
+                .style(theme::button_surface)
+                .padding([7, 10])
+                .on_press_maybe((!s.scanning).then_some(Message::Settings(Msg::ScanHubs))),
             ]
             .spacing(6),
         ]
@@ -405,7 +425,9 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
             let label_txt = format!(
                 "{} · {}{}",
                 h.url,
-                h.slug.clone().unwrap_or_else(|| "no event configured".into()),
+                h.slug
+                    .clone()
+                    .unwrap_or_else(|| "no event configured".into()),
                 if h.startgg { "" } else { ", no start.gg token" }
             );
             hub_field = hub_field.push(
@@ -417,7 +439,9 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
         }
         if s.scanned && s.hubs.is_empty() {
             hub_field = hub_field.push(
-                text("No hub found on this network.").size(11).color(theme::TEXT_MUTED),
+                text("No hub found on this network.")
+                    .size(11)
+                    .color(theme::TEXT_MUTED),
             );
         }
         col = col.push(hub_field);
@@ -443,7 +467,10 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
                 .on_input(|v| Message::Settings(Msg::Token(v)))
                 .into(),
         ));
-        col = col.push(field("Hub port", ti("8787", &s.hub_port, Msg::HubPort).into()));
+        col = col.push(field(
+            "Hub port",
+            ti("8787", &s.hub_port, Msg::HubPort).into(),
+        ));
     }
     if is_station {
         let with_browse = |input: Element<'a, Message>, pick: Msg| {
@@ -462,8 +489,11 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
         ));
         col = col.push(field(
             "Replays folder",
-            with_browse(ti("auto-detect", &s.replays, Msg::Replays).into(), Msg::PickReplays)
-                .into(),
+            with_browse(
+                ti("auto-detect", &s.replays, Msg::Replays).into(),
+                Msg::PickReplays,
+            )
+            .into(),
         ));
         col = col.push(field(
             "Output folder",
@@ -494,15 +524,18 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
     );
 
     if is_operator && !s.learned.is_empty() {
-        let mut sec = column![
-            label("Learned tags (corrections remembered from Switch Players)"),
-        ]
+        let mut sec = column![label(
+            "Learned tags (corrections remembered from Switch Players)"
+        ),]
         .spacing(4);
         for (tag, gg) in &s.learned {
             let tag_c = tag.clone();
             sec = sec.push(
                 row![
-                    text(tag.clone()).font(theme::FONT_BODY_BOLD).size(12).color(theme::TEXT_PRIMARY),
+                    text(tag.clone())
+                        .font(theme::FONT_BODY_BOLD)
+                        .size(12)
+                        .color(theme::TEXT_PRIMARY),
                     text("→").size(12).color(theme::TEXT_MUTED),
                     text(gg.clone()).size(12).color(theme::TEXT_PRIMARY),
                     Space::new().width(Length::Fill),
@@ -515,7 +548,12 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
                 .align_y(Alignment::Center),
             );
         }
-        col = col.push(container(sec).style(theme::panel).padding(10).width(Length::Fill));
+        col = col.push(
+            container(sec)
+                .style(theme::panel)
+                .padding(10)
+                .width(Length::Fill),
+        );
     }
 
     if !s.err.is_empty() {

@@ -13,10 +13,10 @@ pub struct Prefs {
     pub last_slug: String,
     #[serde(default)]
     pub tournament_name: String,
-    /// A hub-state.json picked by hand (splitting on a machine that isn't the
-    /// operator PC). Empty = use this app's own hub data.
+    /// A sets folder picked by hand (splitting a VOD recorded on some other
+    /// machine). Empty = use this app's own `<out dir>/sets`.
     #[serde(default)]
-    pub hub_file: String,
+    pub sets_dir: String,
 }
 
 fn path_in(config_dir: &Path) -> std::path::PathBuf {

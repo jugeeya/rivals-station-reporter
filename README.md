@@ -42,11 +42,14 @@ And a built-in **VOD Splitter** (header → VOD Splitter): point it at
 a station's full OBS recording after the event and it cuts one clip per set,
 named `[Tournament] P1 (Char) vs. P2 (Char) - Round`. It fetches the
 bracket's set times from start.gg (no API token needed) and — because it
-lives inside the reporter — automatically overlays this app's own
-station-measured set times wherever a set was tracked, so those cuts land
-where games actually started and ended instead of on whenever someone
-clicked Start Match / Submit. Splitting on a different PC than the operator's?
-Copy `hub-state.json` over (it's small) and pick it with "Choose file…".
+lives inside the reporter — automatically overlays the station's own
+measured set times wherever a set was tracked, so those cuts land where
+games actually started and ended instead of on whenever someone clicked
+Start Match / Submit. The source is the per-set journals the station writes
+as each set finishes (`<out dir>/sets/set_*.json` — written once, never
+rewritten, so they survive restarts and later sessions); on the PC that both
+played and recorded, they're found automatically. Splitting somewhere else?
+Copy that station's `sets` folder over and pick it with "Choose folder…".
 
 The hub speaks the same `/matchlogger/*` HTTP API as the Cloudflare broker
 (`jugeeya.github.io/broker/worker.js`), so stations can point at either, and
@@ -114,11 +117,12 @@ save on this setup — names, colors, and controls, no in-game retyping.
 
 The VOD Splitter, after the event: station 3's recording cut into one clip
 per set, with real preview frames at each edge and ±nudge buttons. Sets the
-hub tracked carry a green ⏱ hub mark — their edges come from the station's
-own measurements and rarely need touching — while the flagged row shows the
-failure mode the warning exists for: start.gg never got a proper end time,
-so the clip runs 57 minutes. Split in place with ffmpeg (lossless stream
-copy), or export the cut list as CSV (LosslessCut), JSON, or a shell script.
+station recorded carry a green ⏱ station mark — their edges come from the
+station's own measurements and rarely need touching — while the flagged row
+shows the failure mode the warning exists for: start.gg never got a proper
+end time, so the clip runs 57 minutes. Split in place with ffmpeg (lossless
+stream copy), or export the cut list as CSV (LosslessCut), JSON, or a shell
+script.
 
 ## Install
 
@@ -209,19 +213,21 @@ computer so PATH updates take effect.
 ### Splitting workflow
 
 1. Open **VOD Splitter** from the header. The event is prefilled from this
-   app's config (any start.gg event URL or slug works), and on the operator
-   PC the hub's station-measured set times load automatically — the "Set
-   times" row shows how many. Splitting on a different PC? Copy the operator's
-   `hub-state.json` over (it's in the app config dir, e.g.
-   `~/.config/io.github.jugeeya.rivals-station-reporter/` on Linux) and point
-   "Choose file…" at it.
+   app's config (any start.gg event URL or slug works), and this station's
+   measured set times load automatically from its set journals — the "Set
+   times" row shows how many. On the usual setup (the station PC records its
+   own gameplay) that's everything, no clicking. Splitting a VOD recorded on
+   a different PC? Copy that station's `sets` folder over (it's in the out
+   dir: `matchlogger-out/sets/` under the app config dir, e.g.
+   `~/.config/io.github.jugeeya.rivals-station-reporter/` on Linux, unless an
+   out dir was configured) and point "Choose folder…" at it.
 2. Click `Fetch sets`. The tournament display name fills itself if you left
    it blank.
 3. Pick your station in the dropdown (e.g. Station 3).
 4. `Choose VOD…` and pick the full OBS file.
 5. "Recording started" pre-fills from the OBS filename — if it doesn't match
    the filename's hour:minutes:seconds, correct it to match.
-6. Click `Build clips`. Hub-timed sets carry a green ⏱ mark; those edges
+6. Click `Build clips`. Station-timed sets carry a green ⏱ mark; those edges
    basically never need touching. If a row is flagged
    **unusually long — check the end time**, find the true end in the VOD and
    type it in (Rivals 2 shows the current time in the top right, and the

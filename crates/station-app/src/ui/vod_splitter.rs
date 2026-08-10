@@ -2,11 +2,12 @@
 //! in. Turns a station's full OBS recording into one clip per set:
 //!
 //!   1. Fetch the event's sets from start.gg (no API token — public website
-//!      endpoint). Station-measured set times from THIS APP'S own hub are
-//!      overlaid automatically (`vodsplit::hub_times`), so cuts land where
-//!      games actually started and ended rather than on start.gg's
-//!      click-timestamps. A picked hub-state.json covers splitting on a
-//!      machine that isn't the operator PC.
+//!      endpoint). Station-measured set times are overlaid automatically
+//!      from this machine's own set journals (`<out dir>/sets/set_*.json`,
+//!      written once per set and never rewritten — see
+//!      `vodsplit::set_files`), so cuts land where games actually started
+//!      and ended rather than on start.gg's click-timestamps. A picked
+//!      folder covers splitting a VOD recorded on some other machine.
 //!   2. Point it at the VOD and say when the recording started.
 //!   3. Build clips for your station, check the preview frames, nudge.
 //!   4. Split with ffmpeg (stream copy — multi-GB VODs cut in seconds), or
@@ -27,9 +28,11 @@ use serde::Deserialize;
 
 use super::{App, Message, Screen};
 use crate::theme;
+use std::collections::HashMap;
+
 use crate::vodsplit::clip::{self, Clip, Edge};
 use crate::vodsplit::sets::{self, EventSets, SetInfo};
-use crate::vodsplit::{ffmpeg, hub_times, prefs::Prefs};
+use crate::vodsplit::{ffmpeg, prefs::Prefs, set_files};
 
 /// The ± offsets under each timecode. A real minus sign so the labels line up
 /// with the "+" ones instead of sitting a pixel high on a hyphen.
@@ -95,11 +98,17 @@ pub struct State {
     tournament: String,
 
     pub sets: Vec<SetInfo>,
-    /// Custom hub-state.json, when splitting away from the operator PC.
-    /// `None` = this app's own `<config dir>/hub-state.json`.
-    hub_file: Option<PathBuf>,
-    hub_times: Vec<hub_times::ReporterSet>,
-    hub_matched: usize,
+    /// Custom sets folder, when splitting a VOD recorded on another machine.
+    /// `None` = this app's own `<out dir>/sets`.
+    sets_dir: Option<PathBuf>,
+    /// This app's own sets folder, resolved from config when the screen
+    /// opens (the out dir is a config field the engine owns).
+    default_sets_dir: Option<PathBuf>,
+    local_sets: Vec<set_files::LocalSet>,
+    /// Best-effort station-set-id → start.gg-set-id links from hub state,
+    /// used only to make matches exact when they happen to still exist.
+    hub_links: HashMap<String, String>,
+    matched: usize,
     pub stations: Vec<StationChoice>,
     pub station: Option<StationChoice>,
     fetching: bool,
@@ -139,9 +148,9 @@ pub enum Msg {
     TournamentChanged(String),
     Fetch,
     Fetched(Result<EventSets, String>),
-    PickHubFile,
-    HubFilePicked(Option<PathBuf>),
-    UseAppHub,
+    PickSetsDir,
+    SetsDirPicked(Option<PathBuf>),
+    UseAppSets,
     StationPicked(StationChoice),
 
     PickVod,
@@ -182,18 +191,20 @@ pub enum Msg {
 impl State {
     pub fn new(config_dir: PathBuf) -> Self {
         let prefs = Prefs::load(&config_dir);
-        let mut st = Self {
+        let st = Self {
             slug: prefs.last_slug.clone(),
             tournament: prefs.tournament_name.clone(),
-            hub_file: match prefs.hub_file.as_str() {
+            sets_dir: match prefs.sets_dir.as_str() {
                 "" => None,
                 p => Some(PathBuf::from(p)),
             },
             prefs,
             config_dir,
             sets: Vec::new(),
-            hub_times: Vec::new(),
-            hub_matched: 0,
+            default_sets_dir: None,
+            local_sets: Vec::new(),
+            hub_links: HashMap::new(),
+            matched: 0,
             stations: Vec::new(),
             station: None,
             fetching: false,
@@ -215,7 +226,6 @@ impl State {
             status: "Fetch the event's sets, then point at the recording.".into(),
             tone: Tone::Plain,
         };
-        st.reload_hub_times();
         st
     }
 
@@ -233,34 +243,38 @@ impl State {
     fn save_prefs(&mut self) {
         self.prefs.last_slug = self.slug.clone();
         self.prefs.tournament_name = self.tournament.clone();
-        self.prefs.hub_file = self
-            .hub_file
+        self.prefs.sets_dir = self
+            .sets_dir
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         self.prefs.save(&self.config_dir);
     }
 
-    /// (Re)read station-measured times — from the picked file if there is
-    /// one, else this app's own hub state — and overlay them onto whatever
-    /// sets are currently fetched. Called on open so a bracket that finished
-    /// more sets since the last look is picked up without any clicking.
-    pub fn reload_hub_times(&mut self) {
-        let path = self
-            .hub_file
+    /// (Re)read the station's set journals — from the picked folder if there
+    /// is one, else this app's own `<out dir>/sets` — plus any exact links
+    /// hub state can still offer, and overlay onto whatever sets are
+    /// currently fetched. Called on open so sets finished since the last
+    /// look are picked up without any clicking.
+    pub fn reload_local_sets(&mut self) {
+        let dir = self
+            .sets_dir
             .clone()
-            .unwrap_or_else(|| self.config_dir.join("hub-state.json"));
-        self.hub_times = hub_times::load_hub_state(&path).unwrap_or_default();
-        self.apply_hub_times();
+            .or_else(|| self.default_sets_dir.clone());
+        self.local_sets = dir
+            .map(|d| set_files::load_sets_dir(&d))
+            .unwrap_or_default();
+        self.hub_links = set_files::hub_links(&self.config_dir.join("hub-state.json"));
+        self.apply_local_times();
     }
 
-    /// Overlay hub times onto the fetched sets (exact start.gg-set-id join)
-    /// and remember how many landed, for the status line and row badges.
-    fn apply_hub_times(&mut self) {
-        self.hub_matched = if self.hub_times.is_empty() {
+    /// Overlay station-measured times onto the fetched sets and remember how
+    /// many landed, for the status line and row badges.
+    fn apply_local_times(&mut self) {
+        self.matched = if self.local_sets.is_empty() {
             0
         } else {
-            hub_times::merge_times(&mut self.sets, &self.hub_times)
+            set_files::overlay_times(&mut self.sets, &self.local_sets, &self.hub_links)
         };
     }
 
@@ -383,7 +397,7 @@ impl State {
             Msg::Fetched(Ok(data)) => {
                 self.fetching = false;
                 self.sets = data.sets;
-                self.apply_hub_times();
+                self.apply_local_times();
                 if self.tournament.trim().is_empty() {
                     self.tournament = data.tournament_name.clone();
                 }
@@ -394,8 +408,8 @@ impl State {
                         Tone::Warn,
                     );
                 } else {
-                    let precise = if self.hub_matched > 0 {
-                        format!(" · {} with station-measured times", self.hub_matched)
+                    let precise = if self.matched > 0 {
+                        format!(" · {} with station-measured times", self.matched)
                     } else {
                         String::new()
                     };
@@ -422,52 +436,55 @@ impl State {
                 Task::none()
             }
 
-            Msg::PickHubFile => Task::perform(
+            Msg::PickSetsDir => Task::perform(
                 async {
                     rfd::AsyncFileDialog::new()
-                        .set_title("Choose a hub-state.json")
-                        .add_filter("hub-state.json", &["json"])
-                        .pick_file()
+                        .set_title("Choose the recording station's set folder (…/sets)")
+                        .pick_folder()
                         .await
                         .map(|f| f.path().to_path_buf())
                 },
-                Msg::HubFilePicked,
+                Msg::SetsDirPicked,
             ),
-            Msg::HubFilePicked(None) => Task::none(),
-            Msg::HubFilePicked(Some(path)) => {
-                match hub_times::load_hub_state(&path) {
-                    Ok(ts) => {
-                        let usable = ts.len();
-                        self.hub_times = ts;
-                        self.hub_file = Some(path);
-                        self.apply_hub_times();
-                        self.save_prefs();
-                        let matched = if self.sets.is_empty() {
-                            "fetch the event to apply them".to_string()
-                        } else {
-                            format!(
-                                "{} of {} fetched sets matched",
-                                self.hub_matched,
-                                self.sets.len()
-                            )
-                        };
-                        self.say(
-                            format!("Hub data loaded: {usable} timed set(s) — {matched}."),
-                            Tone::Good,
-                        );
-                    }
-                    Err(e) => self.say(e, Tone::Bad),
+            Msg::SetsDirPicked(None) => Task::none(),
+            Msg::SetsDirPicked(Some(dir)) => {
+                self.sets_dir = Some(set_files::normalize_picked_dir(dir));
+                self.reload_local_sets();
+                self.save_prefs();
+                if self.local_sets.is_empty() {
+                    self.say(
+                        "No set files in that folder — expected set_*.json \
+                         (the out dir's sets/ folder).",
+                        Tone::Warn,
+                    );
+                } else {
+                    let matched = if self.sets.is_empty() {
+                        "fetch the event to apply them".to_string()
+                    } else {
+                        format!(
+                            "{} of {} fetched sets matched",
+                            self.matched,
+                            self.sets.len()
+                        )
+                    };
+                    self.say(
+                        format!(
+                            "{} recorded set(s) found — {matched}.",
+                            self.local_sets.len()
+                        ),
+                        Tone::Good,
+                    );
                 }
                 Task::none()
             }
-            Msg::UseAppHub => {
-                self.hub_file = None;
-                self.reload_hub_times();
+            Msg::UseAppSets => {
+                self.sets_dir = None;
+                self.reload_local_sets();
                 self.save_prefs();
                 self.say(
                     format!(
-                        "Using this app's hub data — {} timed set(s).",
-                        self.hub_times.len()
+                        "Using this station's recorded sets — {} found.",
+                        self.local_sets.len()
                     ),
                     Tone::Good,
                 );
@@ -852,13 +869,17 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
 }
 
 /// Called when the screen is opened: prefill the slug from the reporter's own
-/// configured event, re-read the hub's timed sets (a bracket keeps finishing
-/// sets while this screen is closed), and check for ffmpeg once.
+/// configured event, re-read this station's set journals (sets keep
+/// finishing while this screen is closed), and check for ffmpeg once.
 pub fn opened(app: &mut App) -> Task<Message> {
     if app.vod.slug.trim().is_empty() && !app.st.config.slug.is_empty() {
         app.vod.slug = app.st.config.slug.clone();
     }
-    app.vod.reload_hub_times();
+    app.vod.default_sets_dir = Some(set_files::default_sets_dir(
+        &app.vod.config_dir,
+        &app.st.config.dir,
+    ));
+    app.vod.reload_local_sets();
     if !app.vod.ffmpeg_checked {
         app.vod.ffmpeg_checked = true;
         return Task::perform(ffmpeg::probe_available(), Msg::FfmpegChecked).map(Message::Vod);
@@ -894,10 +915,10 @@ pub struct Seed {
     pub post: Option<f64>,
     #[serde(default)]
     pub sets: Vec<SeedSet>,
-    /// Pretend this many hub-timed sets are loaded, so the "Set times" row
-    /// reads as it would mid-tournament.
+    /// Pretend this many recorded set journals were found, so the "Set
+    /// times" row reads as it would mid-tournament.
     #[serde(default)]
-    pub hub_timed: Option<usize>,
+    pub timed_sets: Option<usize>,
     /// Build the clip list straight away, so the shot shows the payoff screen.
     #[serde(default)]
     pub build: bool,
@@ -913,7 +934,7 @@ pub struct SeedSet {
     pub full_round_text: Option<String>,
     #[serde(default)]
     pub players: Vec<SeedPlayer>,
-    /// Marks the set as hub-timed, so the shot shows the ⏱ badge.
+    /// Marks the set as station-timed, so the shot shows the ⏱ badge.
     #[serde(default)]
     pub precise: bool,
 }
@@ -968,15 +989,16 @@ pub fn apply_seed(app: &mut App, seed: Seed) -> Task<Message> {
             st.rec_start = clip::format_local(dt);
         }
     }
-    if let Some(n) = seed.hub_timed {
-        st.hub_times = (0..n)
-            .map(|i| hub_times::ReporterSet {
-                startgg_set_id: format!("seed-{i}"),
+    if let Some(n) = seed.timed_sets {
+        st.local_sets = (0..n)
+            .map(|i| set_files::LocalSet {
+                set_id: format!("seed-{i}"),
                 start_epoch: 1,
                 end_epoch: 2,
+                characters: Vec::new(),
             })
             .collect();
-        st.hub_matched = seed.sets.iter().filter(|s| s.precise).count();
+        st.matched = seed.sets.iter().filter(|s| s.precise).count();
     }
     if !seed.sets.is_empty() {
         st.sets = seed.sets.into_iter().map(|s| s.into_set()).collect();
@@ -1061,31 +1083,28 @@ fn screen(st: &State) -> Element<'_, Msg> {
     .align_y(Center);
 
     // ---- step 1: event ----------------------------------------------------------
-    let hub_label = match (&st.hub_file, st.hub_times.len()) {
-        (Some(p), n) => format!(
-            "{} — {n} timed set(s)",
-            p.file_name()
-                .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "picked file".into())
-        ),
-        (None, 0) => "no hub data yet — run a bracket here, or choose a file".to_string(),
-        (None, n) => format!("this app's hub data — {n} timed set(s)"),
+    let sets_label = match (&st.sets_dir, st.local_sets.len()) {
+        (Some(p), n) => format!("{} — {n} recorded set(s)", p.display()),
+        (None, 0) => {
+            "no recorded sets on this PC yet — or choose the recording station's folder".to_string()
+        }
+        (None, n) => format!("this station's recorded sets — {n} found"),
     };
-    let mut hub_row = row![
+    let mut sets_row = row![
         field_label("Set times"),
-        hint(hub_label),
-        button(text("Choose file…").size(12))
+        hint(sets_label),
+        button(text("Choose folder…").size(12))
             .style(theme::button_surface)
             .padding([4, 10])
-            .on_press(Msg::PickHubFile),
+            .on_press(Msg::PickSetsDir),
     ]
     .spacing(10)
     .align_y(Center);
-    if st.hub_file.is_some() {
-        hub_row = hub_row.push(
-            button(text("Use this app's data").size(12))
+    if st.sets_dir.is_some() {
+        sets_row = sets_row.push(
+            button(text("Use this station's sets").size(12))
                 .style(theme::button_linkish)
-                .on_press(Msg::UseAppHub),
+                .on_press(Msg::UseAppSets),
         );
     }
 
@@ -1115,7 +1134,7 @@ fn screen(st: &State) -> Element<'_, Msg> {
         ]
         .spacing(10)
         .align_y(Center),
-        hub_row,
+        sets_row,
     ]
     .spacing(10);
 
@@ -1397,10 +1416,10 @@ fn clip_row(index: usize, row_state: &ClipRow) -> Element<'_, Msg> {
     ]
     .spacing(10);
 
-    // Hub-timed cuts get a quiet mark: these edges came from the station's own
-    // measurements, so they rarely need nudging.
+    // Station-timed cuts get a quiet mark: these edges came from the
+    // station's own measurements, so they rarely need nudging.
     let precise_mark: Element<'_, Msg> = if one.precise {
-        text("⏱ hub").size(11).color(theme::TEXT_SUCCESS).into()
+        text("⏱ station").size(11).color(theme::TEXT_SUCCESS).into()
     } else {
         Space::new().into()
     };
@@ -1594,19 +1613,37 @@ mod tests {
     }
 
     #[test]
-    fn hub_times_overlay_on_fetch_results() {
+    fn station_times_overlay_on_fetch_results() {
         let mut st = state_with_sets();
-        st.sets[0].id = Some("111".into());
-        st.hub_times = vec![hub_times::ReporterSet {
-            startgg_set_id: "111".into(),
+        // The first set's journal: measured window inside the click-window,
+        // matching characters — the fuzzy pass should claim exactly it.
+        st.local_sets = vec![set_files::LocalSet {
+            set_id: "20260101_010101".into(),
             start_epoch: 1_000_150,
             end_epoch: 1_000_350,
+            characters: vec!["Fleet".into(), "Zetter".into()],
         }];
-        st.apply_hub_times();
-        assert_eq!(st.hub_matched, 1);
+        st.apply_local_times();
+        assert_eq!(st.matched, 1);
         assert!(st.sets[0].precise);
         assert_eq!(st.sets[0].started_at, 1_000_150);
         assert!(!st.sets[1].precise);
+    }
+
+    #[test]
+    fn hub_link_makes_the_join_exact() {
+        let mut st = state_with_sets();
+        st.sets[0].id = Some("111".into());
+        st.local_sets = vec![set_files::LocalSet {
+            set_id: "20260101_010101".into(),
+            start_epoch: 1_000_150,
+            end_epoch: 1_000_350,
+            characters: Vec::new(),
+        }];
+        st.hub_links.insert("20260101_010101".into(), "111".into());
+        st.apply_local_times();
+        assert_eq!(st.matched, 1);
+        assert!(st.sets[0].precise);
     }
 
     #[test]

@@ -137,10 +137,10 @@ if command -v ffmpeg >/dev/null; then
     || date -j -f '%Y-%m-%d %H:%M:%S' '2026-03-07 17:07:10' +%s)
 
   # Station 3's evening, same cast as the other shots. Two sets carry
-  # hub-measured times (precise -> the ⏱ badge); the Quarter-Final's end time
-  # is deliberately ~57 minutes after its start — results submitted long after
-  # the set actually ended is the exact case the too-long warning (and the hub
-  # overlay) exists for, and that station copy never covered it.
+  # station-measured times (precise -> the ⏱ badge); the Quarter-Final's end
+  # time is deliberately ~57 minutes after its start — results submitted long
+  # after the set actually ended is the exact case the too-long warning (and
+  # the set-journal overlay) exists for, and no journal covered that one.
   cat > "$WORK/vod-seed.json" <<EOF
 {"vodSplitter": {
   "slug": "$SLUG",
@@ -152,7 +152,7 @@ if command -v ffmpeg >/dev/null; then
   "pre": 5,
   "post": 8,
   "build": true,
-  "hub_timed": 4,
+  "timed_sets": 4,
   "sets": [
     {"started_at": $((REC + 120)), "completed_at": $((REC + 585)), "station": 3,
      "full_round_text": "Winners Round 2", "precise": true,

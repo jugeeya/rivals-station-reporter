@@ -25,7 +25,20 @@ widget. The full design is in `rivals-station-reporter-architecture.md`
   nothing ever advances the bracket on its own.
 - **Both** — one PC doing both jobs.
 
-There's also a built-in **VOD Splitter** (header → VOD Splitter): point it at
+There's also a built-in **Tag Installer** (header → Tag Installer): before
+the bracket, pull every entrant's saved tag — name, colors, controls — from
+the community tag database ([jugeeya.github.io/tags](https://jugeeya.github.io/tags/),
+uploads happen in the [Rivals 2 Tag Tool](https://github.com/alex-mireles/rivals-2-tag-tool))
+and install them into this setup's own Rivals 2 save. Paste the bracket URL
+and Find: entrants are matched to published tags by their start.gg account
+(never by name), matches are selected in one go, and whoever has nothing
+published is listed so you know before they walk up. Installs check
+save-format compatibility, overwrite same-named tags by default, never touch
+slot 0 (the setup owner's tag), and rename to the start.gg tag when two
+people share an in-game name so both land. Local `.r2tag` files install the
+same way.
+
+And a built-in **VOD Splitter** (header → VOD Splitter): point it at
 a station's full OBS recording after the event and it cuts one clip per set,
 named `[Tournament] P1 (Char) vs. P2 (Char) - Round`. It fetches the
 bracket's set times from start.gg (no API token needed) and — because it
@@ -89,6 +102,13 @@ just finished"; awaiting-report status lives on the operator's hub.
 
 Settings: mode, event, hub/broker (with LAN auto-discovery), paths, and the
 update checker, all editable without restarting.
+
+![Tag Installer](docs/screenshots/tag-installer.png)
+
+The Tag Installer, before the bracket: one Find against the event URL matched
+four entrants' published tags (selected, marked "bracket") and named the two
+entrants with nothing published. Install writes them into the game's own tag
+save on this setup — names, colors, and controls, no in-game retyping.
 
 ![VOD Splitter](docs/screenshots/vod-splitter.png)
 
@@ -235,8 +255,9 @@ cargo test -p station-app    # engine-layer tests
 Dev tricks: `RSR_CONFIG_DIR=/tmp/profile` runs against a scratch profile
 instead of the real one; `RSR_SCREENSHOT=out.png` renders the app, saves a
 screenshot after ~2s, and exits; `RSR_SEED_STATE=seed.json` freezes fixture
-data into the UI (a `vodSplitter` key seeds the splitter screen);
-`RSR_OPEN=settings|log|vod` opens a drawer — or the VOD Splitter — on launch.
+data into the UI (`vodSplitter` / `tagInstaller` keys seed those screens);
+`RSR_OPEN=settings|log|vod|tags` opens a drawer — or one of the tool
+screens — on launch.
 
 All logic lives in `crates/station-core` (no UI dependency) — 1:1 ports of
 the Python modules with their tests. `crates/station-app` is the Iced shell:

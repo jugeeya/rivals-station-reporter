@@ -174,4 +174,28 @@ else
   echo "ffmpeg not found — skipping vod-splitter.png" >&2
 fi
 
+# ---- Tag Installer ----------------------------------------------------------------
+# Display-only fixture: a bracket Find just matched four entrants' published
+# tags (selected + pinned), two entrants have nothing published, and the tag
+# save already holds three custom tags. No network, nothing installed.
+cat > "$WORK/tags-seed.json" <<EOF
+{"tagInstaller": {
+  "save_display": "C:\\\\Users\\\\Setup1\\\\AppData\\\\Local\\\\Rivals2\\\\Saved\\\\SaveGames\\\\Rivals2_PlayerTagSaveSlot.sav",
+  "save_tags": ["KAZE", "PIP", "BRUJITA"],
+  "bracket_url": "$SLUG",
+  "status": "Selected 4 tag(s) from Rivals 2 Singles.",
+  "misses": ["NAVI", "SLADE"],
+  "tags": [
+    {"name": "KAZE", "author": "kaze", "startgg_tag": "kaze", "matched": true},
+    {"name": "BRUJITA", "author": "brujita", "startgg_tag": "brujita", "matched": true},
+    {"name": "LOOM", "author": "loom", "startgg_tag": "loom", "matched": true},
+    {"name": "HyperFlame", "author": "hyperflame", "startgg_tag": "HyperFlame", "matched": true},
+    {"name": "Kimchi", "author": "kim", "startgg_tag": "kimchi"},
+    {"name": "Ani", "author": "ani", "startgg_tag": "ani"},
+    {"name": "Spyker", "author": "spyker", "startgg_tag": "spyker"}
+  ]
+}}
+EOF
+shot "$WORK/operator" "$WORK/tags-seed.json" tags tag-installer.png
+
 echo "done — $(ls "$OUT" | wc -l | tr -d ' ') screenshots in $OUT"

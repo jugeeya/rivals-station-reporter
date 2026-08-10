@@ -1,6 +1,6 @@
 [package]
 name = "station-app"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Rivals Station Reporter: native Iced UI over station-core (no webview)"
 
@@ -32,6 +32,7 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 chrono = "0.4.45"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+uesave = "0.7.1"      # GVAS save read/write for the Tag Installer
 
 # Tray + close-to-tray, on Windows/macOS only. On Linux, tray-icon needs the
 # whole GTK/appindicator stack at BUILD time (and a gtk event loop on the

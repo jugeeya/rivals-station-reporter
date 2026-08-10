@@ -10,6 +10,7 @@ pub mod format;
 pub mod main_view;
 pub mod onboarding;
 pub mod settings;
+pub mod tag_installer;
 pub mod tray;
 pub mod updater;
 pub mod vod_splitter;
@@ -47,6 +48,8 @@ pub enum Message {
     Settings(settings::Msg),
     Vod(vod_splitter::Msg),
     OpenVodSplitter,
+    Tags(tag_installer::Msg),
+    OpenTagInstaller,
     OpenSettings,
     ToggleLog,
     CopyHubUrl,
@@ -73,11 +76,12 @@ impl std::hash::Hash for Feed {
 }
 
 /// Which full-screen view is showing. Settings and the log stay overlays;
-/// the VOD Splitter is a real second screen.
+/// the VOD Splitter and Tag Installer are real second screens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Reporter,
     VodSplitter,
+    TagInstaller,
 }
 
 pub struct App {
@@ -92,6 +96,7 @@ pub struct App {
     pub console: console::State,
     pub current_sets: current_sets::State,
     pub vod: vod_splitter::State,
+    pub tag_installer: tag_installer::State,
     pub settings: Option<settings::State>,
     pub show_log: bool,
     pub now_s: i64,
@@ -136,6 +141,7 @@ impl App {
             console: console::State::default(),
             current_sets: current_sets::State::default(),
             vod: vod_splitter::State::new(config_dir),
+            tag_installer: tag_installer::State::default(),
             settings: None,
             show_log: false,
             now_s: station_core::now_sec(),
@@ -174,6 +180,13 @@ impl App {
                             seed_task = vod_splitter::apply_seed(&mut app, seed);
                         }
                     }
+                    // Tag Installer fixture — display-only, no network.
+                    if let Some(ts) = v.get("tagInstaller") {
+                        if let Ok(seed) = serde_json::from_value::<tag_installer::Seed>(ts.clone())
+                        {
+                            tag_installer::apply_seed(&mut app, seed);
+                        }
+                    }
                 }
             }
         }
@@ -183,11 +196,26 @@ impl App {
             }
             Ok("log") => app.show_log = true,
             Ok("vod") => app.screen = Screen::VodSplitter,
+            Ok("tags") => app.screen = Screen::TagInstaller,
             _ => {}
         }
 
+        // A screen opened via RSR_OPEN still needs its opened() hook (save
+        // detection, manifest/hub reloads) — except under a seed, where
+        // fixture state must not be overwritten by live lookups.
+        let open_task = if app.frozen {
+            Task::none()
+        } else {
+            match app.screen {
+                Screen::VodSplitter => vod_splitter::opened(&mut app),
+                Screen::TagInstaller => tag_installer::opened(&mut app),
+                Screen::Reporter => Task::none(),
+            }
+        };
+
         let mut boot = Task::batch([
             seed_task,
+            open_task,
             if configured_operator && !app.frozen {
                 current_sets::refresh(&mut app)
             } else {
@@ -249,6 +277,11 @@ impl App {
             Message::OpenVodSplitter => {
                 self.screen = Screen::VodSplitter;
                 vod_splitter::opened(self)
+            }
+            Message::Tags(msg) => tag_installer::update(self, msg),
+            Message::OpenTagInstaller => {
+                self.screen = Screen::TagInstaller;
+                tag_installer::opened(self)
             }
             Message::OpenSettings => {
                 self.settings = Some(settings::State::new(&self.st.config, &self.engine));
@@ -360,6 +393,8 @@ impl App {
             onboarding::view(self)
         } else if self.screen == Screen::VodSplitter {
             vod_splitter::view(self)
+        } else if self.screen == Screen::TagInstaller {
+            tag_installer::view(self)
         } else {
             main_view::view(self)
         };

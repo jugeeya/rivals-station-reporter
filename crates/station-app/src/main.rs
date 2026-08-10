@@ -5,6 +5,7 @@
 mod background;
 mod engine;
 mod model;
+mod tags;
 mod theme;
 mod ui;
 mod vodsplit;

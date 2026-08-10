@@ -38,6 +38,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
 
     let actions = row![
+        button(text("Tag Installer").size(13))
+            .style(theme::button_linkish)
+            .on_press(Message::OpenTagInstaller),
         button(text("VOD Splitter").size(13))
             .style(theme::button_linkish)
             .on_press(Message::OpenVodSplitter),

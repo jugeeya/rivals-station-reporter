@@ -2042,7 +2042,6 @@ impl Hub {
         // Everything else keeps the original order, assign then start, so a
         // failed assignment never leaves a match started at the wrong setup.
         let preview = is_preview_set_id(set_id);
-        let mut real_id = set_id.clone();
 
         if !preview {
             for d in &dests {
@@ -2053,15 +2052,15 @@ impl Hub {
             }
         }
 
-        match self.startgg.start_match(set_id) {
-            Ok(id) => real_id = id,
+        let real_id = match self.startgg.start_match(set_id) {
+            Ok(id) => id,
             Err(e) => {
                 return Err((
                     json!({"error": format!("start.gg start match failed: {}", e)}),
                     502,
                 ))
             }
-        }
+        };
         if preview && real_id != *set_id {
             (self.log)(&format!(
                 "started the bracket on start.gg: set {set_id_s} is now {}",

@@ -70,24 +70,27 @@ app itself: `./scripts/screenshots/native.sh` regenerates every image here
 First run: pick what this PC is; everything else is auto-detected or
 validated inline.
 
-![Operator console, three stations](docs/screenshots/operator-console.png)
+### The operator screen
 
-The operator console watching three stations at once: live sets grouped
-separately from finished-and-unreported ones, elapsed time and best-of taken
-from start.gg's own data when present (station 1 reads 18m and "first to 4"
-from the bracket, not the station's local guess), a per-game character strip
-with each game's winner ringed, and the tag-to-entrant mapping the hub would
-actually report, per player. Station 3's set is finished and awaiting a
-report — with auto-report on it would already have gone out; `edit result`
-corrects a set's games, characters and score whether or not it has.
+| [<img src="docs/screenshots/operator-console.png" width="400">](docs/screenshots/operator-console.png) | [<img src="docs/screenshots/available-sets.png" width="400">](docs/screenshots/available-sets.png) |
+|:--:|:--:|
+| **The console** | **Current Sets**, below it |
+| every station's sets, live and awaiting | what start.gg says is happening now |
 
-![Current Sets panel](docs/screenshots/available-sets.png)
+The console watches three stations at once: live sets grouped separately from
+finished-and-unreported ones, elapsed time and best-of taken from start.gg's
+own data when present (station 1 reads 18m and "first to 4" from the bracket,
+not the station's local guess), a per-game character strip with each game's
+winner ringed, and the tag-to-entrant mapping the hub would actually report,
+per player. Station 3's set is finished and awaiting a report — with
+auto-report on it would already have gone out; `edit result` corrects a set's
+games, characters and score whether or not it has.
 
-The Current Sets panel, below the console: everything start.gg's bracket
-shows happening right now, across the whole event. Playing now and startable
-sets are grouped separately, each with its own station AND stream picker (a
-set can sit at a station and on a stream at once); for a startable set,
-picking and clicking Start Match happens as a single action.
+Below it, Current Sets shows everything start.gg's bracket has happening
+right now, across the whole event. Playing-now and startable sets are grouped
+separately, each with its own station AND stream picker (a set can sit at a
+station and on a stream at once); for a startable set, picking and clicking
+Start Match happens as a single action.
 
 ### The Bracket screen
 
@@ -122,21 +125,22 @@ real set ids it gets back. Reporting is the one thing that needs the bracket
 live first, so the bar offers Start match and says why the winner buttons
 aren't there.
 
-![Station, idle between sets](docs/screenshots/station-idle.png)
+### A station, over one evening
 
-A station between sets: health chips up top, waiting for the next game.
+| [<img src="docs/screenshots/station-idle.png" width="270">](docs/screenshots/station-idle.png) | [<img src="docs/screenshots/station-live.png" width="270">](docs/screenshots/station-live.png) | [<img src="docs/screenshots/station-finished.png" width="270">](docs/screenshots/station-finished.png) |
+|:--:|:--:|:--:|
+| **Between sets** | **Mid-set** | **Just finished** |
+| health chips, waiting for a game | live score as it's played | the set it just closed out |
 
-![Station, set in progress](docs/screenshots/station-live.png)
+A station's whole job is on one screen: health chips up top, the set being
+played front and centre, earlier sets below (online ladder games greyed out —
+they never reach the bracket). Mid-set it shows the live score, both tags,
+current characters and resolved start.gg handles.
 
-A station mid-set: live score, both tags, current characters, resolved
-start.gg handles, and earlier sets below (online ladder games greyed out —
-they never reach the bracket).
-
-![Station, set just finished](docs/screenshots/station-finished.png)
-
-The same station right after a set ends — station 3's LOOM/KIM set from the
-operator screenshot, seen from its own PC. A station only ever knows "this
-just finished"; awaiting-report status lives on the operator's hub.
+The right-hand shot is station 3's LOOM/SLADE set from the operator
+screenshot, seen from its own PC. A station only ever knows "this just
+finished" — awaiting-report status, and the reporting itself, live on the
+operator's hub.
 
 ![Settings drawer open](docs/screenshots/settings.png)
 

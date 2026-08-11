@@ -1308,6 +1308,106 @@ impl Hub {
         }
     }
 
+    /// Finalize a bracket set start.gg's own page would finalize -- for the
+    /// Bracket screen, where the TO is looking at the tree rather than at a
+    /// station this hub tracks.
+    ///
+    /// `do_report` is the station path: it reports the set a station PLAYED,
+    /// carrying that station's per-game character data up with it. This one
+    /// has no station and no games behind it, only "this entrant won", so it
+    /// sends the winner alone. Everything else it guards exactly as
+    /// `do_report` does, because it is the same irreversible bracket write:
+    /// a token is required, a preview set is refused, the winner must really
+    /// be one of that set's entrants, and a set someone already finalized
+    /// elsewhere is refused rather than reported over.
+    ///
+    /// The entrant check runs against a fresh `available_sets` read rather
+    /// than anything the caller passed, the same way `do_start_match` resolves
+    /// destinations server-side -- a set id and a winner id from the frontend
+    /// are never trusted to belong together.
+    pub fn do_report_set(
+        &self,
+        slug: &str,
+        set_id: &Value,
+        winner_entrant_id: &Value,
+    ) -> Result<Value, (Value, u16)> {
+        if !self.startgg.enabled() {
+            return Err((
+                json!({"error": "No start.gg token configured on the hub."}),
+                501,
+            ));
+        }
+        reject_preview_set(set_id)?;
+
+        let wid = if truthy(Some(winner_entrant_id)) {
+            py_str(winner_entrant_id)
+        } else {
+            String::new()
+        };
+        if wid.is_empty() {
+            return Err((json!({"error": "Missing winnerEntrantId."}), 400));
+        }
+
+        let data = self
+            .startgg
+            .available_sets(slug)
+            .map_err(|e| (json!({"error": format!("start.gg error: {}", e)}), 502))?;
+        let empty = Vec::new();
+        let sets = data
+            .get("sets")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        let set_id_s = py_str(set_id);
+        let Some(target) = sets
+            .iter()
+            .find(|s| py_str(s.get("id").unwrap_or(&Value::Null)) == set_id_s)
+        else {
+            // Not in the startable/ongoing list at all. The overwhelmingly
+            // likely reason is that it already got reported (state 3 drops
+            // out of that filter), so say that rather than "not found".
+            return Err((
+                json!({"error": "That set is no longer awaiting a result — it may already have been reported."}),
+                409,
+            ));
+        };
+        let entrants = target
+            .get("entrants")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if !entrants
+            .iter()
+            .any(|e| py_str(e.get("id").unwrap_or(&Value::Null)) == wid)
+        {
+            return Err((
+                json!({"error": "winnerEntrantId is not one of this set's entrants."}),
+                400,
+            ));
+        }
+
+        // Last read before the write neither side can take back: a TO may
+        // have finalized this on start.gg's page since the list above.
+        if let Ok(state) = self.startgg.set_state(set_id) {
+            if py_int(Some(&state)) == Some(matching::STARTGG_STATE_COMPLETED) {
+                return Err((
+                    json!({"error": "This set was already reported directly on start.gg."}),
+                    409,
+                ));
+            }
+        }
+
+        if let Err(e) = self.startgg.report_set(set_id, &json!(wid.clone()), None) {
+            return Err((
+                json!({"error": format!("start.gg report failed: {}", e)}),
+                502,
+            ));
+        }
+        (self.log)(&format!(
+            "reported set {set_id_s} on start.gg from the bracket (winner {wid})"
+        ));
+        Ok(json!({ "ok": true, "setId": set_id, "winnerEntrantId": wid }))
+    }
+
     /// Sets for the operator's Current Sets panel -- both entrants
     /// determined, either playing now (state 2) or startable (state 1/6) --
     /// plus the event's stations. Read-only, like `event_view`.
@@ -3647,6 +3747,98 @@ mod tests {
         assert_eq!(
             err.1, 501,
             "no token configured -> 501, not a silent empty list"
+        );
+    }
+
+    // ---- Bracket screen: do_report_set ------------------------------------------
+    // The bracket's Report button writes to start.gg without any station
+    // behind it, so it carries do_report's guards on its own: token, preview
+    // ids, winner-really-belongs-to-this-set, and already-reported.
+
+    fn reportable_set(id: &str) -> Value {
+        json!({
+            "id": id, "fullRoundText": "Winners Final", "station": 1,
+            "entrants": [{"id": "E1", "name": "jugeeya"}, {"id": "E2", "name": "Kimchi"}],
+        })
+    }
+
+    fn hub_with_sets(sets: Value) -> (Hub, std::sync::Arc<FakeStartgg>) {
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({"sets": sets, "stations": [], "streams": []}));
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        (h, fake)
+    }
+
+    #[test]
+    fn bracket_report_sends_the_winner_alone() {
+        let (h, fake) = hub_with_sets(json!([reportable_set("S1")]));
+        let out = h.do_report_set(SLUG, &json!("S1"), &json!("E2")).unwrap();
+        assert_eq!(out["ok"], json!(true));
+        let reports = fake.reports();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].0, json!("S1"));
+        assert_eq!(reports[0].1, json!("E2"));
+        assert_eq!(
+            reports[0].2, None,
+            "no station played this, so there is no game data to send"
+        );
+    }
+
+    #[test]
+    fn bracket_report_refuses_a_winner_from_a_different_set() {
+        // The id pair comes from the frontend; it is checked against a fresh
+        // read, never taken on trust.
+        let (h, fake) = hub_with_sets(json!([reportable_set("S1")]));
+        let err = h
+            .do_report_set(SLUG, &json!("S1"), &json!("E9"))
+            .unwrap_err();
+        assert_eq!(err.1, 400);
+        assert!(fake.reports().is_empty(), "nothing was written");
+    }
+
+    #[test]
+    fn bracket_report_refuses_a_set_that_left_the_awaiting_list() {
+        // State 3 drops out of available_sets, which is how an already-
+        // reported set presents here.
+        let (h, fake) = hub_with_sets(json!([reportable_set("S1")]));
+        let err = h
+            .do_report_set(SLUG, &json!("S2"), &json!("E1"))
+            .unwrap_err();
+        assert_eq!(err.1, 409);
+        assert!(fake.reports().is_empty());
+    }
+
+    #[test]
+    fn bracket_report_refuses_a_set_finalized_on_start_gg_since_the_read() {
+        let (h, fake) = hub_with_sets(json!([reportable_set("S1")]));
+        fake.set_state_will_answer_for(&json!("S1"), json!(matching::STARTGG_STATE_COMPLETED));
+        let err = h
+            .do_report_set(SLUG, &json!("S1"), &json!("E1"))
+            .unwrap_err();
+        assert_eq!(err.1, 409);
+        assert!(
+            fake.reports().is_empty(),
+            "never report over someone else's result"
+        );
+    }
+
+    #[test]
+    fn bracket_report_refuses_preview_sets_and_missing_tokens() {
+        let (h, fake) = hub_with_sets(json!([reportable_set("preview_1_2_3")]));
+        let err = h
+            .do_report_set(SLUG, &json!("preview_1_2_3"), &json!("E1"))
+            .unwrap_err();
+        assert_eq!(err.1, 409, "a bracket not started on start.gg has no sets");
+        assert!(fake.reports().is_empty());
+
+        // No override: the real (token-less) client.
+        let h = Hub::new(None, None, None, None, None, None, None, None);
+        assert_eq!(
+            h.do_report_set(SLUG, &json!("S1"), &json!("E1"))
+                .unwrap_err()
+                .1,
+            501
         );
     }
 

@@ -65,6 +65,16 @@ pub fn report_winner(
     hub_glue::do_report(engine, station, set_id, winner_entrant_id)
 }
 
+/// Report a bracket set that no station tracked — the Bracket screen's
+/// Report button. Winner only; see `hub_glue::do_report_bracket_set`.
+pub fn report_bracket_set(
+    engine: &Arc<EngineInner>,
+    set_id: &str,
+    winner_entrant_id: &Value,
+) -> Result<Value, String> {
+    hub_glue::do_report_bracket_set(engine, set_id, winner_entrant_id)
+}
+
 pub fn swap_players(
     engine: &Arc<EngineInner>,
     station: i64,

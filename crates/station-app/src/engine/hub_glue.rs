@@ -182,6 +182,19 @@ pub fn do_report(
         .map_err(err_text)
 }
 
+/// Finalize a set from the Bracket screen, where there is no station behind
+/// it — winner only, no game data. Explicit operator action, same standing as
+/// `do_report`; see `Hub::do_report_set` for the guards it shares with it.
+pub fn do_report_bracket_set(
+    inner: &Arc<EngineInner>,
+    set_id: &str,
+    winner: &Value,
+) -> Result<Value, String> {
+    let (hub, slug) = hub_and_slug(inner)?;
+    hub.do_report_set(&slug, &json!(set_id), winner)
+        .map_err(err_text)
+}
+
 /// The station guessed the two players backwards — flip the mapping and
 /// re-push the corrected live score (the hub remembers the correction).
 pub fn do_swap(inner: &Arc<EngineInner>, station: i64, set_id: &str) -> Result<Value, String> {

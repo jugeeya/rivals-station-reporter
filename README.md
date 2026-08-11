@@ -85,6 +85,16 @@ sets are grouped separately, each with its own station AND stream picker (a
 set can sit at a station and on a stream at once); for a startable set,
 picking and clicking Start Match happens as a single action.
 
+![Bracket](docs/screenshots/bracket.png)
+
+The Bracket screen: the whole tree, so nobody has to keep start.gg's page
+open on a second monitor. Each set sits level with the sets that feed it,
+with the lines drawn in, so it reads as a bracket rather than a grid of
+rounds. Finished sets recede, the live one is highlighted,
+called-but-not-started is flagged, and empty seats show what's still waiting
+on an earlier round. Clicking any set opens the bar underneath — assign a
+station, call the match, or report a winner without leaving the app.
+
 ![Station, idle between sets](docs/screenshots/station-idle.png)
 
 A station between sets: health chips up top, waiting for the next game.
@@ -143,6 +153,36 @@ leave the window open — or minimized — while sets are being played.
 An existing `config.json` from the Python reporter uses the same keys and can
 be pasted into Settings field-by-field (the file lives at the app config dir
 once saved).
+
+## Bracket
+
+Header → **Bracket**: the event's whole tree, in the app. Winners above,
+losers below, each round a column, every set showing its entrants, the
+characters they played, and the score. Sets are placed against the sets that
+feed them and joined with connector lines, so you can follow who advances
+into what. Finished sets recede; the one playing right now is highlighted; a
+set called to a setup but not yet started is flagged; seats still waiting on
+an earlier round are drawn empty. Which station a set is on lives on the
+detail bar rather than the cards — across a whole bracket it was noise.
+
+Reading the bracket needs **no API token** — it uses start.gg's public
+website endpoint, so a station PC can pull it up too. Acting on it does:
+select any set and the bar underneath offers
+
+- **a station**, resolved to start.gg's own station id server-side,
+- **Start match** (`markSetInProgress` — the same call the Current Sets panel
+  makes, and still only ever from an explicit click), and
+- **a winner**, which finalizes the set on start.gg.
+
+Reporting from here sends the winner alone, with no per-game data — that's
+the difference from the operator console's Report button, which reports a set
+a station actually tracked and carries its character data up with it. Prefer
+the console for sets your stations covered; use this for everything else
+(an untracked setup, a DQ, a set someone played before the reporter was up).
+
+If a set can't be acted on, the bar says why rather than leaving dead
+buttons: no token configured, the phase isn't started on start.gg yet, the
+set is already reported, or it's still waiting on an earlier round.
 
 ## VOD Splitter
 

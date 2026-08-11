@@ -36,6 +36,9 @@ pub const TEXT_FAILURE: Color = rgba(0xf8, 0x71, 0x71, 1.0);
 pub const LINE: Color = rgba(255, 255, 255, 0.08);
 pub const LINE_SUBTLE: Color = rgba(255, 255, 255, 0.04);
 pub const LINE_DIVIDER: Color = rgba(255, 255, 255, 0.05);
+/// The bracket's feeder lines. Brighter than the hairlines above — they carry
+/// meaning (which set feeds which) rather than just separating things.
+pub const LINE_CONNECTOR: Color = rgba(255, 255, 255, 0.18);
 
 // The CSS radii are em-based (1em/0.5em at 16px root).
 pub const RADIUS_CARD: f32 = 16.0;
@@ -416,6 +419,75 @@ pub fn panel_live(_theme: &Theme) -> container::Style {
         text_color: Some(TEXT_PRIMARY),
         ..container::Style::default()
     }
+}
+
+// ---- bracket set cards ------------------------------------------------------
+// Every node in the drawn bracket is a button (clicking one selects it), so
+// these are button styles rather than container ones. The four variants are
+// the only states a TO needs to tell apart at a glance across a whole tree:
+// waiting, playing, done, and the one currently selected.
+
+fn set_card(
+    bg: Option<Background>,
+    border: Color,
+    width: f32,
+    status: button::Status,
+) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: if hovered {
+            Some(Background::Color(SURFACE_HOVER))
+        } else {
+            bg
+        },
+        text_color: TEXT_PRIMARY,
+        border: Border {
+            color: border,
+            width,
+            radius: Radius::new(RADIUS_PANEL),
+        },
+        ..button::Style::default()
+    }
+}
+
+/// Not played yet — the default node.
+pub fn bracket_set(_theme: &Theme, status: button::Status) -> button::Style {
+    set_card(Some(Background::Color(SURFACE_INSET)), LINE, 1.0, status)
+}
+
+/// In progress on start.gg right now. Reads the same as the "Now playing"
+/// card on the main screen, deliberately.
+pub fn bracket_set_live(_theme: &Theme, status: button::Status) -> button::Style {
+    set_card(
+        Some(vertical_gradient(
+            Color { a: 0.16, ..ACCENT },
+            Color { a: 0.05, ..ACCENT },
+        )),
+        Color { a: 0.45, ..ACCENT },
+        1.0,
+        status,
+    )
+}
+
+/// Finished. Recedes so the unplayed part of the bracket is what stands out.
+pub fn bracket_set_done(_theme: &Theme, status: button::Status) -> button::Style {
+    set_card(
+        Some(Background::Color(rgba(0, 0, 0, 0.14))),
+        LINE_SUBTLE,
+        1.0,
+        status,
+    )
+}
+
+/// The selected node, whatever its state — a heavier accent ring, so it stays
+/// findable after the action bar below has pushed the tree around.
+pub fn bracket_set_selected(_theme: &Theme, status: button::Status) -> button::Style {
+    set_card(
+        Some(Background::Color(Color { a: 0.22, ..ACCENT })),
+        ACCENT_HOVER,
+        2.0,
+        status,
+    )
 }
 
 /// Primary button with depth: accent gradient + a soft accent glow.

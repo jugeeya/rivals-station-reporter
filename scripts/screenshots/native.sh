@@ -112,6 +112,20 @@ shot "$WORK/operator" "$WORK/empty-seed.json" "" operator-console.png
 # ---- Current Sets panel (seeded start.gg data; scrolled into view) ---------------
 RSR_SCROLL=end shot "$WORK/operator" "$WORK/operator/available-seed.json" "" available-sets.png
 
+# ---- Bracket ----------------------------------------------------------------------
+# Its own operator profile, because this is the one screen whose actions need
+# a start.gg token to be offered at all — and giving the shared operator
+# profile a token would silently flip the console shot's "start.gg" health
+# chip from ⚠ to ✓.
+mkdir -p "$WORK/bracket"
+cat > "$WORK/bracket/config.json" <<EOF
+{"mode":"operator","station":1,"broker":"","slug":"$SLUG","key":"k",
+ "startgg_token":"seeded-for-the-screenshot","save":"","replays":"","dir":"",
+ "idle":420,"poll":2,"hub_port":28789,"dry_run":false,"configured":true}
+EOF
+python3 scripts/screenshots/seed-bracket.py "$WORK/bracket" "$NOW"
+shot "$WORK/bracket" "$WORK/bracket/bracket-seed.json" bracket bracket.png
+
 # ---- settings drawer ------------------------------------------------------------
 shot "$WORK/st-idle" "$WORK/idle-seed.json" settings settings.png
 

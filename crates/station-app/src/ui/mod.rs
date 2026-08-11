@@ -3,6 +3,7 @@
 //! Sets, settings, log) in its own module carrying its own `Msg`/`State`/
 //! `view` — the same decomposition the Vue components had.
 
+pub mod bracket;
 pub mod chars;
 pub mod console;
 pub mod current_sets;
@@ -43,6 +44,8 @@ pub enum Message {
     /// Operator background refresh of Current Sets.
     SetsAutoRefresh,
     Onboarding(onboarding::Msg),
+    Bracket(bracket::Msg),
+    OpenBracket,
     Console(console::Msg),
     Sets(current_sets::Msg),
     Settings(settings::Msg),
@@ -80,6 +83,7 @@ impl std::hash::Hash for Feed {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Reporter,
+    Bracket,
     VodSplitter,
     TagInstaller,
 }
@@ -93,6 +97,7 @@ pub struct App {
     pub ready: bool,
     pub screen: Screen,
     pub onboarding: onboarding::State,
+    pub bracket: bracket::State,
     pub console: console::State,
     pub current_sets: current_sets::State,
     pub vod: vod_splitter::State,
@@ -138,6 +143,7 @@ impl App {
             ready: true,
             screen: Screen::Reporter,
             onboarding,
+            bracket: bracket::State::default(),
             console: console::State::default(),
             current_sets: current_sets::State::default(),
             vod: vod_splitter::State::new(config_dir),
@@ -180,6 +186,12 @@ impl App {
                             seed_task = vod_splitter::apply_seed(&mut app, seed);
                         }
                     }
+                    // Bracket fixture — that screen otherwise reads live.
+                    if let Some(bs) = v.get("bracket") {
+                        if let Ok(seed) = serde_json::from_value::<bracket::Seed>(bs.clone()) {
+                            bracket::apply_seed(&mut app, seed);
+                        }
+                    }
                     // Tag Installer fixture — display-only, no network.
                     if let Some(ts) = v.get("tagInstaller") {
                         if let Ok(seed) = serde_json::from_value::<tag_installer::Seed>(ts.clone())
@@ -195,6 +207,7 @@ impl App {
                 app.settings = Some(settings::State::new(&app.st.config, &app.engine))
             }
             Ok("log") => app.show_log = true,
+            Ok("bracket") => app.screen = Screen::Bracket,
             Ok("vod") => app.screen = Screen::VodSplitter,
             Ok("tags") => app.screen = Screen::TagInstaller,
             _ => {}
@@ -207,6 +220,7 @@ impl App {
             Task::none()
         } else {
             match app.screen {
+                Screen::Bracket => bracket::opened(&mut app),
                 Screen::VodSplitter => vod_splitter::opened(&mut app),
                 Screen::TagInstaller => tag_installer::opened(&mut app),
                 Screen::Reporter => Task::none(),
@@ -270,6 +284,11 @@ impl App {
                 }
             }
             Message::Onboarding(msg) => onboarding::update(self, msg),
+            Message::Bracket(msg) => bracket::update(self, msg),
+            Message::OpenBracket => {
+                self.screen = Screen::Bracket;
+                bracket::opened(self)
+            }
             Message::Console(msg) => console::update(self, msg),
             Message::Sets(msg) => current_sets::update(self, msg),
             Message::Settings(msg) => settings::update(self, msg),
@@ -323,8 +342,11 @@ impl App {
                 // finish so the shot never shows empty frame placeholders —
                 // with a ceiling so a stuck ffmpeg can't hang the capture.
                 let vod_busy = self.screen == Screen::VodSplitter && !self.vod.thumbs_idle();
+                // Likewise a live bracket read: capturing mid-fetch would
+                // shoot the "Reading the bracket…" placeholder.
+                let bracket_busy = self.screen == Screen::Bracket && self.bracket.loading;
                 let waited = self.started.elapsed().as_secs();
-                if (waited >= 2 && !vod_busy) || waited >= 20 {
+                if (waited >= 2 && !vod_busy && !bracket_busy) || waited >= 20 {
                     return iced::window::latest()
                         .then(|id| match id {
                             Some(id) => iced::window::screenshot(id).map(Some),
@@ -391,6 +413,8 @@ impl App {
                 .into()
         } else if !self.st.config.configured {
             onboarding::view(self)
+        } else if self.screen == Screen::Bracket {
+            bracket::view(self)
         } else if self.screen == Screen::VodSplitter {
             vod_splitter::view(self)
         } else if self.screen == Screen::TagInstaller {

@@ -73,8 +73,6 @@ Start Match happens as a single action.
 
 ## Bracket
 
-Click any of these for the full-size image.
-
 | [<img src="docs/screenshots/bracket.png" width="270">](docs/screenshots/bracket.png) | [<img src="docs/screenshots/bracket-unstarted.png" width="270">](docs/screenshots/bracket-unstarted.png) | [<img src="docs/screenshots/bracket-done.png" width="270">](docs/screenshots/bracket-done.png) |
 |:--:|:--:|:--:|
 | **Mid-event** | **Not started on start.gg** | **Finished** |
@@ -104,7 +102,7 @@ real set ids it gets back. Reporting is the one thing that needs the bracket
 live first, so the bar offers Start match and says why the winner buttons
 aren't there.
 
-Header → **Bracket**: the event's whole tree, in the app. Winners above,
+the event's whole tree, in the app. Winners above,
 losers below, each round a column, every set showing its entrants, the
 characters they played, and the score. Sets are placed against the sets that
 feed them and joined with connector lines, so you can follow who advances
@@ -150,27 +148,6 @@ The right-hand shot is station 3's LOOM/SLADE set from the operator
 screenshot, seen from its own PC. A station only ever knows "this just
 finished" — awaiting-report status, and the reporting itself, live on the
 operator's hub.
-
-## Tag Installer
-
-Header → **Tag Installer**. Before the bracket, pull every entrant's saved tag — name, colors, controls — from
-the community tag database ([jugeeya.github.io/tags](https://jugeeya.github.io/tags/),
-uploads happen in the [Rivals 2 Tag Tool](https://github.com/alex-mireles/rivals-2-tag-tool))
-and install them into this setup's own Rivals 2 save. Paste the bracket URL
-and Find: entrants are matched to published tags by their start.gg account
-(never by name), matches are selected in one go, and whoever has nothing
-published is listed so you know before they walk up. Installs check
-save-format compatibility, overwrite same-named tags by default, never touch
-slot 0 (the setup owner's tag), and rename to the start.gg tag when two
-people share an in-game name so both land. Local `.r2tag` files install the
-same way.
-
-![Tag Installer](docs/screenshots/tag-installer.png)
-
-The Tag Installer, before the bracket: one Find against the event URL matched
-four entrants' published tags (selected, marked "bracket") and named the two
-entrants with nothing published. Install writes them into the game's own tag
-save on this setup — names, colors, and controls, no in-game retyping.
 
 ## Auto-report
 
@@ -231,9 +208,29 @@ it are wrong too and need fixing on start.gg's own page.
 A correction survives the station re-ingesting the set (which has no idea you
 changed anything), and a 1–1 correction won't save: a set needs a winner.
 
+## Tag Installer
+
+Before the bracket, pull every entrant's saved tag — name, colors, controls — from
+the community tag database
+([jugeeya.github.io/tags](https://jugeeya.github.io/tags/)) and install them into this setup's own Rivals 2 save. Paste the bracket URL
+and Find: entrants are matched to published tags by their start.gg account
+(never by name), matches are selected in one go, and whoever has nothing
+published is listed so you know before they walk up. Installs check
+save-format compatibility, overwrite same-named tags by default, never touch
+slot 0 (the setup owner's tag), and rename to the start.gg tag when two
+people share an in-game name so both land. Local `.r2tag` files install the
+same way.
+
+![Tag Installer](docs/screenshots/tag-installer.png)
+
+The Tag Installer, before the bracket: one Find against the event URL matched
+four entrants' published tags (selected, marked "bracket") and named the two
+entrants with nothing published. Install writes them into the game's own tag
+save on this setup — names, colors, and controls, no in-game retyping.
+
 ## VOD Splitter
 
-Header → **VOD Splitter**. Point it at a station's full OBS recording after the event and it cuts one clip per set,
+Point it at a station's full OBS recording after the event and it cuts one clip per set,
 named `[Tournament] P1 (Char) vs. P2 (Char) - Round`. It fetches the
 bracket's set times from start.gg (no API token needed) and — because it
 lives inside the reporter — automatically overlays the station's own
@@ -351,12 +348,6 @@ land on the nearest keyframe rather than the exact millisecond. That's what
 the preview frames are for — if a clip starts a beat early or late, nudge it
 with the ±5s/30s/1m buttons.
 
-There's also a browser version at
-[jugeeya.github.io/vods](https://jugeeya.github.io/vods/) for quick jobs. It
-runs ffmpeg via WebAssembly, which is fine for a few short clips but slow on
-a multi-GB recording — that's what this built-in splitter is for. Prior art:
-[CGuadagnino/startgg-vod-splitter](https://github.com/CGuadagnino/startgg-vod-splitter).
-
 ## Install
 
 Grab the build from the latest GitHub release: Windows portable `.zip`,
@@ -364,8 +355,8 @@ macOS `.app` zip, Linux/SteamOS `.AppImage`. The UI is native (Iced — pure
 Rust, no webview), so there is no browser engine to configure on any
 platform. First run walks through setup: pick what this PC is, paste the
 start.gg event link (it echoes back the tournament name so a wrong paste is
-caught immediately), enter the shared key from whoever runs the event —
-done. Save/replay paths are auto-detected. Updates: Settings → "Check for
+caught immediately) — done. Stations find the operator's hub on the LAN by
+themselves. Save/replay paths are auto-detected. Updates: Settings → "Check for
 updates" downloads and applies the newest release in place.
 
 On Windows and macOS, closing the window sends the app to the tray and

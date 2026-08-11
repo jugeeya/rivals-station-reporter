@@ -4,7 +4,13 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_BROKER: &str = "https://r2tag-broker.jdsambasivam.workers.dev";
+/// The public Cloudflare broker. Still reachable, and still the right answer
+/// for a station that genuinely isn't on the operator's LAN — but NOT the
+/// default: a station that ships pointing at someone else's hosted service
+/// sends this event's sets off the network before anyone chooses to. A blank
+/// broker means "find the hub on this LAN", which is what every station at a
+/// normal event wants.
+pub const PUBLIC_BROKER: &str = "https://r2tag-broker.jdsambasivam.workers.dev";
 pub const DEFAULT_HUB_PORT: u16 = 8787;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +64,7 @@ impl Default for Config {
         Self {
             mode: "station".into(),
             station: 1,
-            broker: DEFAULT_BROKER.into(),
+            broker: String::new(),
             slug: String::new(),
             key: String::new(),
             startgg_token: String::new(),

@@ -179,12 +179,14 @@ reports itself only when **all** of the following hold:
   good enough to pre-select for you; it is nowhere near good enough to
   advance a bracket unwatched.
 
-One thing it can't work around: a bracket that hasn't been **started** on
-start.gg at all. Its sets don't exist there yet — start.gg reports them with
-placeholder ids and there is no API to start a phase — so nothing can be
-assigned, started or reported, and auto-report would silently do nothing all
-night. The Bracket screen says so in a banner rather than leaving you to
-discover it one refused click at a time.
+A bracket that hasn't been **started** on start.gg yet is handled too. Its
+sets are placeholders there, but starting any one of them from the Bracket
+screen (or Current Sets) materialises the whole phase — the same thing
+start.gg's own page does when you hit Start Match on an unstarted bracket —
+and the app rebinds to the real set ids it gets back. The Bracket screen
+notes the state so you know the first Start Match will do it. Reporting is
+the one thing that still needs the bracket live first, since a placeholder
+set has no id to report against.
 
 Anything short of that behaves exactly as before and waits for a click.
 Dry-run disables auto-report entirely. Auto-reported sets are labelled as

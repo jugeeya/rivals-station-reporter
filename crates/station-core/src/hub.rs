@@ -40,7 +40,7 @@ use serde_json::{json, Map, Value};
 
 use crate::matching;
 use crate::now_sec;
-use crate::startgg::{Startgg, StartggApi, StartggError, STATION_CACHE_S};
+use crate::startgg::{is_preview_set_id, Startgg, StartggApi, StartggError, STATION_CACHE_S};
 use crate::stats::{is_reportable, mode_label};
 
 pub const DEFAULT_PORT: u16 = 8787;
@@ -1400,14 +1400,29 @@ impl Hub {
         // Best-effort: if this fails, the report below fails too and says so
         // with start.gg's own words, which beats a second error about a
         // button the operator never pressed.
-        if truthy(rec.get("needsStartMatch"))
-            && !crate::startgg::is_preview_set_id(&rec["matchedStartggSetId"])
-        {
-            match self.startgg.start_match(&rec["matchedStartggSetId"]) {
-                Ok(()) => (self.log)(&format!(
-                    "started match for set {} on start.gg (nobody had)",
-                    py_str(&rec["matchedStartggSetId"])
-                )),
+        if truthy(rec.get("needsStartMatch")) {
+            let was = rec["matchedStartggSetId"].clone();
+            match self.startgg.start_match(&was) {
+                Ok(now) => {
+                    (self.log)(&format!(
+                        "started match for set {} on start.gg (nobody had)",
+                        py_str(&was)
+                    ));
+                    // Starting a preview set materialises the phase and
+                    // renames the set, so the report below has to go to the
+                    // id start.gg just handed back, not the one we asked
+                    // about. Persist it too, or the console keeps pointing at
+                    // a set id that no longer exists.
+                    if now != was {
+                        rec["matchedStartggSetId"] = now.clone();
+                        let key = sid(station, set_id);
+                        let mut s = self.state.lock().unwrap();
+                        if let Some(stored) = set_bucket(&mut s, slug).get_mut(&key) {
+                            stored["matchedStartggSetId"] = now;
+                        }
+                        self.touch(&mut s);
+                    }
+                }
                 Err(e) => (self.log)(&format!("could not start match before reporting: {e}")),
             }
         }
@@ -2016,27 +2031,62 @@ impl Hub {
                 ))
             }
         };
-        reject_preview_set(set_id)?;
+        // A PREVIEW set is one in a bracket start.gg hasn't started yet. It
+        // used to be refused here, which made "start the bracket" something
+        // only start.gg's own page could do. It isn't: starting a preview set
+        // materialises the whole phase and hands back the set's real id
+        // (confirmed live). So for those, start FIRST and assign afterwards
+        // against the id we get back -- the preview id stops existing.
+        //
+        // Everything else keeps the original order, assign then start, so a
+        // failed assignment never leaves a match started at the wrong setup.
+        let preview = is_preview_set_id(set_id);
+        let mut real_id = set_id.clone();
 
-        // A set can carry both a station and a stream at once; assign each
-        // requested one that differs from what's already set (an unchanged
-        // destination is skipped -- nothing to do), then start.
-        for d in &dests {
-            if !d.matches_current(target) {
-                let label = self.assign(&data, set_id, d)?;
-                (self.log)(&format!("assigned set {set_id_s} to {label} on start.gg"));
+        if !preview {
+            for d in &dests {
+                if !d.matches_current(target) {
+                    let label = self.assign(&data, set_id, d)?;
+                    (self.log)(&format!("assigned set {set_id_s} to {label} on start.gg"));
+                }
             }
         }
 
-        if let Err(e) = self.startgg.start_match(set_id) {
-            return Err((
-                json!({"error": format!("start.gg start match failed: {}", e)}),
-                502,
+        match self.startgg.start_match(set_id) {
+            Ok(id) => real_id = id,
+            Err(e) => {
+                return Err((
+                    json!({"error": format!("start.gg start match failed: {}", e)}),
+                    502,
+                ))
+            }
+        }
+        if preview && real_id != *set_id {
+            (self.log)(&format!(
+                "started the bracket on start.gg: set {set_id_s} is now {}",
+                py_str(&real_id)
             ));
         }
         (self.log)(&format!("started match for set {set_id_s} on start.gg"));
+
+        if preview {
+            // Re-read: every set in the phase just gained a real id, so the
+            // cached `data` above (and its station lookup) is stale.
+            let fresh = self
+                .startgg
+                .available_sets(slug)
+                .map_err(|e| (json!({"error": format!("start.gg error: {}", e)}), 502))?;
+            for d in &dests {
+                let label = self.assign(&fresh, &real_id, d)?;
+                (self.log)(&format!(
+                    "assigned set {} to {label} on start.gg",
+                    py_str(&real_id)
+                ));
+            }
+        }
+
         Ok(json!({
-            "ok": true, "setId": set_id,
+            "ok": true, "setId": real_id,
             "stationAssigned": station_number, "streamAssigned": stream_name,
         }))
     }
@@ -2797,6 +2847,8 @@ mod tests {
         /// Recorded setIds `start_match` was called with.
         start_calls: Mutex<Vec<Value>>,
         reset_calls: Mutex<Vec<Value>>,
+        /// (preview id, real id) of a set start.gg materialised.
+        materialised: Mutex<Option<(Value, Value)>>,
         assign_station_should_fail: Mutex<bool>,
         assign_stream_should_fail: Mutex<bool>,
         start_match_should_fail: Mutex<bool>,
@@ -2838,6 +2890,7 @@ mod tests {
                 assign_stream_calls: Mutex::new(Vec::new()),
                 start_calls: Mutex::new(Vec::new()),
                 reset_calls: Mutex::new(Vec::new()),
+                materialised: Mutex::new(None),
                 assign_station_should_fail: Mutex::new(false),
                 assign_stream_should_fail: Mutex::new(false),
                 start_match_should_fail: Mutex::new(false),
@@ -2900,6 +2953,10 @@ mod tests {
 
         fn reset_calls(&self) -> Vec<Value> {
             self.reset_calls.lock().unwrap().clone()
+        }
+
+        fn materialised(&self) -> Option<(Value, Value)> {
+            self.materialised.lock().unwrap().clone()
         }
 
         fn fail_assign_station(&self) {
@@ -3067,12 +3124,21 @@ mod tests {
                 .push((set_id.clone(), stream_id.clone()));
             Ok(())
         }
-        fn start_match(&self, set_id: &Value) -> Result<(), StartggError> {
+        fn start_match(&self, set_id: &Value) -> Result<Value, StartggError> {
             if *self.0.start_match_should_fail.lock().unwrap() {
                 return Err(StartggError("markSetInProgress failed".to_string()));
             }
             self.0.start_calls.lock().unwrap().push(set_id.clone());
-            Ok(())
+            // Starting a PREVIEW set materialises the phase and renames it,
+            // exactly as the live API does; a real set keeps its id.
+            Ok(match set_id.as_str() {
+                Some(s) if s.starts_with("preview") => {
+                    let real = json!(format!("real-{s}"));
+                    *self.0.materialised.lock().unwrap() = Some((set_id.clone(), real.clone()));
+                    real
+                }
+                _ => set_id.clone(),
+            })
         }
         fn reset_set(&self, set_id: &Value) -> Result<(), StartggError> {
             self.0.reset_calls.lock().unwrap().push(set_id.clone());
@@ -4921,7 +4987,14 @@ mod tests {
     /// start.gg says only "An unknown error has occurred" -- so refuse it here
     /// with something true, and don't spend the round trip.
     #[test]
-    fn do_start_match_refuses_a_preview_set_from_an_unstarted_bracket() {
+    fn starting_a_preview_set_starts_the_bracket_and_rebinds_to_its_real_id() {
+        // Verified against a live start.gg bracket: markSetInProgress on a
+        // preview set materialises the whole phase and answers with the set's
+        // REAL id. This used to be refused outright, which left "start the
+        // bracket" as something only start.gg's own page could do.
+        //
+        // Order matters here and only here: the station has to be assigned
+        // AFTER the start, because the preview id stops existing.
         let fake = FakeStartgg::new();
         fake.set_available_sets(json!({
             "sets": [set_with_station("preview_3396320_1_0", Value::Null)],
@@ -4931,21 +5004,52 @@ mod tests {
         let mut h = Hub::new(None, None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
-        let err = h
+        let out = h
             .do_start_match(SLUG, &json!("preview_3396320_1_0"), Some(2), None)
-            .expect_err("a preview set cannot be started");
-        assert_eq!(err.1, 409);
-        assert!(
-            err.0["error"]
-                .as_str()
-                .unwrap_or("")
-                .contains("hasn't been started"),
-            "the message must name the real cause, got: {}",
-            err.0["error"]
+            .expect("a preview set starts the bracket");
+        assert_eq!(
+            out["setId"],
+            json!("real-preview_3396320_1_0"),
+            "the caller is told the id start.gg now uses"
         );
+        assert_eq!(fake.start_calls().len(), 1);
+        assert_eq!(
+            fake.materialised(),
+            Some((
+                json!("preview_3396320_1_0"),
+                json!("real-preview_3396320_1_0")
+            ))
+        );
+        let assigns = fake.assign_calls();
+        assert_eq!(assigns.len(), 1, "the station still gets assigned");
+        assert_eq!(
+            assigns[0].0,
+            json!("real-preview_3396320_1_0"),
+            "assigned against the real id, not the preview one that is gone"
+        );
+    }
+
+    #[test]
+    fn a_real_set_is_still_assigned_before_it_is_started() {
+        // Unchanged for everything that isn't a preview: a failed assignment
+        // must never leave a match started at the wrong setup.
+        let fake = FakeStartgg::new();
+        fake.set_available_sets(json!({
+            "sets": [set_with_station("S1", Value::Null)],
+            "stations": stations_list(),
+            "streams": streams_list(),
+        }));
+        fake.fail_assign_station();
+        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+
+        let err = h
+            .do_start_match(SLUG, &json!("S1"), Some(2), None)
+            .expect_err("a failed assignment stops the start");
+        assert_eq!(err.1, 502);
         assert!(
-            fake.assign_calls().is_empty() && fake.start_calls().is_empty(),
-            "nothing may be sent to start.gg for a set that cannot accept it"
+            fake.start_calls().is_empty(),
+            "nothing was started at a setup it never reached"
         );
     }
 

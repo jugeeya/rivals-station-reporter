@@ -141,9 +141,16 @@ const ASSIGN_STATION_MUTATION: &str =
 // Same shape as `assignStation`, confirmed against the live schema.
 const ASSIGN_STREAM_MUTATION: &str =
     "mutation($setId:ID!,$streamId:ID!){ assignStream(setId:$setId, streamId:$streamId){ id } }";
-// The TO's call ("Start Match" on start.gg) -- never invoked automatically
-// anywhere else in this app; only this explicit operator-clicked path (see
-// hub.rs's `do_start_match`) is allowed to call it.
+// The TO's call ("Start Match" on start.gg).
+//
+// It returns the set's id, which matters more than it looks: called on a
+// PREVIEW set (one in a bracket start.gg hasn't started yet, id
+// "preview_3398971_1_1"), this materialises the whole phase -- every set in
+// it gains a real id -- and answers with the real id of the one it started.
+// Confirmed against a live test bracket: one call on one preview set turned
+// all five sets real. That is exactly what start.gg's own UI does when a TO
+// hits Start Match on an unstarted bracket, and it is why this app no longer
+// refuses preview sets here.
 const START_MATCH_MUTATION: &str =
     "mutation($setId:ID!){ markSetInProgress(setId:$setId){ id state } }";
 // Undo a reported set so a corrected result can be written over it. start.gg
@@ -202,9 +209,11 @@ pub trait StartggApi: Send + Sync {
     /// opaque GraphQL id (resolved from its name by the caller), never the
     /// name itself. See [`StartggApi::assign_station`]'s doc for why.
     fn assign_stream(&self, set_id: &Value, stream_id: &Value) -> Result<(), StartggError>;
-    /// `markSetInProgress` -- the TO's "Start Match" button. Only ever called
-    /// from an explicit operator action; never automatic.
-    fn start_match(&self, set_id: &Value) -> Result<(), StartggError>;
+    /// `markSetInProgress` -- the TO's "Start Match" button. Returns the id
+    /// of the set that was started, which is NOT the id passed in when that
+    /// was a preview set: starting one materialises the whole phase and every
+    /// set in it gets a real id.
+    fn start_match(&self, set_id: &Value) -> Result<Value, StartggError>;
     /// `resetSet` -- clear a reported result so a corrected one can replace
     /// it. Only reached from `Hub::do_rereport`, i.e. an operator fixing a
     /// set that was already written to the bracket.
@@ -528,9 +537,16 @@ impl Startgg {
     }
 
     /// See [`StartggApi::start_match`].
-    pub fn start_match(&self, set_id: &Value) -> Result<(), StartggError> {
-        self.gql(START_MATCH_MUTATION, json!({ "setId": set_id }))?;
-        Ok(())
+    pub fn start_match(&self, set_id: &Value) -> Result<Value, StartggError> {
+        let data = self.gql(START_MATCH_MUTATION, json!({ "setId": set_id }))?;
+        // The id start.gg answers with, which differs from the one sent when
+        // the set was a preview. Falling back to the requested id keeps this
+        // honest if the field is ever missing.
+        Ok(data
+            .pointer("/markSetInProgress/id")
+            .filter(|v| truthy(Some(v)))
+            .cloned()
+            .unwrap_or_else(|| set_id.clone()))
     }
 
     /// See [`StartggApi::reset_set`].
@@ -593,7 +609,7 @@ impl StartggApi for Startgg {
     fn assign_stream(&self, set_id: &Value, stream_id: &Value) -> Result<(), StartggError> {
         Startgg::assign_stream(self, set_id, stream_id)
     }
-    fn start_match(&self, set_id: &Value) -> Result<(), StartggError> {
+    fn start_match(&self, set_id: &Value) -> Result<Value, StartggError> {
         Startgg::start_match(self, set_id)
     }
     fn reset_set(&self, set_id: &Value) -> Result<(), StartggError> {

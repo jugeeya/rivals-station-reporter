@@ -372,11 +372,10 @@ fn screen<'a>(st: &'a State, ctx: &Ctx) -> Element<'a, Msg> {
     };
 
     // A phase that has not been started on start.gg reports its sets with
-    // placeholder ids: the tree is real enough to look at, but nothing in it
-    // can be assigned, started or reported, and auto-report will quietly do
-    // nothing all night. Say that once, up here, rather than only when
-    // someone clicks an action and gets refused per set. start.gg has no API
-    // to start a phase, so the fix genuinely is "go and press it there".
+    // placeholder ids. Starting any one of them materialises the whole phase
+    // (see `START_MATCH_MUTATION`), so this is a note about what the next
+    // click will do rather than a dead end — but it is worth saying, because
+    // nothing will report itself until someone does it.
     let unstarted = st
         .bracket
         .as_ref()
@@ -392,7 +391,7 @@ fn screen<'a>(st: &'a State, ctx: &Ctx) -> Element<'a, Msg> {
         content = content.push(
             container(
                 text(
-                    "This bracket hasn't been started on start.gg yet, so none of these sets exist there — they can't be assigned, started or reported, and nothing will report itself. Start the bracket on start.gg first.",
+                    "This bracket hasn't been started on start.gg yet. Starting any match here starts it — the sets become real and everything else works normally.",
                 )
                 .size(12)
                 .color(theme::TEXT_WARNING),
@@ -878,8 +877,6 @@ fn action_bar<'a>(st: &'a State, ctx: &Ctx) -> Option<Element<'a, Msg>> {
     // than leaving a row of dead buttons to explain itself.
     let blocked = if let Some(why) = &ctx.blocked {
         Some(why.clone())
-    } else if set.preview {
-        Some("This phase hasn't been started on start.gg yet.".to_string())
     } else if set.is_complete() {
         Some("Already reported.".to_string())
     } else if !set.is_ready() {
@@ -917,17 +914,31 @@ fn action_bar<'a>(st: &'a State, ctx: &Ctx) -> Option<Element<'a, Msg>> {
                 .style(theme::button_surface)
                 .on_press_maybe((!st.busy).then_some(Msg::StartMatch)),
                 Space::new().width(Length::Fixed(12.0)),
-                text(theme::tracked("Winner"))
+                text(theme::tracked(if set.preview { "" } else { "Winner" }))
                     .size(10)
                     .font(theme::FONT_BODY_SEMIBOLD)
                     .color(theme::TEXT_MUTED),
             ]
             .spacing(8)
             .align_y(Alignment::Center);
+            if set.preview {
+                // The set has no id on start.gg to report against yet.
+                // Starting it (above) is what gives it one — and starts the
+                // whole bracket — so say that instead of offering a button
+                // that could only fail.
+                r = r.push(
+                    text("start it first — the bracket isn't live on start.gg yet")
+                        .size(12)
+                        .color(theme::TEXT_MUTED),
+                );
+            }
             for slot in &set.slots {
                 let (Some(id), Some(name)) = (slot.entrant_id.clone(), slot.name.clone()) else {
                     continue;
                 };
+                if set.preview {
+                    break;
+                }
                 r = r.push(
                     button(text(name).size(13))
                         .style(theme::button_primary_rich)

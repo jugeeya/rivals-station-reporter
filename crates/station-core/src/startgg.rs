@@ -148,10 +148,9 @@ const START_MATCH_MUTATION: &str =
     "mutation($setId:ID!){ markSetInProgress(setId:$setId){ id state } }";
 // Undo a reported set so a corrected result can be written over it. start.gg
 // refuses reportBracketSet on a completed set, so without this a wrong result
-// could only be fixed on start.gg's own page. Taken from the published
-// schema, NOT introspected live like the mutations above -- if the signature
-// is wrong the error surfaces on the console row rather than silently doing
-// nothing. `resetDependentSets` is deliberately not passed: correcting one
+// could only be fixed on start.gg's own page. Signature confirmed by
+// introspecting the live schema: resetSet(setId: ID, resetDependentSets:
+// Boolean). `resetDependentSets` is deliberately not passed -- correcting one
 // set's score must not unseed rounds that have already been played.
 const RESET_SET_MUTATION: &str = "mutation($setId:ID!){ resetSet(setId:$setId){ id state } }";
 

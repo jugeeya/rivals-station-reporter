@@ -637,10 +637,11 @@ fn apply_games_override(rec: &mut Value, games: &Value, tag_map: &HashMap<String
 /// Deliberately strict. Auto-reporting advances a bracket, which is the one
 /// thing in this app nobody can undo from here, so it only ever fires on a
 /// set that is unambiguous on every axis: it finished properly, it is bound
-/// to a start.gg set, and the winner's tag matched an entrant EXACTLY. A
-/// "low" confidence match is a substring guess (see `matching::match_winner`)
-/// — good enough to offer the operator as a default, nowhere near good enough
-/// to advance a bracket unwatched.
+/// to a start.gg set, and the winner was matched with "high" confidence —
+/// an exact alias somewhere in the pair, or two independent partial reads
+/// corroborating each other (see `matching::match_winner`). A lone "low"
+/// match is one substring guess — good enough to offer the operator as a
+/// default, nowhere near good enough to advance a bracket unwatched.
 pub fn auto_report_blocker(rec: &Value) -> Option<&'static str> {
     if rec["status"] == *"reported" {
         return Some("already reported");

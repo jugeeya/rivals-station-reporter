@@ -275,8 +275,15 @@ fn id_of(e: &Value) -> Option<Value> {
 ///   1. the winner's tag matches an entrant exactly            -> high
 ///   2. two entrants, the LOSER's tag matches exactly: the
 ///      winner is the other entrant by elimination             -> high
-///   3. the winner's tag partially matches exactly one way     -> low
-///   4. two entrants, the loser partially matches: elimination -> low
+///   3. two entrants, and the winner's and loser's partial
+///      guesses each uniquely fit a DIFFERENT entrant: two
+///      independent guesses corroborating each other           -> high
+///   4. the winner's tag partially matches exactly one way     -> low
+///   5. two entrants, the loser partially matches: elimination -> low
+///
+/// "high" therefore means "certain enough to advance a bracket unwatched":
+/// either an exact alias somewhere in the pair, or two independent partial
+/// reads that agree on who is who.
 pub fn match_winner(
     st: &Value,
     entrants: Option<&Value>,
@@ -327,20 +334,22 @@ pub fn match_winner(
         };
     }
 
-    // Elimination needs exactly two entrants, and only makes sense when the
-    // loser's match doesn't ALSO fit the winner (identical tags, say).
+    // The loser's evidence, for the elimination and corroboration tiers.
+    // Only meaningful in a 1v1 against exactly two entrants.
+    let loser_hits: Option<Vec<Hit>> = (entrants_list.len() == 2 && !loser_aliases.is_empty())
+        .then(|| {
+            entrants_list
+                .iter()
+                .map(|e| hit_for(&loser_aliases, e))
+                .collect()
+        });
+
+    // Elimination: the loser points at one entrant strictly more strongly
+    // than the other; the winner is then the other one.
     let eliminate = |min: Hit| -> Option<&Value> {
-        if entrants_list.len() != 2 || loser_aliases.is_empty() {
-            return None;
-        }
-        let loser_hits: Vec<Hit> = entrants_list
-            .iter()
-            .map(|e| hit_for(&loser_aliases, e))
-            .collect();
-        // The loser must point at one entrant strictly more strongly than
-        // the other; the winner is then the other one.
-        for (i, h) in loser_hits.iter().enumerate() {
-            if *h >= min && loser_hits[1 - i] < *h {
+        let hits = loser_hits.as_ref()?;
+        for (i, h) in hits.iter().enumerate() {
+            if *h >= min && hits[1 - i] < *h {
                 return Some(&entrants_list[1 - i]);
             }
         }
@@ -354,15 +363,31 @@ pub fn match_winner(
         };
     }
 
-    let partials: Vec<&Value> = winner_hits
+    let partials: Vec<usize> = winner_hits
         .iter()
-        .filter(|(h, _)| *h == Hit::Partial)
-        .map(|(_, e)| *e)
+        .enumerate()
+        .filter(|(_, (h, _))| *h == Hit::Partial)
+        .map(|(i, _)| i)
         .collect();
+
+    // Mutual corroboration: the winner's guess uniquely fits one entrant and
+    // the loser's guess uniquely fits the OTHER. Two independent partial
+    // reads agreeing on who is who is as convincing as one exact read —
+    // ORB(won) vs C at The Hangout 4.1: "orb" ⊂ Orbital, "c" ⊂ coopR,
+    // nothing crossed. Certain enough to auto-report.
+    if let (Some(hits), &[wi]) = (loser_hits.as_ref(), partials.as_slice()) {
+        if hits[1 - wi] == Hit::Partial && hits[wi] == Hit::None {
+            return WinnerMatch {
+                candidate_winner_entrant_id: id_of(&entrants_list[wi]),
+                confidence: "high",
+            };
+        }
+    }
+
     // A partial guess that fits several entrants points nowhere.
-    if partials.len() == 1 {
+    if let &[wi] = partials.as_slice() {
         return WinnerMatch {
-            candidate_winner_entrant_id: id_of(partials[0]),
+            candidate_winner_entrant_id: id_of(&entrants_list[wi]),
             confidence: "low",
         };
     }
@@ -1102,9 +1127,9 @@ mod tests {
 /// (tournament/the-hangout-4-1/event/rivals-of-aether-ii-singles, 2026-08-08)
 /// — real in-game tags, real entrants, real winners, and the tag-database
 /// snapshot that was cached on the machine that night. Before the
-/// symbol-tag/elimination/abbreviation work, 8 of these 13 sets matched NO
-/// candidate winner (and none of those could auto-report); after it, all 13
-/// name the right entrant and 12 are exact enough to auto-report.
+/// symbol-tag/elimination/abbreviation/corroboration work, 8 of these 13
+/// sets matched NO candidate winner (and only 3 could auto-report); after
+/// it, all 13 name the right entrant at auto-report confidence.
 #[cfg(test)]
 mod hangout41 {
     use super::*;
@@ -1211,15 +1236,15 @@ mod hangout41 {
                 jugeeya.0,
                 "high",
             ),
-            // LR3: "C" is unmatchable-with-certainty either way; the winner's
-            // own substring guess (orb ⊂ orbital) carries it at "low".
+            // LR3: neither tag is certain alone, but the two partial reads
+            // corroborate — orb ⊂ Orbital, c ⊂ coopR, nothing crossed.
             (
                 "106270169",
                 ("ORB", "Etalus"),
                 ("C", "Absa"),
                 ents(orbital, coopr),
                 orbital.0,
-                "low",
+                "high",
             ),
             (
                 "106270110",
@@ -1307,9 +1332,9 @@ mod hangout41 {
     }
 
     #[test]
-    fn twelve_of_thirteen_would_auto_report() {
-        // Before this work: 3. The one holdout is ORB vs C — a substring
-        // guess against an opponent who can't corroborate it.
+    fn the_whole_night_would_auto_report() {
+        // Before this work: 3 of 13. The last holdout was ORB vs C, carried
+        // over the line by mutual corroboration of the two partial reads.
         let tags = tagdb();
         let high = the_night()
             .into_iter()
@@ -1317,7 +1342,7 @@ mod hangout41 {
                 match_winner(&set_1v1(*w, *l), Some(entrants), Some(&tags)).confidence == "high"
             })
             .count();
-        assert_eq!(high, 12);
+        assert_eq!(high, 13);
     }
 
     #[test]
@@ -1367,5 +1392,17 @@ mod hangout41 {
         let entrants = ents((1, "Alton"), (2, "Alvara"));
         let w = match_winner(&st, Some(&entrants), None);
         assert_eq!(w.confidence, "none");
+    }
+
+    #[test]
+    fn crossed_partial_reads_do_not_corroborate() {
+        // Winner's guess fits Orbital — but so does the LOSER's. Two reads
+        // pointing at the same entrant contradict rather than corroborate;
+        // the winner's own guess stands, at "low" only.
+        let st = set_1v1(("ORB", "Etalus"), ("BITAL", "Absa"));
+        let entrants = ents((24311105, "Orbital"), (24339847, "IKKI | coopR"));
+        let w = match_winner(&st, Some(&entrants), Some(&tagdb()));
+        assert_eq!(w.candidate_winner_entrant_id, Some(json!(24311105)));
+        assert_eq!(w.confidence, "low");
     }
 }

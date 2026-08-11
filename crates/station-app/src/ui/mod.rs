@@ -259,15 +259,6 @@ impl App {
         self.st.config.configured && self.st.config.mode != "station"
     }
 
-    /// Is any set currently counting down to reporting itself?
-    fn auto_report_pending(&self) -> bool {
-        self.st
-            .hub_snapshot
-            .sets
-            .iter()
-            .any(|r| r.get("autoReportAt").and_then(|v| v.as_i64()).is_some())
-    }
-
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::EngineState(v) => {
@@ -392,12 +383,7 @@ impl App {
                 }
             })
             .map(Message::EngineState),
-            // A pending auto-report is shown as a live countdown, so while one
-            // is running the clock has to move at the rate it's counting.
-            iced::time::every(std::time::Duration::from_secs(
-                if self.auto_report_pending() { 1 } else { 10 },
-            ))
-            .map(|_| Message::Tick),
+            iced::time::every(std::time::Duration::from_secs(10)).map(|_| Message::Tick),
             iced::window::close_requests().map(Message::CloseRequested),
         ];
         if self.tray.is_some() {

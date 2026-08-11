@@ -28,7 +28,6 @@ pub enum Msg {
     HubPort(String),
     DryRun(bool),
     AutoReport(bool),
-    AutoReportDelay(String),
     PickSave,
     PickReplays,
     PickDir,
@@ -91,7 +90,6 @@ pub struct State {
     hub_port: String,
     dry_run: bool,
     auto_report: bool,
-    auto_report_delay: String,
     autostart: bool,
     saving: bool,
     err: String,
@@ -119,7 +117,6 @@ impl State {
             hub_port: cfg.hub_port.to_string(),
             dry_run: cfg.dry_run,
             auto_report: cfg.auto_report,
-            auto_report_delay: cfg.auto_report_delay.to_string(),
             autostart: commands::get_autostart().unwrap_or(false),
             saving: false,
             err: String::new(),
@@ -180,7 +177,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::HubPort(v) => s.hub_port = v,
         Msg::DryRun(v) => s.dry_run = v,
         Msg::AutoReport(v) => s.auto_report = v,
-        Msg::AutoReportDelay(v) => s.auto_report_delay = v,
         Msg::PickSave => {
             return Task::perform(
                 async {
@@ -263,15 +259,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 hub_port: s.hub_port.trim().parse().unwrap_or(8787),
                 dry_run: s.dry_run,
                 auto_report: s.auto_report,
-                // Clamped, not rejected: 0 means "as soon as the sweep sees
-                // it", and anything past a few minutes stops being a hold-off
-                // and starts being a set everyone forgot about.
-                auto_report_delay: s
-                    .auto_report_delay
-                    .trim()
-                    .parse::<f64>()
-                    .unwrap_or(station_core::hub::DEFAULT_AUTO_REPORT_DELAY_S)
-                    .clamp(0.0, 600.0),
                 configured: true,
             };
             let engine = app.engine.clone();
@@ -535,13 +522,11 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
                 .on_toggle(|v| Message::Settings(Msg::AutoReport(v))),
         );
         if s.auto_report {
-            col = col.push(field(
-                "Wait before reporting (s)",
-                ti("60", &s.auto_report_delay, Msg::AutoReportDelay).into(),
-            ));
             col = col.push(
                 text(
-                    "Only sets that finished cleanly and whose winner matched a bracket                      entrant exactly. Anything else still waits for you.",
+                    "Reported as soon as the set ends — but only sets that finished cleanly and \
+                     whose winner matched a bracket entrant exactly. Anything else still waits \
+                     for you. Got one wrong? Fix it with \"edit result\" on the row.",
                 )
                 .size(11)
                 .color(theme::TEXT_MUTED),

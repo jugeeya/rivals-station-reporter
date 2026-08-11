@@ -45,12 +45,10 @@ pub struct Config {
     /// Report click. Only ever fires on an unambiguous set — see
     /// `station_core::hub::auto_report_blocker` for the full bar it has to
     /// clear; anything short of that still waits for a click. On by default,
-    /// with a hold-off during which the console shows the countdown and
-    /// offers Hold, so nothing reaches the bracket unannounced.
+    /// and immediate: a wrong result is fixed afterwards with `edit result`
+    /// (which re-reports over what start.gg already has) rather than by
+    /// making every correct result wait for a window nobody is watching.
     pub auto_report: bool,
-    /// Seconds a finished set waits before auto-reporting, so the operator can
-    /// see it coming and Swap or Hold it.
-    pub auto_report_delay: f64,
     /// True once the user has completed first-run setup.
     pub configured: bool,
 }
@@ -68,7 +66,6 @@ impl Default for Config {
             replays: String::new(),
             dir: String::new(),
             auto_report: true,
-            auto_report_delay: station_core::hub::DEFAULT_AUTO_REPORT_DELAY_S,
             idle: 420.0,
             poll: 2.0,
             hub_port: DEFAULT_HUB_PORT,

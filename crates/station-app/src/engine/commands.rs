@@ -86,14 +86,15 @@ pub fn override_result(
     hub_glue::do_override_result(engine, station, set_id, games)
 }
 
-/// Hold (or release) one set's auto-report — the console's Hold button.
-pub fn hold_auto_report(
+/// Re-report a set start.gg already has a result for, replacing it. Used
+/// after correcting a set that auto-report already sent.
+pub fn rereport_winner(
     engine: &Arc<EngineInner>,
     station: i64,
     set_id: &str,
-    hold: bool,
+    winner_entrant_id: &Value,
 ) -> Result<Value, String> {
-    hub_glue::do_hold_auto_report(engine, station, set_id, hold)
+    hub_glue::do_rereport(engine, station, set_id, winner_entrant_id)
 }
 
 pub fn swap_players(

@@ -3,11 +3,11 @@
 //! with the operator actions. Report opens a winner picker.
 //!
 //! Report used to be the only thing here that advanced a bracket. With
-//! auto-report on it isn't: an unambiguous finished set counts down and
-//! finalizes itself (see `station_core::hub::auto_report_blocker` for what
-//! qualifies). So an awaiting row has to show that countdown and offer a
-//! Hold — the operator finding out a set self-reported only by seeing the
-//! bracket move would be the worst version of this feature.
+//! auto-report on it isn't: an unambiguous finished set finalizes itself as
+//! soon as it ends (see `station_core::hub::auto_report_blocker` for what
+//! qualifies). There is no window to catch that in, by design — so the row
+//! says who reported it, and `edit result` stays available afterwards, which
+//! re-reports over what start.gg already has.
 
 use iced::widget::{button, column, container, pick_list, row, text, tooltip, Space};
 use iced::{Alignment, Element, Length, Task};
@@ -34,11 +34,11 @@ pub enum Msg {
         station: i64,
         set_id: String,
     },
-    /// Stop (or resume) this set finalizing itself.
-    Hold {
+    /// Report over a result start.gg already has (after correcting it).
+    ReReport {
         station: i64,
         set_id: String,
-        hold: bool,
+        winner: Value,
     },
     /// Open the result editor on this row, seeded from what the station saw.
     OpenEditor(String, Vec<EditGame>),
@@ -52,6 +52,9 @@ pub enum Msg {
     SaveEdit {
         station: i64,
         set_id: String,
+        /// The set already reached the bracket, so saving has to push the
+        /// correction over it rather than just storing it.
+        rereport: bool,
     },
     /// First click arms; the confirming second click deletes (the native
     /// stand-in for the old confirm dialog, one fewer window).
@@ -144,30 +147,23 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 },
             );
         }
-        Msg::Hold {
+        Msg::ReReport {
             station,
             set_id,
-            hold,
+            winner,
         } => {
             c.busy = true;
             c.action_msg.clear();
             let engine = app.engine.clone();
             return Task::perform(
                 blocking(move || {
-                    crate::engine::commands::hold_auto_report(&engine, station, &set_id, hold).map(
-                        |_| {
-                            if hold {
-                                "Auto-report held — report it yourself when ready.".to_string()
-                            } else {
-                                "Auto-report resumed.".to_string()
-                            }
-                        },
-                    )
+                    crate::engine::commands::rereport_winner(&engine, station, &set_id, &winner)
+                        .map(|_| "Re-reported to start.gg.".to_string())
                 }),
                 |r| {
                     Message::Console(Msg::Done {
                         result: r,
-                        bracket_changed: false,
+                        bracket_changed: true,
                     })
                 },
             );
@@ -216,7 +212,11 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 }
             }
         }
-        Msg::SaveEdit { station, set_id } => {
+        Msg::SaveEdit {
+            station,
+            set_id,
+            rereport,
+        } => {
             let Some((_, games)) = c.editing.clone() else {
                 return Task::none();
             };
@@ -239,13 +239,25 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             let engine = app.engine.clone();
             return Task::perform(
                 blocking(move || {
-                    crate::engine::commands::override_result(&engine, station, &set_id, &payload)
-                        .map(|_| "Result corrected.".to_string())
+                    let rec = crate::engine::commands::override_result(
+                        &engine, station, &set_id, &payload,
+                    )?;
+                    if !rereport {
+                        return Ok("Result corrected.".to_string());
+                    }
+                    // The bracket already has the old result, so the
+                    // correction is only real once start.gg has it too.
+                    let winner = rec
+                        .get("candidateWinnerEntrantId")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    crate::engine::commands::rereport_winner(&engine, station, &set_id, &winner)
+                        .map(|_| "Result corrected and re-reported.".to_string())
                 }),
-                |r| {
+                move |r| {
                     Message::Console(Msg::Done {
                         result: r,
-                        bracket_changed: false,
+                        bracket_changed: rereport,
                     })
                 },
             );
@@ -368,6 +380,9 @@ fn result_editor<'a>(
     station: i64,
     set_id: &str,
     busy: bool,
+    // `reported`: the set already reached the bracket, so saving has to push
+    // the correction over it — and the button should say so.
+    reported: bool,
 ) -> Element<'a, Message> {
     let wins = |slot: i64| games.iter().filter(|g| g.winner_slot == slot).count();
 
@@ -442,9 +457,16 @@ fn result_editor<'a>(
     if !busy && games.len() < MAX_EDIT_GAMES {
         add = add.on_press(Message::Console(Msg::EditAddGame));
     }
-    let mut save = button(text("Save result").size(12))
-        .style(theme::button_primary_rich)
-        .padding([5, 14]);
+    let mut save = button(
+        text(if reported {
+            "Save & re-report"
+        } else {
+            "Save result"
+        })
+        .size(12),
+    )
+    .style(theme::button_primary_rich)
+    .padding([5, 14]);
     // A drawn correction is a mistake, not a result: the hub would store it
     // with no winner and keep it off the bracket, so refuse it here where
     // there is somewhere to say why.
@@ -453,6 +475,7 @@ fn result_editor<'a>(
         save = save.on_press(Message::Console(Msg::SaveEdit {
             station,
             set_id: set_id.to_string(),
+            rereport: reported,
         }));
     }
     let mut foot = row![
@@ -978,6 +1001,7 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
             station,
             &set_id,
             busy,
+            status == "reported",
         ));
     }
     // Winner picker (inline, replaces the action row while open).
@@ -1037,14 +1061,6 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
     } else {
         // Action row.
         let mut actions = row![].spacing(8).align_y(Alignment::Center);
-        // A set finalizing itself has to say so before it happens, and be
-        // stoppable — otherwise the first the operator knows of a wrong
-        // mapping is the bracket already having advanced.
-        let auto_at = r.get("autoReportAt").and_then(|v| v.as_i64());
-        let held = r
-            .get("autoReportHold")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         if reportable && status != "reported" {
             let mut b = button(text("Report").size(13))
                 .style(theme::button_primary_rich)
@@ -1053,53 +1069,6 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
                 b = b.on_press(Message::Console(Msg::OpenPicker(key.clone())));
             }
             actions = actions.push(b);
-
-            if let Some(at) = auto_at {
-                let left = (at - app.now_s).max(0);
-                actions = actions.push(
-                    text(if left == 0 {
-                        "reporting itself now…".to_string()
-                    } else {
-                        format!("reports itself in {left}s")
-                    })
-                    .size(12)
-                    .color(theme::TEXT_WARNING),
-                );
-                let mut hold = button(text("hold").size(12))
-                    .style(theme::button_surface)
-                    .padding([5, 10]);
-                if !busy {
-                    hold = hold.on_press(Message::Console(Msg::Hold {
-                        station,
-                        set_id: set_id.clone(),
-                        hold: true,
-                    }));
-                }
-                actions = actions.push(tooltip(
-                    hold,
-                    container(
-                        text("Stop this set reporting itself. You can still report it by hand.")
-                            .size(12),
-                    )
-                    .style(theme::tooltip_bubble)
-                    .padding(8)
-                    .max_width(300),
-                    tooltip::Position::Top,
-                ));
-            } else if held {
-                let mut resume = button(text("resume auto-report").size(12))
-                    .style(theme::button_linkish)
-                    .padding([5, 8]);
-                if !busy {
-                    resume = resume.on_press(Message::Console(Msg::Hold {
-                        station,
-                        set_id: set_id.clone(),
-                        hold: false,
-                    }));
-                }
-                actions = actions.push(text("held").size(12).color(theme::TEXT_MUTED));
-                actions = actions.push(resume);
-            }
         } else if status == "reported" {
             let mut b = button(text("Re-report").size(12))
                 .style(theme::button_surface)
@@ -1121,7 +1090,7 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
         // An auto-report that gave up says why, rather than leaving the set
         // looking like it's still counting down to something.
         if let Some(e) = r.get("autoReportError").and_then(|v| v.as_str()) {
-            if status != "reported" && auto_at.is_none() && !held {
+            if status != "reported" {
                 actions = actions.push(
                     text(format!("auto-report stopped: {e}"))
                         .size(12)
@@ -1129,10 +1098,12 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
                 );
             }
         }
-        // Correcting the result is what makes auto-report reasonable: the
-        // station reads the save file, which is right almost always and wrong
-        // in ways it can't detect. Offered on anything not yet reported.
-        if status != "reported" {
+        // Correcting the result is what makes immediate auto-report
+        // reasonable: the station reads the save file, which is right almost
+        // always and wrong in ways it can't detect. Offered on REPORTED rows
+        // too — with no window before a set goes out, after the fact is the
+        // only time there is to catch one.
+        {
             let mut edit = button(text("✎ edit result").size(12))
                 .style(theme::button_linkish)
                 .padding([5, 8]);
@@ -1145,8 +1116,12 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
             actions = actions.push(tooltip(
                 edit,
                 container(
-                    text("Set the games, characters and score by hand. What you enter is what start.gg gets.")
-                        .size(12),
+                    text(if status == "reported" {
+                        "Fix a result that already went out. Saving re-reports it, resetting the set on start.gg first."
+                    } else {
+                        "Set the games, characters and score by hand. What you enter is what start.gg gets."
+                    })
+                    .size(12),
                 )
                 .style(theme::tooltip_bubble)
                 .padding(8)
@@ -1298,7 +1273,7 @@ mod tests {
         // The score is derived, never typed — it cannot disagree with the
         // games, and the games are what start.gg is told.
         let gs = games(5);
-        let el = result_editor(&gs, ["LOOM".into(), "SLADE".into()], 3, "s1", false);
+        let el = result_editor(&gs, ["LOOM".into(), "SLADE".into()], 3, "s1", false, false);
         let mut ui = iced_test::simulator(el);
         assert!(ui.find("Correct the result").is_ok());
         assert!(
@@ -1314,7 +1289,7 @@ mod tests {
         // The hub would store it with no winner and keep it off the bracket;
         // saying so here is better than letting it look accepted.
         let gs = games(2);
-        let el = result_editor(&gs, ["LOOM".into(), "SLADE".into()], 3, "s1", false);
+        let el = result_editor(&gs, ["LOOM".into(), "SLADE".into()], 3, "s1", false, false);
         let mut ui = iced_test::simulator(el);
         assert!(ui.find("LOOM 1–1 SLADE").is_ok());
         assert!(ui.find("a set needs a winner").is_ok());

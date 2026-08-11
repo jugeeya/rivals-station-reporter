@@ -146,6 +146,14 @@ const ASSIGN_STREAM_MUTATION: &str =
 // hub.rs's `do_start_match`) is allowed to call it.
 const START_MATCH_MUTATION: &str =
     "mutation($setId:ID!){ markSetInProgress(setId:$setId){ id state } }";
+// Undo a reported set so a corrected result can be written over it. start.gg
+// refuses reportBracketSet on a completed set, so without this a wrong result
+// could only be fixed on start.gg's own page. Taken from the published
+// schema, NOT introspected live like the mutations above -- if the signature
+// is wrong the error surfaces on the console row rather than silently doing
+// nothing. `resetDependentSets` is deliberately not passed: correcting one
+// set's score must not unseed rounds that have already been played.
+const RESET_SET_MUTATION: &str = "mutation($setId:ID!){ resetSet(setId:$setId){ id state } }";
 
 /// Error type mirroring Python's `StartggError(Exception)`: just a message.
 #[derive(Debug, Clone)]
@@ -198,6 +206,10 @@ pub trait StartggApi: Send + Sync {
     /// `markSetInProgress` -- the TO's "Start Match" button. Only ever called
     /// from an explicit operator action; never automatic.
     fn start_match(&self, set_id: &Value) -> Result<(), StartggError>;
+    /// `resetSet` -- clear a reported result so a corrected one can replace
+    /// it. Only reached from `Hub::do_rereport`, i.e. an operator fixing a
+    /// set that was already written to the bracket.
+    fn reset_set(&self, set_id: &Value) -> Result<(), StartggError>;
 }
 
 type LogFn = Box<dyn Fn(&str) + Send + Sync>;
@@ -522,6 +534,12 @@ impl Startgg {
         Ok(())
     }
 
+    /// See [`StartggApi::reset_set`].
+    pub fn reset_set(&self, set_id: &Value) -> Result<(), StartggError> {
+        self.gql(RESET_SET_MUTATION, json!({ "setId": set_id }))?;
+        Ok(())
+    }
+
     // -- test hooks ----------------------------------------------------------
     #[cfg(test)]
     fn seed_station_cache(&self, slug: &str, station: i64, fetched_at: f64, result: Value) {
@@ -578,6 +596,9 @@ impl StartggApi for Startgg {
     }
     fn start_match(&self, set_id: &Value) -> Result<(), StartggError> {
         Startgg::start_match(self, set_id)
+    }
+    fn reset_set(&self, set_id: &Value) -> Result<(), StartggError> {
+        Startgg::reset_set(self, set_id)
     }
 }
 

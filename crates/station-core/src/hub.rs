@@ -337,7 +337,7 @@ fn slot_entrants(
     json!(rows)
 }
 
-fn snapshot_of(s: &HubState, event_slug: Option<&str>, auto: AutoReport) -> Value {
+fn snapshot_of(s: &HubState, event_slug: Option<&str>) -> Value {
     let buckets = |m: &Map<String, Value>| -> Vec<Value> {
         match event_slug {
             Some(slug) => m.get(slug).cloned().into_iter().collect(),
@@ -352,17 +352,6 @@ fn snapshot_of(s: &HubState, event_slug: Option<&str>, auto: AutoReport) -> Valu
         }
     }
     out.sort_by_key(|b| std::cmp::Reverse(ingested(b)));
-    // When each set would finalize itself, as an absolute instant rather than
-    // a countdown: the snapshot is emitted on change, not every second, so a
-    // "seconds left" baked in here would be stale the moment it arrived. The
-    // console subtracts its own clock.
-    let now = now_sec();
-    for rec in out.iter_mut() {
-        rec["autoReportAt"] = match auto_report_in(rec, auto, now) {
-            Some(left) => json!(now + left),
-            None => Value::Null,
-        };
-    }
 
     let mut stations = Map::new();
     for bucket in buckets(&s.stations) {
@@ -480,28 +469,18 @@ pub struct Hub {
     auto_report: Mutex<AutoReport>,
 }
 
-/// Auto-report policy. Off, with no delay, is the historical behavior: every
-/// bracket write came from an operator clicking Report.
-#[derive(Debug, Clone, Copy)]
+/// Auto-report policy. Off means every bracket write comes from an operator
+/// clicking Report, which is how this app worked before.
+///
+/// There is deliberately no hold-off. A waiting period only helps if someone
+/// is watching the console at that moment, and it delays every correct result
+/// — the overwhelming majority — to hedge against the rare wrong one. A
+/// wrong result is instead fixed after the fact: correct the games and
+/// re-report, which resets the set on start.gg first (see `do_rereport`).
+#[derive(Debug, Clone, Copy, Default)]
 pub struct AutoReport {
     pub enabled: bool,
-    /// Seconds a finished set waits before finalizing itself. The window
-    /// exists so the operator can Swap a backwards mapping, Hold the set, or
-    /// just watch it go — an instant write past a wrong guess is the failure
-    /// mode this whole feature has to avoid.
-    pub delay_s: f64,
 }
-
-impl Default for AutoReport {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            delay_s: DEFAULT_AUTO_REPORT_DELAY_S,
-        }
-    }
-}
-
-pub const DEFAULT_AUTO_REPORT_DELAY_S: f64 = 60.0;
 
 /// How many times a failing auto-report is retried before the set is left to
 /// the operator. A network blip deserves another go; start.gg refusing the
@@ -692,9 +671,6 @@ pub fn auto_report_blocker(rec: &Value) -> Option<&'static str> {
     if rec["confidence"] != *"high" {
         return Some("winner is only a guess");
     }
-    if truthy(rec.get("autoReportHold")) {
-        return Some("held by the operator");
-    }
     if rec
         .get("autoReportAttempts")
         .and_then(|v| v.as_i64())
@@ -706,23 +682,9 @@ pub fn auto_report_blocker(rec: &Value) -> Option<&'static str> {
     None
 }
 
-/// Seconds until this record finalizes itself: `Some(0)` means now, `None`
-/// means never (auto-report off, or something in `auto_report_blocker`).
-/// The console renders this as a countdown so an operator can see one coming
-/// and Hold it.
-pub fn auto_report_in(rec: &Value, policy: AutoReport, now: i64) -> Option<i64> {
-    if !policy.enabled || auto_report_blocker(rec).is_some() {
-        return None;
-    }
-    // Counted from the last time someone touched this set (a swap, a result
-    // correction), falling back to the ingest that created it. A correction
-    // is exactly when someone is still looking, so it earns the full window
-    // again rather than firing the moment they finish typing.
-    let from = rec
-        .get("autoReportFrom")
-        .and_then(|v| v.as_i64())
-        .unwrap_or_else(|| ingested(rec));
-    Some((from + policy.delay_s as i64 - now).max(0))
+/// Will this record finalize itself the next time the sweep runs?
+pub fn auto_reports(rec: &Value, policy: AutoReport) -> bool {
+    policy.enabled && auto_report_blocker(rec).is_none()
 }
 
 impl Hub {
@@ -818,14 +780,9 @@ impl Hub {
         self.event_slug.lock().unwrap().clone()
     }
 
-    /// Set the auto-report policy (see [`AutoReport`]). A non-positive delay
-    /// is clamped to zero rather than rejected: "report immediately" is a
-    /// coherent thing to ask for, a negative wait is not.
+    /// Set the auto-report policy (see [`AutoReport`]).
     pub fn set_auto_report(&self, policy: AutoReport) {
-        *self.auto_report.lock().unwrap() = AutoReport {
-            delay_s: policy.delay_s.max(0.0),
-            ..policy
-        };
+        *self.auto_report.lock().unwrap() = policy;
     }
 
     pub fn auto_report(&self) -> AutoReport {
@@ -861,7 +818,7 @@ impl Hub {
         s.version += 1;
         self.save(s);
         if let Some(cb) = &self.on_change {
-            let snap = snapshot_of(s, self.event_slug().as_deref(), self.auto_report());
+            let snap = snapshot_of(s, self.event_slug().as_deref());
             // Python: try/except pass — an operator-UI error never stops the hub.
             let _ = catch_unwind(AssertUnwindSafe(|| cb(&snap)));
         }
@@ -1084,8 +1041,6 @@ impl Hub {
             "reportedWinnerEntrantId",
             "reportedGames",
             "reportedBy",
-            "autoReportHold",
-            "autoReportFrom",
             "editedGames",
             "editedAt",
         ] {
@@ -1294,7 +1249,7 @@ impl Hub {
         // holding the state lock can't deadlock against `touch` doing the same.
         let slug = self.event_slug();
         let s = self.state.lock().unwrap();
-        snapshot_of(&s, slug.as_deref(), self.auto_report())
+        snapshot_of(&s, slug.as_deref())
     }
 
     pub fn get_set(&self, slug: &str, station: i64, set_id: &Value) -> Option<Value> {
@@ -1609,14 +1564,13 @@ impl Hub {
         if !policy.enabled || !self.startgg.enabled() {
             return;
         }
-        let now = now_sec();
         // Collect first, then write: `do_report` takes the state lock itself,
         // and start.gg calls must never happen while holding it.
         let due: Vec<(i64, Value, Value)> = {
             let mut s = self.state.lock().unwrap();
             set_bucket(&mut s, slug)
                 .values()
-                .filter(|r| auto_report_in(r, policy, now) == Some(0))
+                .filter(|r| auto_reports(r, policy))
                 .filter_map(|r| {
                     Some((
                         r.get("station").and_then(|v| v.as_i64())?,
@@ -1673,6 +1627,78 @@ impl Hub {
         }
     }
 
+    /// Report a set that start.gg already has a result for, replacing it.
+    ///
+    /// This is the other half of removing the hold-off. Auto-report writes
+    /// the moment a set is unambiguous, so a wrong result is caught after it
+    /// reached the bracket rather than before — and `reportBracketSet` won't
+    /// touch a completed set, which is why plain `do_report` answers "already
+    /// reported directly on start.gg" here. So: reset the set on start.gg,
+    /// clear the stored refusal that check left behind, then report normally.
+    ///
+    /// The reset does NOT cascade to dependent sets (see
+    /// `RESET_SET_MUTATION`): fixing one score must not unseed rounds that
+    /// have already been played. If the correction changes who WON, the sets
+    /// downstream of it are wrong too and start.gg has to be told that on its
+    /// own page — this fixes the set it is given, and says so.
+    pub fn do_rereport(
+        &self,
+        slug: &str,
+        station: i64,
+        set_id: &Value,
+        winner_entrant_id: &Value,
+    ) -> Result<Value, (Value, u16)> {
+        if !self.startgg.enabled() {
+            return Err((
+                json!({"error": "No start.gg token configured on the hub."}),
+                501,
+            ));
+        }
+        let matched = self
+            .get_set(slug, station, set_id)
+            .and_then(|r| r.get("matchedStartggSetId").cloned())
+            .filter(|v| truthy(Some(v)));
+        let Some(matched) = matched else {
+            return Err((
+                json!({"error": "This set is not matched to a start.gg set."}),
+                409,
+            ));
+        };
+
+        // Only reset what actually needs resetting: a set whose earlier
+        // report never landed is still open, and resetting it would be a
+        // pointless write against a bracket someone else may be touching.
+        let completed = matches!(
+            self.startgg.set_state(&matched),
+            Ok(v) if py_int(Some(&v)) == Some(matching::STARTGG_STATE_COMPLETED)
+        );
+        if completed {
+            if let Err(e) = self.startgg.reset_set(&matched) {
+                return Err((
+                    json!({"error": format!("start.gg would not reset the set: {}", e)}),
+                    502,
+                ));
+            }
+            (self.log)(&format!("reset set {} on start.gg", py_str(&matched)));
+        }
+
+        // `settle_if_reported_elsewhere` marked this record unreportable when
+        // it first saw the completed state; the set is open again now, so
+        // clear that before `do_report`'s own checks read it.
+        {
+            let key = sid(station, set_id);
+            let mut st = self.state.lock().unwrap();
+            if let Some(rec) = set_bucket(&mut st, slug).get_mut(&key) {
+                rec["reportable"] = json!(true);
+                rec["notReportableReason"] = Value::Null;
+                rec["status"] = json!("matched");
+            }
+            self.touch(&mut st);
+        }
+
+        self.do_report(slug, station, set_id, winner_entrant_id)
+    }
+
     /// Replace what the station thinks happened with what the operator says
     /// happened: a new list of games, each with a winning slot and the two
     /// characters played.
@@ -1724,21 +1750,15 @@ impl Hub {
         let Some(rec) = set_bucket(&mut s, slug).get_mut(&key) else {
             return Err((json!({"error": "Set not found."}), 404));
         };
-        if rec["status"] == *"reported" {
-            return Err((
-                json!({"error": "This set is already reported. Re-report it to change the result."}),
-                409,
-            ));
-        }
+        // Deliberately allowed on an already-reported set: with no hold-off
+        // before auto-report, correcting a set after it reached the bracket
+        // IS the way a wrong result gets fixed. `do_rereport` then pushes the
+        // correction over the top of what start.gg already has.
 
         let normalized = normalize_games(games);
         rec["editedGames"] = normalized.clone();
         rec["editedAt"] = json!(now_sec());
         apply_games_override(rec, &normalized, &tag_map);
-        // A correction is exactly when someone is still looking at this set,
-        // so give them the full hold-off again on the corrected result rather
-        // than letting a countdown that was nearly up fire immediately.
-        rec["autoReportFrom"] = json!(now_sec());
         let out = rec.clone();
         self.touch(&mut s);
         drop(s);
@@ -1746,33 +1766,6 @@ impl Hub {
             "operator corrected set {} on station {station} to {} game(s)",
             py_str(set_id),
             games.len()
-        ));
-        Ok(out)
-    }
-
-    /// Stop this set from finalizing itself, leaving the operator's own Report
-    /// button as the only way it reaches the bracket. The escape hatch for
-    /// "the countdown is running and something looks wrong".
-    pub fn do_hold_auto_report(
-        &self,
-        slug: &str,
-        station: i64,
-        set_id: &Value,
-        hold: bool,
-    ) -> Result<Value, (Value, u16)> {
-        let key = sid(station, set_id);
-        let mut s = self.state.lock().unwrap();
-        let Some(rec) = set_bucket(&mut s, slug).get_mut(&key) else {
-            return Err((json!({"error": "Set not found."}), 404));
-        };
-        rec["autoReportHold"] = json!(hold);
-        let out = rec.clone();
-        self.touch(&mut s);
-        drop(s);
-        (self.log)(&format!(
-            "{} auto-report for set {} on station {station}",
-            if hold { "held" } else { "resumed" },
-            py_str(set_id)
         ));
         Ok(out)
     }
@@ -2161,10 +2154,6 @@ impl Hub {
             };
             let now_swapped = !truthy(rec.get("swap"));
             rec["swap"] = json!(now_swapped);
-            // Someone is looking at this set right now, so a pending
-            // auto-report gets its full hold-off back on the corrected
-            // mapping instead of firing seconds after the fix.
-            rec["autoReportFrom"] = json!(now_sec());
             // The stored display mapping must flip WITH the flag — the report
             // path computes its mapping fresh (and honors swap), but the
             // console renders this stored view, and leaving it stale showed
@@ -2777,6 +2766,7 @@ mod tests {
         assign_stream_calls: Mutex<Vec<(Value, Value)>>,
         /// Recorded setIds `start_match` was called with.
         start_calls: Mutex<Vec<Value>>,
+        reset_calls: Mutex<Vec<Value>>,
         assign_station_should_fail: Mutex<bool>,
         assign_stream_should_fail: Mutex<bool>,
         start_match_should_fail: Mutex<bool>,
@@ -2817,6 +2807,7 @@ mod tests {
                 assign_calls: Mutex::new(Vec::new()),
                 assign_stream_calls: Mutex::new(Vec::new()),
                 start_calls: Mutex::new(Vec::new()),
+                reset_calls: Mutex::new(Vec::new()),
                 assign_station_should_fail: Mutex::new(false),
                 assign_stream_should_fail: Mutex::new(false),
                 start_match_should_fail: Mutex::new(false),
@@ -2875,6 +2866,10 @@ mod tests {
 
         fn start_calls(&self) -> Vec<Value> {
             self.start_calls.lock().unwrap().clone()
+        }
+
+        fn reset_calls(&self) -> Vec<Value> {
+            self.reset_calls.lock().unwrap().clone()
         }
 
         fn fail_assign_station(&self) {
@@ -3047,6 +3042,18 @@ mod tests {
                 return Err(StartggError("markSetInProgress failed".to_string()));
             }
             self.0.start_calls.lock().unwrap().push(set_id.clone());
+            Ok(())
+        }
+        fn reset_set(&self, set_id: &Value) -> Result<(), StartggError> {
+            self.0.reset_calls.lock().unwrap().push(set_id.clone());
+            // start.gg reopens a reset set, so stop answering "completed" for
+            // it — otherwise the report that follows would refuse itself.
+            self.0
+                .set_state_overrides
+                .lock()
+                .unwrap()
+                .remove(&py_str(set_id));
+            *self.0.set_state_override.lock().unwrap() = Value::Null;
             Ok(())
         }
     }
@@ -4241,34 +4248,20 @@ mod tests {
     }
 
     fn on() -> AutoReport {
-        AutoReport {
-            enabled: true,
-            delay_s: 60.0,
-        }
+        AutoReport { enabled: true }
     }
 
     #[test]
-    fn an_unambiguous_finished_set_reports_itself_after_the_hold_off() {
+    fn an_unambiguous_finished_set_reports_itself_at_once() {
+        // No hold-off: the set is eligible the moment it is ingested.
         let rec = eligible_record();
         assert_eq!(auto_report_blocker(&rec), None);
-        assert_eq!(
-            auto_report_in(&rec, on(), 1_000_000),
-            Some(60),
-            "the countdown starts at the full window"
-        );
-        assert_eq!(auto_report_in(&rec, on(), 1_000_030), Some(30));
-        assert_eq!(auto_report_in(&rec, on(), 1_000_060), Some(0), "due");
-        assert_eq!(
-            auto_report_in(&rec, on(), 1_000_600),
-            Some(0),
-            "still due, never negative"
-        );
+        assert!(auto_reports(&rec, on()));
     }
 
     #[test]
     fn auto_report_off_means_nothing_ever_fires() {
-        let rec = eligible_record();
-        assert_eq!(auto_report_in(&rec, AutoReport::default(), 1_000_600), None);
+        assert!(!auto_reports(&eligible_record(), AutoReport::default()));
     }
 
     #[test]
@@ -4278,7 +4271,7 @@ mod tests {
         let mut rec = eligible_record();
         rec["confidence"] = json!("low");
         assert_eq!(auto_report_blocker(&rec), Some("winner is only a guess"));
-        assert_eq!(auto_report_in(&rec, on(), 1_000_600), None);
+        assert!(!auto_reports(&rec, on()));
     }
 
     #[test]
@@ -4320,13 +4313,6 @@ mod tests {
     }
 
     #[test]
-    fn a_held_set_stays_the_operators() {
-        let mut rec = eligible_record();
-        rec["autoReportHold"] = json!(true);
-        assert_eq!(auto_report_blocker(&rec), Some("held by the operator"));
-    }
-
-    #[test]
     fn a_set_that_keeps_failing_stops_retrying() {
         let mut rec = eligible_record();
         rec["autoReportAttempts"] = json!(MAX_AUTO_REPORT_ATTEMPTS - 1);
@@ -4339,33 +4325,16 @@ mod tests {
     }
 
     /// The sweep end to end, against a fake start.gg: ingest a finished set,
-    /// watch it sit through its hold-off, then report itself.
+    /// and it reports itself on the next tick.
     #[test]
     fn the_sweep_reports_a_due_set_and_leaves_the_rest() {
         let fake = FakeStartgg::new();
         fake.set_state(2); // TO pressed Start Match
         let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
-        h.set_auto_report(AutoReport {
-            enabled: true,
-            delay_s: 60.0,
-        });
+        h.set_auto_report(on());
         h.handle_ingest(SLUG, 1, &real_set()).unwrap();
 
-        // Nothing is due yet: the record was ingested just now.
-        h.sweep_auto_report(SLUG);
-        assert!(
-            fake.reports().is_empty(),
-            "the hold-off has to actually hold"
-        );
-
-        // Wind the record back past the window, as the clock would.
-        {
-            let mut s = h.state.lock().unwrap();
-            for r in set_bucket(&mut s, SLUG).values_mut() {
-                r["ingestedAt"] = json!(now_sec() - 120);
-            }
-        }
         h.sweep_auto_report(SLUG);
 
         let reports = fake.reports();
@@ -4387,27 +4356,21 @@ mod tests {
     }
 
     #[test]
-    fn the_sweep_will_not_touch_a_set_the_operator_held() {
+    fn the_sweep_leaves_a_set_it_cannot_be_sure_about() {
+        // The blocker is the only gate now that there is no hold-off, so a
+        // set it rejects must survive a sweep untouched.
         let fake = FakeStartgg::new();
-        fake.set_state(2);
+        fake.set_state(6); // called, but Start Match never pressed
         let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
-        h.set_auto_report(AutoReport {
-            enabled: true,
-            delay_s: 0.0,
-        });
+        h.set_auto_report(on());
         h.handle_ingest(SLUG, 1, &real_set()).unwrap();
-        h.do_hold_auto_report(SLUG, 1, &json!("20260724_075508"), true)
-            .unwrap();
 
         h.sweep_auto_report(SLUG);
-        assert!(fake.reports().is_empty(), "held means held");
-
-        // Releasing it lets the next sweep through.
-        h.do_hold_auto_report(SLUG, 1, &json!("20260724_075508"), false)
-            .unwrap();
-        h.sweep_auto_report(SLUG);
-        assert_eq!(fake.reports().len(), 1);
+        assert!(
+            fake.reports().is_empty(),
+            "a set played before Start Match is not a bracket result"
+        );
     }
 
     // ---- correcting a result ------------------------------------------------------
@@ -4520,50 +4483,65 @@ mod tests {
     }
 
     #[test]
-    fn a_correction_restarts_the_auto_report_countdown() {
-        // Otherwise a set with two seconds left on its countdown would fire
-        // the instant the operator finished correcting it.
+    fn a_reported_set_can_still_be_corrected() {
+        // The whole fallback: auto-report writes immediately, so the wrong
+        // ones are caught after the fact. Refusing to edit a reported set
+        // would leave nowhere to fix them.
         let (h, _) = hub_with_ingested_set();
-        {
-            let mut s = h.state.lock().unwrap();
-            for r in set_bucket(&mut s, SLUG).values_mut() {
-                r["ingestedAt"] = json!(now_sec() - 55);
-            }
-        }
-        let rec = h.get_set(SLUG, 1, &json!("20260724_075508")).unwrap();
-        assert_eq!(
-            auto_report_in(&rec, on(), now_sec()),
-            Some(5),
-            "nearly due before the correction"
-        );
-
+        let id = json!("20260724_075508");
+        h.do_report(SLUG, 1, &id, &json!(24186345)).unwrap();
         let rec = h
             .do_override_result(
                 SLUG,
                 1,
-                &json!("20260724_075508"),
+                &id,
                 &json!([game(1, "Orc", "Gal"), game(1, "Orc", "Gal")]),
             )
             .unwrap();
-        assert_eq!(
-            auto_report_in(&rec, on(), now_sec()),
-            Some(60),
-            "the full window, on the corrected result"
-        );
+        assert_eq!(rec["set"]["winnerName"], json!("KIM"));
+        assert_eq!(rec["candidateWinnerEntrantId"], json!(24186347));
     }
 
     #[test]
-    fn a_swap_also_restarts_the_countdown() {
-        let (h, _) = hub_with_ingested_set();
-        {
-            let mut s = h.state.lock().unwrap();
-            for r in set_bucket(&mut s, SLUG).values_mut() {
-                r["ingestedAt"] = json!(now_sec() - 55);
-            }
-        }
-        h.do_swap(SLUG, 1, &json!("20260724_075508")).unwrap();
-        let rec = h.get_set(SLUG, 1, &json!("20260724_075508")).unwrap();
-        assert_eq!(auto_report_in(&rec, on(), now_sec()), Some(60));
+    fn re_reporting_resets_the_set_on_start_gg_first() {
+        // reportBracketSet will not touch a completed set, so without the
+        // reset a correction could never reach the bracket.
+        let (h, fake) = hub_with_ingested_set();
+        let id = json!("20260724_075508");
+        h.do_report(SLUG, 1, &id, &json!(24186345)).unwrap();
+        // start.gg now says completed, which is what blocks a second report.
+        fake.set_state_will_answer(json!(matching::STARTGG_STATE_COMPLETED));
+        assert_eq!(
+            h.do_report(SLUG, 1, &id, &json!(24186347)).unwrap_err().1,
+            409,
+            "plain report is refused, as before"
+        );
+
+        h.do_override_result(
+            SLUG,
+            1,
+            &id,
+            &json!([game(1, "Orc", "Gal"), game(1, "Orc", "Gal")]),
+        )
+        .unwrap();
+        h.do_rereport(SLUG, 1, &id, &json!(24186347)).unwrap();
+
+        assert_eq!(fake.reset_calls().len(), 1, "reset once");
+        let reports = fake.reports();
+        assert_eq!(reports.len(), 2, "the original, then the correction");
+        assert_eq!(reports[1].1, json!("24186347"), "the corrected winner");
+    }
+
+    #[test]
+    fn re_reporting_a_set_start_gg_never_completed_does_not_reset_it() {
+        // An earlier report that failed leaves the set open; resetting it
+        // would be a pointless write against a bracket someone else may be
+        // touching.
+        let (h, fake) = hub_with_ingested_set();
+        let id = json!("20260724_075508");
+        h.do_rereport(SLUG, 1, &id, &json!(24186345)).unwrap();
+        assert!(fake.reset_calls().is_empty());
+        assert_eq!(fake.reports().len(), 1);
     }
 
     #[test]
@@ -4617,19 +4595,6 @@ mod tests {
                 .unwrap_err()
                 .1,
             400
-        );
-    }
-
-    #[test]
-    fn an_already_reported_set_is_not_silently_re_scored() {
-        let (h, _) = hub_with_ingested_set();
-        let id = json!("20260724_075508");
-        h.do_report(SLUG, 1, &id, &json!(24186345)).unwrap();
-        assert_eq!(
-            h.do_override_result(SLUG, 1, &id, &json!([game(1, "Orc", "Gal")]))
-                .unwrap_err()
-                .1,
-            409
         );
     }
 

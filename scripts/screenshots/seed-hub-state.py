@@ -11,10 +11,9 @@ places at once:
     three games, NAVI switching Clairen -> Fleet in game 3.
   * Station 3 — LOOM vs SLADE just finished 3-1 (Winners Round 3), matched
     with a high-confidence candidate; the station sits idle now. Auto-report
-    is on, so this one is counting down to finalizing itself rather than
-    waiting on a Report click — with Hold beside it. It has to be a RECENT
-    set: the countdown is computed live from ingestedAt plus the configured
-    delay, so an older one would render as already overdue.
+    would have taken this one already at a real event (it reports the moment
+    a set is unambiguous); it is left awaiting so the shot can show the
+    actions a set carries — Report, edit result, switch players.
 
 Current Sets mirrors the same bracket: both live sets under "playing now"
 with the same start times, and two startable sets whose FOUR players are all

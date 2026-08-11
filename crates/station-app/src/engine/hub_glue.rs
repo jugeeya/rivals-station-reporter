@@ -34,10 +34,10 @@ use crate::engine::core::EngineInner;
 /// finalizes it directly on start.gg, without adding meaningful load.
 const SWEEP_INTERVAL_S: u64 = 90;
 
-/// How often the auto-report sweep looks for a set whose hold-off has run
-/// out. Must divide `SWEEP_INTERVAL_S`, since both share one thread. Cheap
-/// when nothing is due — a lock and a filter over the event's records — so
-/// this is about the countdown being honest, not about load.
+/// How often the auto-report sweep looks for a finished set to finalize.
+/// Must divide `SWEEP_INTERVAL_S`, since both share one thread. Cheap when
+/// there is nothing to do — a lock and a filter over the event's records —
+/// so this is really "how soon after a set ends does the bracket move".
 const AUTO_REPORT_TICK_S: u64 = 5;
 
 pub struct HubPieces {
@@ -104,7 +104,6 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
     // write without anyone touching anything.
     hub.set_auto_report(AutoReport {
         enabled: cfg.auto_report && !cfg.dry_run,
-        delay_s: cfg.auto_report_delay,
     });
 
     let mut server = HubServer::new(hub.clone(), cfg.hub_port, "0.0.0.0");
@@ -126,10 +125,10 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
 
 /// The hub's two background sweeps, on one thread.
 ///
-/// * **auto-report** (every [`AUTO_REPORT_TICK_S`]) finalizes sets whose
-///   hold-off has elapsed. It has to tick far faster than the other sweep:
-///   the operator is told a set reports "in 60s", and a 90-second poll would
-///   make that mean anything up to 150.
+/// * **auto-report** (every [`AUTO_REPORT_TICK_S`]) finalizes finished sets.
+///   It ticks far faster than the other sweep because it is what moves the
+///   bracket: a 90-second poll would leave a station idle waiting for its
+///   next set to be called.
 /// * **reported-elsewhere** (every [`SWEEP_INTERVAL_S`]) is the safety net for
 ///   a set someone finalized directly on start.gg's own page. Without it a set
 ///   sits in "awaiting report" looking actionable forever, since `do_report`'s
@@ -232,16 +231,17 @@ pub fn do_override_result(
         .map_err(err_text)
 }
 
-/// Stop (or resume) one set finalizing itself. The operator's escape hatch
-/// while a countdown is running; see `Hub::do_hold_auto_report`.
-pub fn do_hold_auto_report(
+/// Report a set start.gg already has a result for, replacing it — the
+/// console's re-report, and what a correction to an already-reported set
+/// goes through. See `Hub::do_rereport`.
+pub fn do_rereport(
     inner: &Arc<EngineInner>,
     station: i64,
     set_id: &str,
-    hold: bool,
+    winner: &Value,
 ) -> Result<Value, String> {
     let (hub, slug) = hub_and_slug(inner)?;
-    hub.do_hold_auto_report(&slug, station, &json!(set_id), hold)
+    hub.do_rereport(&slug, station, &json!(set_id), winner)
         .map_err(err_text)
 }
 

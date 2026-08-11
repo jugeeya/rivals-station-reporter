@@ -160,6 +160,23 @@ fn every_write_path_against_a_real_bracket() {
 
     // ---- 2. a station finishes it, and auto-report sends it ---------------
     step("2. auto-report a finished set");
+    // The station binding is looked up through start.gg's own set list, which
+    // lags a mutation by a second or two — and the hub caches that lookup for
+    // STATION_CACHE_S. Wait for the assignment to actually be visible before
+    // pretending a station finished a set, or the record binds to nothing.
+    let seen = sets_until(&hub, &slug, |s| {
+        s.iter()
+            .any(|x| x["id"] == real_id && x["station"] == json!(1))
+    });
+    let mine = seen.iter().find(|x| x["id"] == real_id);
+    println!(
+        "  set visible as: state={} station={}",
+        mine.map(|m| m["state"].clone()).unwrap_or(Value::Null),
+        mine.map(|m| m["station"].clone()).unwrap_or(Value::Null)
+    );
+    // ...and past the station-lookup cache, so the bind reads fresh.
+    std::thread::sleep(std::time::Duration::from_secs(16));
+
     hub.handle_current(&slug, 1, Some(&json!({"state": "set_start"})))
         .unwrap();
     let local_id = "live-test-1";

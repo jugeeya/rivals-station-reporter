@@ -97,6 +97,42 @@ pub fn tag_names(save_path: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// The parsed contents of a `.r2tag` as uesave's own JSON serialization —
+/// the tree `super::diff::extract_digest` walks. (A `.r2tag` is a full save
+/// holding one tag.)
+pub fn tag_root_json(path: &Path) -> Result<serde_json::Value, String> {
+    let save = read_save(path)?;
+    serde_json::to_value(&save.root).map_err(|e| e.to_string())
+}
+
+/// The same tree for a tag that lives INSIDE the loaded save — shaped
+/// exactly like a `.r2tag`'s (`{save_game_type, properties:
+/// {SavedPlayerTags_0: [tag]}}`) so the diff has a single code path.
+/// `Ok(None)` when the save has no tag under that name.
+pub fn tag_json_from_save(
+    save_path: &Path,
+    tag_name: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let save = read_save(save_path)?;
+    // Index by position: the serialized SavedPlayerTags_0 array lines up
+    // with the parsed struct array, so the tag's slot there is its slot here.
+    let Some(pos) = tag_structs(&save)?
+        .iter()
+        .position(|sv| tag_name_of(sv) == Some(tag_name))
+    else {
+        return Ok(None);
+    };
+    let root = serde_json::to_value(&save.root).map_err(|e| e.to_string())?;
+    let tag = root
+        .pointer(&format!("/properties/SavedPlayerTags_0/{pos}"))
+        .cloned()
+        .ok_or("SavedPlayerTags_0 missing from the serialized save")?;
+    Ok(Some(serde_json::json!({
+        "save_game_type": root.get("save_game_type").cloned().unwrap_or_default(),
+        "properties": { "SavedPlayerTags_0": [tag] },
+    })))
+}
+
 #[derive(Debug, Clone)]
 pub struct TagPreview {
     pub path: PathBuf,

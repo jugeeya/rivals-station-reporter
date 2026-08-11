@@ -213,7 +213,22 @@ cat > "$WORK/tags-seed.json" <<EOF
     {"name": "Kimchi", "author": "kim", "startgg_tag": "kimchi"},
     {"name": "Ani", "author": "ani", "startgg_tag": "ani"},
     {"name": "Spyker", "author": "spyker", "startgg_tag": "spyker"}
-  ]
+  ],
+  "changes": {
+    "tag": "KAZE",
+    "vs_save": true,
+    "groups": [
+      ["Gameplay settings", [
+        ["Air grab", "Airdodge", "N-air"],
+        ["Tap Jump", "On", "Off"],
+        ["Airdodge cardinal angle", "20", "27.5"]
+      ]],
+      ["Controller · Game Cube", [
+        ["Sensitivity", "1.3", "1.1"],
+        ["Jump", "North (Y)", "R bumper"]
+      ]]
+    ]
+  }
 }}
 EOF
 shot "$WORK/operator" "$WORK/tags-seed.json" tags tag-installer.png

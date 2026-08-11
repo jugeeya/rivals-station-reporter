@@ -8,6 +8,7 @@
 //! `Rivals2_PlayerTagSaveSlot.sav` (`save`).
 
 pub mod bracket;
+pub mod diff;
 pub mod save;
 pub mod site;
 

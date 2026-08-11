@@ -219,14 +219,19 @@ published is listed so you know before they walk up. Installs check
 save-format compatibility, overwrite same-named tags by default, never touch
 slot 0 (the setup owner's tag), and rename to the start.gg tag when two
 people share an in-game name so both land. Local `.r2tag` files install the
-same way.
+same way. Every row has a "changes" expander — an Option | Old | New table
+(same field list as the website's "View changes") showing exactly what
+installing would alter, compared against the same-name tag already in this
+save, or against the default settings when it's new here.
 
 ![Tag Installer](docs/screenshots/tag-installer.png)
 
 The Tag Installer, before the bracket: one Find against the event URL matched
 four entrants' published tags (selected, marked "bracket") and named the two
-entrants with nothing published. Install writes them into the game's own tag
-save on this setup — names, colors, and controls, no in-game retyping.
+entrants with nothing published. KAZE's row is expanded to its changes table
+— what installing alters versus the KAZE already in this save, per option.
+Install writes them into the game's own tag save on this setup — names,
+colors, and controls, no in-game retyping.
 
 ## VOD Splitter
 

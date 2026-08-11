@@ -25,7 +25,7 @@ use iced::{Center, Element, Fill, Length, Task};
 use serde::Deserialize;
 
 use super::{blocking, App, Message, Screen};
-use crate::tags::{bracket, match_bracket, save, site};
+use crate::tags::{bracket, diff, match_bracket, save, site};
 use crate::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +63,11 @@ pub struct State {
     overwrite: bool,
     installing: bool,
 
+    /// Which manifest row's Option | Old | New table is expanded, if any.
+    open_diff: Option<String>,
+    /// Computed diffs, cached per manifest file for the session.
+    diffs: HashMap<String, DiffState>,
+
     pub status: String,
     tone: Tone,
 }
@@ -89,6 +94,8 @@ pub enum Msg {
     ToggleMisses,
 
     OverwriteToggled(bool),
+    ToggleDiff(String),
+    DiffReady(String, Result<TagChanges, String>),
     Install,
     PickR2tagFiles,
     R2tagsPicked(Option<Vec<PathBuf>>),
@@ -108,6 +115,23 @@ pub struct BracketOutcome {
     pub entrant_count: usize,
 }
 
+/// A computed Option | Old | New table for one manifest row.
+#[derive(Debug, Clone)]
+pub struct TagChanges {
+    /// The tag's in-game name, for the panel heading.
+    pub tag_name: String,
+    /// True when "Old" is the same-name tag already in this save; false when
+    /// the save has none yet and the bundled default settings stand in.
+    pub vs_save: bool,
+    pub diff: diff::TagDiff,
+}
+
+enum DiffState {
+    Loading,
+    Ready(TagChanges),
+    Failed(String),
+}
+
 impl Default for State {
     fn default() -> Self {
         Self {
@@ -125,6 +149,8 @@ impl Default for State {
             show_misses: false,
             overwrite: true,
             installing: false,
+            open_diff: None,
+            diffs: HashMap::new(),
             status: "Paste a bracket URL to select everyone's tags at once.".into(),
             tone: Tone::Plain,
         }
@@ -314,6 +340,41 @@ impl State {
                 Task::none()
             }
 
+            Msg::ToggleDiff(file) => {
+                if self.open_diff.as_deref() == Some(file.as_str()) {
+                    self.open_diff = None;
+                    return Task::none();
+                }
+                self.open_diff = Some(file.clone());
+                if self.diffs.contains_key(&file) {
+                    return Task::none();
+                }
+                self.diffs.insert(file.clone(), DiffState::Loading);
+                let save_path = self.save_path.clone();
+                let dl = file.clone();
+                Task::perform(
+                    async move {
+                        let paths = site::download_tags(vec![dl]).await?;
+                        let path = paths
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| "download failed".to_string())?;
+                        blocking(move || compute_changes(&path, save_path.as_deref())).await
+                    },
+                    move |r| Msg::DiffReady(file.clone(), r),
+                )
+            }
+            Msg::DiffReady(file, r) => {
+                self.diffs.insert(
+                    file,
+                    match r {
+                        Ok(ch) => DiffState::Ready(ch),
+                        Err(e) => DiffState::Failed(e),
+                    },
+                );
+                Task::none()
+            }
+
             Msg::Install => {
                 let Some(save_path) = self.save_path.clone() else {
                     self.say("Choose the tag save first.", Tone::Bad);
@@ -387,6 +448,116 @@ impl State {
             }
         }
     }
+}
+
+/// The expanded per-row changes table. Mirrors the website's
+/// Option Name | Old | New columns; Old is muted, New reads as the change.
+fn diff_panel(state: Option<&DiffState>) -> Element<'_, Msg> {
+    let muted = |s: String| text(s).size(11).color(theme::TEXT_MUTED);
+    match state {
+        None | Some(DiffState::Loading) => muted("computing changes…".into()).into(),
+        Some(DiffState::Failed(e)) => text(format!("couldn't read this tag: {e}"))
+            .size(11)
+            .color(theme::TEXT_FAILURE)
+            .into(),
+        Some(DiffState::Ready(ch)) => {
+            let mut panel = column![muted(if ch.vs_save {
+                format!("vs the {} already in this save", ch.tag_name)
+            } else {
+                "not in this save yet — vs default settings".to_string()
+            })]
+            .spacing(4);
+
+            if ch.diff.count == 0 {
+                return panel
+                    .push(muted(if ch.vs_save {
+                        "No differences — installing changes nothing.".into()
+                    } else {
+                        "No differences from default settings.".into()
+                    }))
+                    .into();
+            }
+
+            let header = |s: &'static str| {
+                text(theme::tracked(s))
+                    .size(9)
+                    .font(theme::FONT_BODY_SEMIBOLD)
+                    .color(theme::TEXT_MUTED)
+            };
+            panel = panel.push(
+                row![
+                    header("Option").width(180),
+                    header("Old").width(Length::FillPortion(1)),
+                    header("New").width(Length::FillPortion(1)),
+                ]
+                .spacing(10),
+            );
+            for group in &ch.diff.groups {
+                panel = panel.push(
+                    text(group.scope.clone())
+                        .size(11)
+                        .font(theme::FONT_BODY_SEMIBOLD)
+                        .color(theme::TEXT_PRIMARY),
+                );
+                for item in &group.items {
+                    panel = panel.push(
+                        row![
+                            text(item.label.clone())
+                                .size(11)
+                                .color(theme::TEXT_PRIMARY)
+                                .width(180),
+                            text(item.old.clone())
+                                .size(11)
+                                .color(theme::TEXT_MUTED)
+                                .width(Length::FillPortion(1)),
+                            text(item.new.clone())
+                                .size(11)
+                                .color(theme::TEXT_SUCCESS)
+                                .width(Length::FillPortion(1)),
+                        ]
+                        .spacing(10),
+                    );
+                }
+            }
+            panel.into()
+        }
+    }
+}
+
+/// The Option | Old | New table for one downloaded `.r2tag`: New is the
+/// incoming tag, Old is the same-name tag already in the save — or, when the
+/// save doesn't have one yet, the bundled default settings.
+fn compute_changes(
+    r2tag: &std::path::Path,
+    save_path: Option<&std::path::Path>,
+) -> Result<TagChanges, String> {
+    let new_root = save::tag_root_json(r2tag)?;
+    let tag_name = new_root
+        .pointer("/properties/SavedPlayerTags_0/0")
+        .and_then(|t| t.as_object())
+        .and_then(|o| {
+            o.iter()
+                .find(|(k, _)| k.starts_with("TagName"))
+                .and_then(|(_, v)| v.as_str())
+        })
+        .unwrap_or("")
+        .to_string();
+
+    let old_root = match save_path {
+        Some(p) if !tag_name.is_empty() => save::tag_json_from_save(p, &tag_name)?,
+        _ => None,
+    };
+    let vs_save = old_root.is_some();
+    let old_digest = match &old_root {
+        Some(root) => diff::extract_digest(root),
+        None => diff::default_baseline(),
+    };
+    let new_digest = diff::extract_digest(&new_root);
+    Ok(TagChanges {
+        tag_name,
+        vs_save,
+        diff: diff::diff_digests(&new_digest, &old_digest),
+    })
 }
 
 /// Preview + import a batch of `.r2tag` files into the save. Only
@@ -511,6 +682,24 @@ pub struct Seed {
     pub misses: Vec<String>,
     #[serde(default)]
     pub status: Option<String>,
+    /// Open the changes panel on the named seeded tag, with this canned
+    /// Option | Old | New content.
+    #[serde(default)]
+    pub changes: Option<SeedChanges>,
+}
+
+/// One `[scope, [[option, old, new], …]]` seed group.
+pub type SeedChangeGroup = (String, Vec<(String, String, String)>);
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SeedChanges {
+    /// Which seeded tag's row to expand (by `SeedTag.name`).
+    pub tag: String,
+    #[serde(default)]
+    pub vs_save: bool,
+    /// `[scope, [[option, old, new], …]]` groups.
+    #[serde(default)]
+    pub groups: Vec<SeedChangeGroup>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -552,6 +741,31 @@ pub fn apply_seed(app: &mut App, seed: Seed) {
     st.misses = seed.misses;
     if let Some(s) = seed.status {
         st.say(s, Tone::Good);
+    }
+    if let Some(ch) = seed.changes {
+        if let Some(t) = st.manifest.iter().find(|t| t.name == ch.tag) {
+            let groups: Vec<diff::DiffGroup> = ch
+                .groups
+                .into_iter()
+                .map(|(scope, items)| diff::DiffGroup {
+                    scope,
+                    items: items
+                        .into_iter()
+                        .map(|(label, old, new)| diff::DiffItem { label, old, new })
+                        .collect(),
+                })
+                .collect();
+            let count = groups.iter().map(|g| g.items.len()).sum();
+            st.open_diff = Some(t.file.clone());
+            st.diffs.insert(
+                t.file.clone(),
+                DiffState::Ready(TagChanges {
+                    tag_name: ch.tag,
+                    vs_save: ch.vs_save,
+                    diff: diff::TagDiff { count, groups },
+                }),
+            );
+        }
     }
 }
 
@@ -732,11 +946,22 @@ fn screen(st: &State) -> Element<'_, Msg> {
                 r = r.push(text("bracket").size(11).color(theme::TEXT_SUCCESS));
             }
             r = r.push(Space::new().width(Length::Fill));
+            let diff_open = st.open_diff.as_deref() == Some(t.file.as_str());
+            r = r.push(
+                button(text(if diff_open { "hide changes" } else { "changes" }).size(11))
+                    .style(theme::button_linkish)
+                    .padding([1, 4])
+                    .on_press(Msg::ToggleDiff(t.file.clone())),
+            );
             if !t.author.is_empty() {
                 r = r.push(text(t.author.clone()).size(11).color(theme::TEXT_MUTED));
             }
+            let mut cell = column![r].spacing(8);
+            if diff_open {
+                cell = cell.push(diff_panel(st.diffs.get(&t.file)));
+            }
             rows = rows.push(
-                container(r)
+                container(cell)
                     .style(if selected {
                         theme::panel_live
                     } else {

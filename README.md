@@ -89,21 +89,23 @@ sets are grouped separately, each with its own station AND stream picker (a
 set can sit at a station and on a stream at once); for a startable set,
 picking and clicking Start Match happens as a single action.
 
-### The Bracket screen, in three states
+### The Bracket screen
 
-<details open>
-<summary><b>Mid-event</b> — what a TO looks at between calls</summary>
+Click any of these for the full-size image.
 
-![Bracket, mid-event](docs/screenshots/bracket.png)
+| [<img src="docs/screenshots/bracket.png" width="270">](docs/screenshots/bracket.png) | [<img src="docs/screenshots/bracket-unstarted.png" width="270">](docs/screenshots/bracket-unstarted.png) | [<img src="docs/screenshots/bracket-done.png" width="270">](docs/screenshots/bracket-done.png) |
+|:--:|:--:|:--:|
+| **Mid-event** | **Not started on start.gg** | **Finished** |
+| every card state at once | every set still a placeholder | the event as a record |
 
-Each set sits level with the sets that feed it, with the lines drawn in, so
-it reads as a bracket rather than a grid of rounds. Every card state is
-visible at once:
+The event's whole tree, so nobody has to keep start.gg's page open on a
+second monitor. Each set sits level with the sets that feed it, with the
+lines drawn in, so it reads as a bracket rather than a grid of rounds.
 
-| | |
+| card | meaning |
 |---|---|
-| **indigo, `● live`** | being played right now |
-| **amber, `ready`** | both seats filled, nobody has called it — the set to hand to the next free setup |
+| indigo, `● live` | being played right now |
+| amber, `ready` | both seats filled, nobody has called it — the set to hand to the next free setup |
 | `called` | assigned to a setup, not started yet |
 | dimmed | finished; the winner's tag is green and their score bold |
 | `—` seats | still waiting on an earlier round |
@@ -112,30 +114,13 @@ The station (`St 2`) shows only on sets that haven't finished — on a played
 set it's history, on an upcoming one it's where to walk. Selecting a set
 opens the bar underneath: assign a station, start the match, or report a
 winner.
-</details>
 
-<details>
-<summary><b>Not started on start.gg</b> — every set a placeholder</summary>
-
-![Bracket, not yet started](docs/screenshots/bracket-unstarted.png)
-
-Before anyone calls the first match, start.gg holds the sets as placeholders.
-The banner says so, and the first-round sets show as `ready`. Starting any one
-of them materialises the whole phase — the same thing start.gg's own page does
-— and the app rebinds to the real set ids it gets back. Reporting is the one
-thing that needs the bracket live first, so the bar offers **Start match** and
-says why the winner buttons aren't there.
-</details>
-
-<details>
-<summary><b>Finished</b> — the whole event as a record</summary>
-
-![Bracket, finished](docs/screenshots/bracket-done.png)
-
-Every set played out. Nothing is actionable, so nothing is highlighted and no
-stations are shown; the tree is just the result, winners in green with their
-characters and scores.
-</details>
+**Before anyone calls the first match**, start.gg holds the sets as
+placeholders (middle shot). Starting any one of them materialises the whole
+phase — the same thing start.gg's own page does — and the app rebinds to the
+real set ids it gets back. Reporting is the one thing that needs the bracket
+live first, so the bar offers Start match and says why the winner buttons
+aren't there.
 
 ![Station, idle between sets](docs/screenshots/station-idle.png)
 
@@ -262,9 +247,11 @@ losers below, each round a column, every set showing its entrants, the
 characters they played, and the score. Sets are placed against the sets that
 feed them and joined with connector lines, so you can follow who advances
 into what. Finished sets recede; the one playing right now is highlighted; a
-set called to a setup but not yet started is flagged; seats still waiting on
-an earlier round are drawn empty. Which station a set is on lives on the
-detail bar rather than the cards — across a whole bracket it was noise.
+set called to a setup but not yet started is flagged; a set with both seats
+filled that nobody has called is picked out in amber as `ready`, which is
+what a TO is scanning for; seats still waiting on an earlier round are drawn
+empty. The station shows on sets that haven't finished — on a played set it
+is history, on an upcoming one it is where to walk.
 
 Reading the bracket needs **no API token** — it uses start.gg's public
 website endpoint, so a station PC can pull it up too. Acting on it does:

@@ -27,50 +27,29 @@ widget. The full design is in `rivals-station-reporter-architecture.md`
   fixable after the fact with `edit result`.
 - **Both** — one PC doing both jobs.
 
-There's also a built-in **Tag Installer** (header → Tag Installer): before
-the bracket, pull every entrant's saved tag — name, colors, controls — from
-the community tag database ([jugeeya.github.io/tags](https://jugeeya.github.io/tags/),
-uploads happen in the [Rivals 2 Tag Tool](https://github.com/alex-mireles/rivals-2-tag-tool))
-and install them into this setup's own Rivals 2 save. Paste the bracket URL
-and Find: entrants are matched to published tags by their start.gg account
-(never by name), matches are selected in one go, and whoever has nothing
-published is listed so you know before they walk up. Installs check
-save-format compatibility, overwrite same-named tags by default, never touch
-slot 0 (the setup owner's tag), and rename to the start.gg tag when two
-people share an in-game name so both land. Local `.r2tag` files install the
-same way.
-
-And a built-in **VOD Splitter** (header → VOD Splitter): point it at
-a station's full OBS recording after the event and it cuts one clip per set,
-named `[Tournament] P1 (Char) vs. P2 (Char) - Round`. It fetches the
-bracket's set times from start.gg (no API token needed) and — because it
-lives inside the reporter — automatically overlays the station's own
-measured set times wherever a set was tracked, so those cuts land where
-games actually started and ended instead of on whenever someone clicked
-Start Match / Submit. The source is the per-set journals the station writes
-as each set finishes (`<out dir>/sets/set_*.json` — written once, never
-rewritten, so they survive restarts and later sessions); on the PC that both
-played and recorded, they're found automatically. Splitting somewhere else?
-Copy that station's `sets` folder over and pick it with "Choose folder…".
-
 The hub speaks the same `/matchlogger/*` HTTP API as the Cloudflare broker
 (`jugeeya.github.io/broker/worker.js`), so stations can point at either, and
 old Python stations interoperate with a Rust hub (and vice versa) during
 migration. Online/ranked ladder games are detected via the save's game mode
 and never touch the bracket.
 
-## Screenshots
+Every screenshot below is sample data, not a live event — the NATIVE app
+(Iced), captured by the app itself. `./scripts/screenshots/native.sh`
+regenerates all of them (see Development).
 
-Sample data below, not a live event — the NATIVE app (Iced), captured by the
-app itself: `./scripts/screenshots/native.sh` regenerates every image here
-(see Development).
+## Setup
 
-![First-run onboarding](docs/screenshots/onboarding.png)
+| [<img src="docs/screenshots/onboarding.png" width="400">](docs/screenshots/onboarding.png) | [<img src="docs/screenshots/settings.png" width="400">](docs/screenshots/settings.png) |
+|:--:|:--:|
+| **First run** | **Settings**, any time after |
+| pick what this PC is | everything else, without restarting |
 
 First run: pick what this PC is; everything else is auto-detected or
-validated inline.
+validated inline. Settings covers mode, event, hub/broker (with LAN
+auto-discovery), paths, auto-report and the update checker — all editable
+while sets are being played.
 
-### The operator screen
+## The operator screen
 
 | [<img src="docs/screenshots/operator-console.png" width="400">](docs/screenshots/operator-console.png) | [<img src="docs/screenshots/available-sets.png" width="400">](docs/screenshots/available-sets.png) |
 |:--:|:--:|
@@ -92,7 +71,7 @@ separately, each with its own station AND stream picker (a set can sit at a
 station and on a stream at once); for a startable set, picking and clicking
 Start Match happens as a single action.
 
-### The Bracket screen
+## Bracket
 
 Click any of these for the full-size image.
 
@@ -125,7 +104,37 @@ real set ids it gets back. Reporting is the one thing that needs the bracket
 live first, so the bar offers Start match and says why the winner buttons
 aren't there.
 
-### A station, over one evening
+Header → **Bracket**: the event's whole tree, in the app. Winners above,
+losers below, each round a column, every set showing its entrants, the
+characters they played, and the score. Sets are placed against the sets that
+feed them and joined with connector lines, so you can follow who advances
+into what. Finished sets recede; the one playing right now is highlighted; a
+set called to a setup but not yet started is flagged; a set with both seats
+filled that nobody has called is picked out in amber as `ready`, which is
+what a TO is scanning for; seats still waiting on an earlier round are drawn
+empty. The station shows on sets that haven't finished — on a played set it
+is history, on an upcoming one it is where to walk.
+
+Reading the bracket needs **no API token** — it uses start.gg's public
+website endpoint, so a station PC can pull it up too. Acting on it does:
+select any set and the bar underneath offers
+
+- **a station**, resolved to start.gg's own station id server-side,
+- **Start match** (`markSetInProgress` — the same call the Current Sets panel
+  makes, and still only ever from an explicit click), and
+- **a winner**, which finalizes the set on start.gg.
+
+Reporting from here sends the winner alone, with no per-game data — that's
+the difference from the operator console's Report button, which reports a set
+a station actually tracked and carries its character data up with it. Prefer
+the console for sets your stations covered; use this for everything else
+(an untracked setup, a DQ, a set someone played before the reporter was up).
+
+If a set can't be acted on, the bar says why rather than leaving dead
+buttons: no token configured, the phase isn't started on start.gg yet, the
+set is already reported, or it's still waiting on an earlier round.
+
+## A station, over one evening
 
 | [<img src="docs/screenshots/station-idle.png" width="270">](docs/screenshots/station-idle.png) | [<img src="docs/screenshots/station-live.png" width="270">](docs/screenshots/station-live.png) | [<img src="docs/screenshots/station-finished.png" width="270">](docs/screenshots/station-finished.png) |
 |:--:|:--:|:--:|
@@ -142,10 +151,19 @@ screenshot, seen from its own PC. A station only ever knows "this just
 finished" — awaiting-report status, and the reporting itself, live on the
 operator's hub.
 
-![Settings drawer open](docs/screenshots/settings.png)
+## Tag Installer
 
-Settings: mode, event, hub/broker (with LAN auto-discovery), paths, and the
-update checker, all editable without restarting.
+Header → **Tag Installer**. Before the bracket, pull every entrant's saved tag — name, colors, controls — from
+the community tag database ([jugeeya.github.io/tags](https://jugeeya.github.io/tags/),
+uploads happen in the [Rivals 2 Tag Tool](https://github.com/alex-mireles/rivals-2-tag-tool))
+and install them into this setup's own Rivals 2 save. Paste the bracket URL
+and Find: entrants are matched to published tags by their start.gg account
+(never by name), matches are selected in one go, and whoever has nothing
+published is listed so you know before they walk up. Installs check
+save-format compatibility, overwrite same-named tags by default, never touch
+slot 0 (the setup owner's tag), and rename to the start.gg tag when two
+people share an in-game name so both land. Local `.r2tag` files install the
+same way.
 
 ![Tag Installer](docs/screenshots/tag-installer.png)
 
@@ -153,37 +171,6 @@ The Tag Installer, before the bracket: one Find against the event URL matched
 four entrants' published tags (selected, marked "bracket") and named the two
 entrants with nothing published. Install writes them into the game's own tag
 save on this setup — names, colors, and controls, no in-game retyping.
-
-![VOD Splitter](docs/screenshots/vod-splitter.png)
-
-The VOD Splitter, after the event: station 3's recording cut into one clip
-per set, with real preview frames at each edge and ±nudge buttons. Sets the
-station recorded carry a green ⏱ station mark — their edges come from the
-station's own measurements and rarely need touching — while the flagged row
-shows the failure mode the warning exists for: start.gg never got a proper
-end time, so the clip runs 57 minutes. Split in place with ffmpeg (lossless
-stream copy), or export the cut list as CSV (LosslessCut), JSON, or a shell
-script.
-
-## Install
-
-Grab the build from the latest GitHub release: Windows portable `.zip`,
-macOS `.app` zip, Linux/SteamOS `.AppImage`. The UI is native (Iced — pure
-Rust, no webview), so there is no browser engine to configure on any
-platform. First run walks through setup: pick what this PC is, paste the
-start.gg event link (it echoes back the tournament name so a wrong paste is
-caught immediately), enter the shared key from whoever runs the event —
-done. Save/replay paths are auto-detected. Updates: Settings → "Check for
-updates" downloads and applies the newest release in place.
-
-On Windows and macOS, closing the window sends the app to the tray and
-reporting keeps running ("Start with Windows" is in Settings). On Linux
-there is no tray (that would drag the GTK stack back in); closing quits, so
-leave the window open — or minimized — while sets are being played.
-
-An existing `config.json` from the Python reporter uses the same keys and can
-be pasted into Settings field-by-field (the file lives at the app config dir
-once saved).
 
 ## Auto-report
 
@@ -244,42 +231,21 @@ it are wrong too and need fixing on start.gg's own page.
 A correction survives the station re-ingesting the set (which has no idea you
 changed anything), and a 1–1 correction won't save: a set needs a winner.
 
-## Bracket
-
-Header → **Bracket**: the event's whole tree, in the app. Winners above,
-losers below, each round a column, every set showing its entrants, the
-characters they played, and the score. Sets are placed against the sets that
-feed them and joined with connector lines, so you can follow who advances
-into what. Finished sets recede; the one playing right now is highlighted; a
-set called to a setup but not yet started is flagged; a set with both seats
-filled that nobody has called is picked out in amber as `ready`, which is
-what a TO is scanning for; seats still waiting on an earlier round are drawn
-empty. The station shows on sets that haven't finished — on a played set it
-is history, on an upcoming one it is where to walk.
-
-Reading the bracket needs **no API token** — it uses start.gg's public
-website endpoint, so a station PC can pull it up too. Acting on it does:
-select any set and the bar underneath offers
-
-- **a station**, resolved to start.gg's own station id server-side,
-- **Start match** (`markSetInProgress` — the same call the Current Sets panel
-  makes, and still only ever from an explicit click), and
-- **a winner**, which finalizes the set on start.gg.
-
-Reporting from here sends the winner alone, with no per-game data — that's
-the difference from the operator console's Report button, which reports a set
-a station actually tracked and carries its character data up with it. Prefer
-the console for sets your stations covered; use this for everything else
-(an untracked setup, a DQ, a set someone played before the reporter was up).
-
-If a set can't be acted on, the bar says why rather than leaving dead
-buttons: no token configured, the phase isn't started on start.gg yet, the
-set is already reported, or it's still waiting on an earlier round.
-
 ## VOD Splitter
 
-Header → **VOD Splitter**: turn a station's full recording into one clip per
-set, with filenames like
+Header → **VOD Splitter**. Point it at a station's full OBS recording after the event and it cuts one clip per set,
+named `[Tournament] P1 (Char) vs. P2 (Char) - Round`. It fetches the
+bracket's set times from start.gg (no API token needed) and — because it
+lives inside the reporter — automatically overlays the station's own
+measured set times wherever a set was tracked, so those cuts land where
+games actually started and ended instead of on whenever someone clicked
+Start Match / Submit. The source is the per-set journals the station writes
+as each set finishes (`<out dir>/sets/set_*.json` — written once, never
+rewritten, so they survive restarts and later sessions); on the PC that both
+played and recorded, they're found automatically. Splitting somewhere else?
+Copy that station's `sets` folder over and pick it with "Choose folder…".
+
+Filenames come out like
 
 ```
 [The Hangout #1] jugeeya (Fleet) vs. Kimchi (Zetterburn) - Winners Quarter-Final.mp4
@@ -288,6 +254,17 @@ set, with filenames like
 This works very well for single-stream setups and multi-recording setups
 alike — it was built for [The Hangout](https://start.gg/thehangout), which
 runs 4 recording setups to capture all winners-side and top 8 sets.
+
+![VOD Splitter](docs/screenshots/vod-splitter.png)
+
+The VOD Splitter, after the event: station 3's recording cut into one clip
+per set, with real preview frames at each edge and ±nudge buttons. Sets the
+station recorded carry a green ⏱ station mark — their edges come from the
+station's own measurements and rarely need touching — while the flagged row
+shows the failure mode the warning exists for: start.gg never got a proper
+end time, so the clip runs 57 minutes. Split in place with ffmpeg (lossless
+stream copy), or export the cut list as CSV (LosslessCut), JSON, or a shell
+script.
 
 ### What to do during your tournament
 
@@ -379,6 +356,26 @@ There's also a browser version at
 runs ffmpeg via WebAssembly, which is fine for a few short clips but slow on
 a multi-GB recording — that's what this built-in splitter is for. Prior art:
 [CGuadagnino/startgg-vod-splitter](https://github.com/CGuadagnino/startgg-vod-splitter).
+
+## Install
+
+Grab the build from the latest GitHub release: Windows portable `.zip`,
+macOS `.app` zip, Linux/SteamOS `.AppImage`. The UI is native (Iced — pure
+Rust, no webview), so there is no browser engine to configure on any
+platform. First run walks through setup: pick what this PC is, paste the
+start.gg event link (it echoes back the tournament name so a wrong paste is
+caught immediately), enter the shared key from whoever runs the event —
+done. Save/replay paths are auto-detected. Updates: Settings → "Check for
+updates" downloads and applies the newest release in place.
+
+On Windows and macOS, closing the window sends the app to the tray and
+reporting keeps running ("Start with Windows" is in Settings). On Linux
+there is no tray (that would drag the GTK stack back in); closing quits, so
+leave the window open — or minimized — while sets are being played.
+
+An existing `config.json` from the Python reporter uses the same keys and can
+be pasted into Settings field-by-field (the file lives at the app config dir
+once saved).
 
 ## Development
 

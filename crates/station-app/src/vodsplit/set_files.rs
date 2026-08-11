@@ -31,9 +31,13 @@ use serde_json::Value;
 use super::sets::SetInfo;
 
 /// How far a station-measured edge may fall outside the start.gg click-window
-/// and still count as "inside" — a TO clicking Start Match a beat late is
-/// normal; a set that started ten minutes before the click is a different set.
-const EDGE_TOLERANCE_S: i64 = 300;
+/// and still count as "inside". Two real effects set the size: a TO clicking
+/// Start Match late, and — the dominant one — a journal's `endEpoch` being
+/// the FINALIZE time, which lags the last game by up to the station's idle
+/// window (420s by default) when no next set starts sooner. At The Hangout
+/// 4.1 every station-1 journal overshot start.gg's `completedAt` by ~400s;
+/// a 300s tolerance would have missed nearly the whole event.
+const EDGE_TOLERANCE_S: i64 = 600;
 
 /// One finalized set as the station journaled it.
 #[derive(Debug, Clone)]
@@ -170,22 +174,30 @@ fn fits(local: &LocalSet, sgg_start: i64, sgg_end: i64) -> bool {
         && local.end_epoch <= sgg_end + EDGE_TOLERANCE_S
 }
 
-/// Character sets contradict when both sides recorded characters and none
-/// coincide. Either side empty = no evidence either way.
-fn characters_contradict(local: &LocalSet, set: &SetInfo) -> bool {
-    if local.characters.is_empty() {
-        return false;
-    }
+/// Character evidence agrees when the smaller of the two character sets is
+/// contained in the larger. Mere overlap is not enough: at The Hangout 4.1 a
+/// Kragg/Wrastor journal time-fit a Fleet/Kragg set on another station more
+/// tightly than its own set — one shared character must not carry a match.
+/// The containment direction tolerates one-sided gaps (start.gg often has
+/// selections for only some games; a journal can list one character for a
+/// set whose start.gg record has two). Either side empty = no evidence.
+fn characters_agree(local: &LocalSet, set: &SetInfo) -> bool {
+    let ours: HashSet<&str> = local.characters.iter().map(String::as_str).collect();
     let sgg: HashSet<&str> = set
         .players
         .iter()
         .filter_map(|p| p.character.as_deref())
         .filter(|c| !c.is_empty())
         .collect();
-    if sgg.is_empty() {
-        return false;
+    if ours.is_empty() || sgg.is_empty() {
+        return true;
     }
-    !local.characters.iter().any(|c| sgg.contains(c.as_str()))
+    let (small, big) = if ours.len() <= sgg.len() {
+        (&ours, &sgg)
+    } else {
+        (&sgg, &ours)
+    };
+    small.iter().all(|c| big.contains(c))
 }
 
 /// Overlay station-measured times onto fetched sets. Exact hub links first,
@@ -241,7 +253,7 @@ pub fn overlay_times(
             if !fits(ls, set.started_at, set.completed_at) {
                 continue;
             }
-            if characters_contradict(ls, set) {
+            if !characters_agree(ls, set) {
                 continue;
             }
             // Slack: how much wider the click-window is than the measured
@@ -440,5 +452,139 @@ mod tests {
         let bare = std::env::temp_dir().join(format!("rsr-bare-{}", std::process::id()));
         assert_eq!(normalize_picked_dir(bare.clone()), bare);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Case study: station 1's whole night at The Hangout 4.1
+    /// (tournament/the-hangout-4-1/event/rivals-of-aether-ii-singles,
+    /// 2026-08-08) — all 38 of the event's start.gg sets and all 20 journals
+    /// the station wrote, real timestamps and real character data. Two things
+    /// this proved the hard way:
+    ///
+    /// * Every journal's `endEpoch` overshot start.gg's `completedAt` by
+    ///   ~400s (the idle-finalize window) — the original 300s tolerance
+    ///   would have missed nearly every set of the event.
+    /// * Journal 021037 time-fits a station-4 set MORE TIGHTLY than its own
+    ///   set; only the character contradiction (Fleet/Kragg vs
+    ///   Etalus/Zetterburn) keeps the match honest.
+    #[test]
+    fn hangout41_station1_matches_every_bracket_set_and_no_friendlies() {
+        // (start.gg set id, station, startedAt, completedAt, characters)
+        #[rustfmt::skip]
+        let event: &[(&str, i64, i64, i64, &[&str])] = &[
+            ("106270083", 2, 1786231708, 1786232941, &["Olympia"][..]),
+            ("106270087", 3, 1786231819, 1786232850, &["Absa", "Fleet"][..]),
+            ("106270091", 4, 1786231824, 1786233118, &["Clairen", "Zetterburn"][..]),
+            ("106270103", 1, 1786232049, 1786233499, &["Fleet", "Wrastor"][..]),
+            ("106270095", 3, 1786232950, 1786234027, &["Gouie", "Kragg"][..]),
+            ("106270098", 2, 1786233033, 1786233910, &["La Reina", "Olympia"][..]),
+            ("106270099", 4, 1786233136, 1786233924, &["Forsburn", "Loxodont"][..]),
+            ("106270105", 1, 1786233524, 1786234282, &["Etalus", "Ranno"][..]),
+            ("106270157", 4, 1786233943, 1786235373, &["Fleet"][..]),
+            ("106270102", 2, 1786233987, 1786234778, &["Kragg", "Zetterburn"][..]),
+            ("106270101", 3, 1786234183, 1786235051, &["Fleet", "Olympia"][..]),
+            ("106270106", 1, 1786234359, 1786235625, &["La Reina", "Loxodont"][..]),
+            ("106270155", 2, 1786234820, 1786236064, &["Olympia", "Ranno"][..]),
+            ("106270100", 3, 1786235086, 1786235850, &["Absa", "Zetterburn"][..]),
+            ("106270108", 1, 1786235656, 1786236503, &["Kragg", "Wrastor"][..]),
+            ("106270104", 3, 1786235861, 1786236870, &["Fleet", "Kragg"][..]),
+            ("106270161", 2, 1786236110, 1786236908, &["Forsburn", "Gouie", "Ranno"][..]),
+            ("106270164", 4, 1786236141, 1786236980, &["Fleet", "Zetterburn"][..]),
+            ("106270107", 1, 1786236888, 1786237819, &["Fleet", "Zetterburn"][..]),
+            ("106270159", 2, 1786236971, 1786237757, &["Clairen", "Olympia"][..]),
+            ("106270166", 3, 1786237015, 1786238653, &["Forsburn", "Olympia"][..]),
+            ("106270163", 4, 1786237228, 1786239086, &["Kragg", "Olympia"][..]),
+            ("106270165", 2, 1786237788, 1786238416, &["Absa", "La Reina", "Olympia"][..]),
+            ("106270109", 1, 1786237833, 1786239024, &["Etalus", "Fleet"][..]),
+            ("106270168", 2, 1786238474, 1786239667, &["Fleet", "Loxodont"][..]),
+            ("106270169", 1, 1786239146, 1786239939, &["Absa", "Etalus"][..]),
+            ("106270167", 2, 1786239189, 1786240273, &["Fleet", "Kragg"][..]),
+            ("106270170", 3, 1786239193, 1786240122, &["Fleet", "Kragg"][..]),
+            ("106270110", 1, 1786239960, 1786241172, &["La Reina", "Loxodont", "Zetterburn"][..]),
+            ("106270172", 4, 1786240144, 1786240915, &["Etalus", "Wrastor"][..]),
+            ("106270171", 3, 1786240298, 1786241517, &["Fleet", "Loxodont"][..]),
+            ("106270111", 1, 1786241180, 1786242211, &["Fleet", "Kragg"][..]),
+            ("106270174", 4, 1786241290, 1786242136, &["Etalus", "Zetterburn"][..]),
+            ("106270173", 1, 1786242264, 1786243235, &["Fleet", "Kragg"][..]),
+            ("106270112", 1, 1786243230, 1786244339, &["Fleet", "Loxodont"][..]),
+            ("106270175", 1, 1786244337, 1786245465, &["Kragg", "Zetterburn"][..]),
+            ("106270176", 1, 1786245480, 1786246253, &["Fleet", "Kragg"][..]),
+            ("106270113", 1, 1786246264, 1786247392, &["Kragg", "Loxodont"][..]),
+        ];
+        // (journal set id, startEpoch, endEpoch, characters, expected match).
+        // The last seven are post-bracket friendlies and side sets — real
+        // games with real times that must match NOTHING.
+        type Journal = (
+            &'static str,
+            i64,
+            i64,
+            &'static [&'static str],
+            Option<&'static str>,
+        );
+        #[rustfmt::skip]
+        let journals: &[Journal] = &[
+            ("20260809_000628", 1786233988, 1786234690, &["Etalus", "Ranno"][..], Some("106270105")),
+            ("20260809_002111", 1786234871, 1786236035, &["Loxodont"][..], Some("106270106")),
+            ("20260809_004034", 1786236034, 1786236911, &["Kragg", "Wrastor"][..], Some("106270108")),
+            ("20260809_010250", 1786237370, 1786238148, &["Fleet", "Zetterburn"][..], Some("106270107")),
+            ("20260809_011547", 1786238147, 1786239391, &["Etalus", "Fleet"][..], Some("106270109")),
+            ("20260809_013844", 1786239524, 1786240359, &["Absa", "Etalus"][..], Some("106270169")),
+            ("20260809_015414", 1786240454, 1786241438, &["Loxodont", "Zetterburn"][..], Some("106270110")),
+            ("20260809_021037", 1786241437, 1786242569, &["Fleet", "Kragg"][..], Some("106270111")),
+            ("20260809_022928", 1786242568, 1786243587, &["Fleet", "Kragg"][..], Some("106270173")),
+            ("20260809_024725", 1786243645, 1786244720, &["Fleet", "Loxodont"][..], Some("106270112")),
+            ("20260809_030537", 1786244737, 1786245821, &["Kragg", "Zetterburn"][..], Some("106270175")),
+            ("20260809_032339", 1786245819, 1786246645, &["Fleet", "Kragg"][..], Some("106270176")),
+            ("20260809_033905", 1786246745, 1786247778, &["Kragg", "Loxodont"][..], Some("106270113")),
+            ("20260809_040556", 1786248356, 1786249747, &["Fleet", "Ranno"][..], None),
+            ("20260809_042924", 1786249764, 1786251224, &["Fleet", "Olympia"][..], None),
+            ("20260809_045643", 1786251403, 1786252605, &["Gouie"][..], None),
+            ("20260809_051643", 1786252603, 1786253848, &["Ranno", "Zetterburn"][..], None),
+            ("20260809_054350", 1786254230, 1786254865, &["Wrastor", "Zetterburn"][..], None),
+            ("20260809_055358", 1786254838, 1786255486, &["Forsburn", "Slade"][..], None),
+            ("20260809_060517", 1786255517, 1786260627, &["Fleet", "Zetterburn"][..], None),
+        ];
+
+        let mut sets: Vec<SetInfo> = event
+            .iter()
+            .map(|&(id, station, start, end, chars)| SetInfo {
+                station: Some(station),
+                ..sgg(id, start, end, chars)
+            })
+            .collect();
+        let local_sets: Vec<LocalSet> = journals
+            .iter()
+            .map(|&(id, start, end, chars, _)| local(id, start, end, chars))
+            .collect();
+
+        let matched = overlay_times(&mut sets, &local_sets, &HashMap::new());
+        assert_eq!(matched, 13, "every bracket journal lands, no friendly does");
+
+        for &(jid, start, end, _, expected) in journals {
+            match expected {
+                Some(sgg_id) => {
+                    let s = sets
+                        .iter()
+                        .find(|s| s.id.as_deref() == Some(sgg_id))
+                        .unwrap();
+                    assert!(
+                        s.precise && s.started_at == start && s.completed_at == end,
+                        "journal {jid} should own set {sgg_id} \
+                         (got precise={} {}..{})",
+                        s.precise,
+                        s.started_at,
+                        s.completed_at,
+                    );
+                }
+                None => {
+                    // A friendly's measured window must not appear on any set.
+                    assert!(
+                        !sets
+                            .iter()
+                            .any(|s| s.started_at == start && s.completed_at == end),
+                        "friendly journal {jid} was matched to a bracket set"
+                    );
+                }
+            }
+        }
     }
 }

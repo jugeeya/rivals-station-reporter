@@ -11,6 +11,20 @@
 //! stripping whitespace only, while slot mapping stripped every non-alphanumeric.
 //! Here both use the stricter [`norm`], so "JUGZ!" and "jugz" compare equal — that
 //! only ever makes matching more forgiving, which is the direction we want.
+//!
+//! Deliberate extensions beyond the Worker, each earned by a real set from
+//! The Hangout 4.1 (see the `hangout41` test module):
+//! * [`norm_key`]: a symbols-only tag like `***` normalises to nothing under
+//!   [`norm`], which made it unmatchable AND undeliverable through the tag
+//!   database (its key was dropped). Such tags fall back to a
+//!   lowercased/whitespace-stripped form instead of vanishing.
+//! * Elimination: in a two-entrant set, when the winner's tag is unmatchable
+//!   but the LOSER's tag matches an entrant exactly, the winner is the other
+//!   entrant by elimination — as certain as a direct exact match. (`SHLNG`
+//!   won four sets including grands; the tag database knew every opponent.)
+//! * Abbreviation: `SMSC` is how Samasicus tags in game. A short tag that
+//!   anchors on the same first letter and reads as an ordered subsequence of
+//!   exactly one entrant's name is a "low"-confidence candidate.
 
 use std::collections::{HashMap, HashSet};
 
@@ -96,6 +110,45 @@ fn norm_str(s: &str) -> String {
         .collect()
 }
 
+/// [`norm_str`], except a name that would normalise to NOTHING (a
+/// symbols-only tag like `***` or `:)`) falls back to its lowercased,
+/// whitespace-stripped form instead. Alphanumeric names key exactly as
+/// before; symbol tags stop being invisible to every lookup.
+pub fn norm_key(s: &str) -> String {
+    let n = norm_str(s);
+    if !n.is_empty() {
+        return n;
+    }
+    s.to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect()
+}
+
+/// True when `tag` reads as an abbreviation of `name`: at least 3
+/// characters, strictly shorter, anchored on the same first character, and
+/// every character appears in `name` in order ("smsc" ⊂ "samasicus",
+/// "altn" ⊂ "altonp"). Both inputs are already normalised.
+fn is_abbreviation(tag: &str, name: &str) -> bool {
+    if tag.chars().count() < 3 || tag.len() >= name.len() {
+        return false;
+    }
+    let mut want = tag.chars();
+    let mut cur = want.next();
+    if cur != name.chars().next() {
+        return false;
+    }
+    for c in name.chars() {
+        if Some(c) == cur {
+            cur = want.next();
+            if cur.is_none() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Every name an entrant may appear under: start.gg tags can carry a
 /// sponsor prefix ("TEAM | Tag"), so match the full name and the bare tag.
 pub fn entrant_names(e: &Value) -> Vec<String> {
@@ -121,7 +174,7 @@ pub fn build_tag_map(players_json: Option<&Value>) -> HashMap<String, String> {
             if k.starts_with('_') {
                 continue; // "_comment" style notes people leave in the file
             }
-            let nk = norm_str(k);
+            let nk = norm_key(k);
             if nk.is_empty() {
                 continue;
             }
@@ -148,10 +201,11 @@ pub fn player_aliases(p: Option<&Value>, tag_map: Option<&HashMap<String, String
         out.push(py_str(p.get("sgg").unwrap()));
     }
     if let Some(tm) = tag_map {
-        let key = norm(p.get("name").unwrap_or(&Value::Null));
-        if let Some(via) = tm.get(&key) {
-            if !via.is_empty() {
-                out.push(via.clone());
+        if let Some(name) = p.get("name").filter(|v| truthy(v)) {
+            if let Some(via) = tm.get(&norm_key(&py_str(name))) {
+                if !via.is_empty() {
+                    out.push(via.clone());
+                }
             }
         }
     }
@@ -169,10 +223,60 @@ pub struct WinnerMatch {
     pub confidence: &'static str,
 }
 
+/// A player's normalised aliases, ready for comparison.
+fn norm_aliases(p: Option<&Value>, tag_map: Option<&HashMap<String, String>>) -> Vec<String> {
+    player_aliases(p, tag_map)
+        .iter()
+        .map(|a| norm_key(a))
+        .filter(|a| !a.is_empty())
+        .collect()
+}
+
+/// How strongly a set of aliases points at one entrant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Hit {
+    None,
+    /// Substring either way, or an abbreviation (see [`is_abbreviation`]).
+    Partial,
+    /// A normalised alias equals a normalised entrant name.
+    Exact,
+}
+
+fn hit_for(aliases: &[String], e: &Value) -> Hit {
+    let mut best = Hit::None;
+    for n in entrant_names(e) {
+        let nn = norm_key(&n);
+        if nn.is_empty() {
+            continue;
+        }
+        if aliases.iter().any(|a| a == &nn) {
+            return Hit::Exact;
+        }
+        if aliases
+            .iter()
+            .any(|a| nn.contains(a.as_str()) || a.contains(&nn) || is_abbreviation(a, &nn))
+        {
+            best = Hit::Partial;
+        }
+    }
+    best
+}
+
+fn id_of(e: &Value) -> Option<Value> {
+    e.get("id").filter(|v| !v.is_null()).cloned()
+}
+
 /// Best-effort winner match -> candidate entrant id + confidence.
 ///
 /// In-game names rarely equal start.gg tags, so an unsure result is expected —
-/// the operator confirms before anything is finalized.
+/// the operator confirms (or auto-report double-checks) before anything is
+/// finalized. Tiers, strongest first:
+///
+///   1. the winner's tag matches an entrant exactly            -> high
+///   2. two entrants, the LOSER's tag matches exactly: the
+///      winner is the other entrant by elimination             -> high
+///   3. the winner's tag partially matches exactly one way     -> low
+///   4. two entrants, the loser partially matches: elimination -> low
 pub fn match_winner(
     st: &Value,
     entrants: Option<&Value>,
@@ -191,50 +295,81 @@ pub fn match_winner(
     }
     let winner_name = st.get("winnerName").unwrap();
 
-    let mut winner_player: Option<&Value> = None;
-    if let Some(players) = st.get("players").and_then(|v| v.as_array()) {
-        for p in players {
-            if p.get("name") == Some(winner_name) {
-                winner_player = Some(p);
-                break;
-            }
-        }
-    }
+    let empty: Vec<Value> = Vec::new();
+    let players = st
+        .get("players")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty);
+    let winner_player = players.iter().find(|p| p.get("name") == Some(winner_name));
+    // The other player of a 1v1 — the elimination tiers reason about them.
+    let loser_player = (players.len() == 2)
+        .then(|| players.iter().find(|p| p.get("name") != Some(winner_name)))
+        .flatten();
+
     let fallback = json!({ "name": winner_name });
-    let aliases: Vec<String> = player_aliases(Some(winner_player.unwrap_or(&fallback)), tag_map)
-        .iter()
-        .map(|a| norm_str(a))
-        .filter(|a| !a.is_empty())
-        .collect();
-    if aliases.is_empty() {
+    let winner_aliases = norm_aliases(Some(winner_player.unwrap_or(&fallback)), tag_map);
+    let loser_aliases = loser_player
+        .map(|p| norm_aliases(Some(p), tag_map))
+        .unwrap_or_default();
+    if winner_aliases.is_empty() && loser_aliases.is_empty() {
         return none;
     }
 
-    let mut partial: Option<&Value> = None;
-    for e in entrants_list {
-        for n in entrant_names(e) {
-            let nn = norm_str(&n);
-            if nn.is_empty() {
-                continue;
-            }
-            if aliases.iter().any(|a| a == &nn) {
-                return WinnerMatch {
-                    candidate_winner_entrant_id: e.get("id").filter(|v| !v.is_null()).cloned(),
-                    confidence: "high",
-                };
-            }
-            if partial.is_none()
-                && aliases
-                    .iter()
-                    .any(|a| nn.contains(a.as_str()) || a.contains(&nn))
-            {
-                partial = Some(e);
+    let winner_hits: Vec<(Hit, &Value)> = entrants_list
+        .iter()
+        .map(|e| (hit_for(&winner_aliases, e), e))
+        .collect();
+    let best_exact = winner_hits.iter().find(|(h, _)| *h == Hit::Exact);
+    if let Some((_, e)) = best_exact {
+        return WinnerMatch {
+            candidate_winner_entrant_id: id_of(e),
+            confidence: "high",
+        };
+    }
+
+    // Elimination needs exactly two entrants, and only makes sense when the
+    // loser's match doesn't ALSO fit the winner (identical tags, say).
+    let eliminate = |min: Hit| -> Option<&Value> {
+        if entrants_list.len() != 2 || loser_aliases.is_empty() {
+            return None;
+        }
+        let loser_hits: Vec<Hit> = entrants_list
+            .iter()
+            .map(|e| hit_for(&loser_aliases, e))
+            .collect();
+        // The loser must point at one entrant strictly more strongly than
+        // the other; the winner is then the other one.
+        for (i, h) in loser_hits.iter().enumerate() {
+            if *h >= min && loser_hits[1 - i] < *h {
+                return Some(&entrants_list[1 - i]);
             }
         }
-    }
-    if let Some(e) = partial {
+        None
+    };
+
+    if let Some(e) = eliminate(Hit::Exact) {
         return WinnerMatch {
-            candidate_winner_entrant_id: e.get("id").filter(|v| !v.is_null()).cloned(),
+            candidate_winner_entrant_id: id_of(e),
+            confidence: "high",
+        };
+    }
+
+    let partials: Vec<&Value> = winner_hits
+        .iter()
+        .filter(|(h, _)| *h == Hit::Partial)
+        .map(|(_, e)| *e)
+        .collect();
+    // A partial guess that fits several entrants points nowhere.
+    if partials.len() == 1 {
+        return WinnerMatch {
+            candidate_winner_entrant_id: id_of(partials[0]),
+            confidence: "low",
+        };
+    }
+
+    if let Some(e) = eliminate(Hit::Partial) {
+        return WinnerMatch {
+            candidate_winner_entrant_id: id_of(e),
             confidence: "low",
         };
     }
@@ -404,11 +539,7 @@ pub fn map_slots_to_entrants(
             if mapping.contains_key(&slot) {
                 continue;
             }
-            let aliases: Vec<String> = player_aliases(Some(p), tag_map)
-                .iter()
-                .map(|a| norm_str(a))
-                .filter(|a| !a.is_empty())
-                .collect();
+            let aliases = norm_aliases(Some(p), tag_map);
             if aliases.is_empty() {
                 continue;
             }
@@ -418,7 +549,7 @@ pub fn map_slots_to_entrants(
                     continue;
                 }
                 for n in entrant_names(e) {
-                    let nn = norm_str(&n);
+                    let nn = norm_key(&n);
                     if nn.is_empty() {
                         continue;
                     }
@@ -737,12 +868,14 @@ mod tests {
     }
 
     #[test]
-    fn without_players_json_jugz_vs_jugeeya_is_honestly_none() {
+    fn without_players_json_the_loser_kim_still_gives_jugeeya_by_elimination() {
+        // "jugz" doesn't resemble "jugeeya" enough for any direct tier, but
+        // the loser "KIM" partially matches "Kimchi" (and not jugeeya), so
+        // elimination names jugeeya — at "low", since the loser match was a
+        // substring guess rather than an exact alias.
         let w = match_winner(&real_set(), Some(&entrants()), None);
-        assert_eq!(
-            w.confidence, "none",
-            "without players.json, JUGZ! vs jugeeya is honestly 'none'"
-        );
+        assert_eq!(w.candidate_winner_entrant_id, Some(json!(24186345)));
+        assert_eq!(w.confidence, "low");
     }
 
     // ---- per-game derivation (the 2-0 regression) -------------------------------
@@ -962,5 +1095,277 @@ mod tests {
             ]},
         ]);
         assert!(!live_push_confirmed(&gd, &remote_wrong_winner));
+    }
+}
+
+/// Case study: every bracket set station 1 recorded at The Hangout 4.1
+/// (tournament/the-hangout-4-1/event/rivals-of-aether-ii-singles, 2026-08-08)
+/// — real in-game tags, real entrants, real winners, and the tag-database
+/// snapshot that was cached on the machine that night. Before the
+/// symbol-tag/elimination/abbreviation work, 8 of these 13 sets matched NO
+/// candidate winner (and none of those could auto-report); after it, all 13
+/// name the right entrant and 12 are exact enough to auto-report.
+#[cfg(test)]
+mod hangout41 {
+    use super::*;
+    use serde_json::json;
+
+    /// The tag database as cached on station 1 that night — plus "***",
+    /// which WAS published (threeleggeddog's tag) but was being dropped by
+    /// the old key normalisation; `norm_key` keeps it now.
+    fn tagdb() -> HashMap<String, String> {
+        [
+            ("alvrg", "JuanSolo"),
+            ("bub", "Kimchi"),
+            ("jugz", "jugeeya"),
+            ("45to", "Ahntye"),
+            ("dalek", "Dalek Ditto"),
+            ("altn", "AltonP"),
+            ("joule", "Joule Thief"),
+            ("kim", "Kimchi"),
+            ("***", "threeleggeddog"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
+
+    fn set_1v1(winner: (&str, &str), loser: (&str, &str)) -> Value {
+        json!({
+            "complete": true, "winnerName": winner.0,
+            "players": [
+                {"slot": 0, "name": winner.0, "character": winner.1, "wins": 3},
+                {"slot": 1, "name": loser.0, "character": loser.1, "wins": 1},
+            ],
+        })
+    }
+
+    fn ents(a: (i64, &str), b: (i64, &str)) -> Value {
+        json!([{"id": a.0, "name": a.1}, {"id": b.0, "name": b.1}])
+    }
+
+    /// (start.gg set, winner tag+char, loser tag+char, entrants,
+    ///  expected winner entrant id, expected confidence)
+    #[allow(clippy::type_complexity)]
+    fn the_night() -> Vec<(
+        &'static str,
+        (&'static str, &'static str),
+        (&'static str, &'static str),
+        Value,
+        i64,
+        &'static str,
+    )> {
+        let orbital = (24311105, "Orbital");
+        let ahntye = (24328362, "Runback | Ahntye");
+        let fizzy = (24260111, "FizzyBrax | Potatoes");
+        let juansolo = (24260328, "POA | JuanSolo");
+        let mfg = (24310923, "1mfg | threeleggeddog");
+        let sama = (24328678, "Samasicus");
+        let kimchi = (24186347, "Kimchi");
+        let joule = (24300357, "Joule Thief");
+        let jugeeya = (24186345, "jugeeya");
+        let coopr = (24339847, "IKKI | coopR");
+        vec![
+            // WR2: winner's "ORB" is only a substring guess, but the loser's
+            // 45TO is Ahntye's published tag — elimination, exact.
+            (
+                "106270105",
+                ("ORB", "Etalus"),
+                ("45TO", "Ranno"),
+                ents(orbital, ahntye),
+                orbital.0,
+                "high",
+            ),
+            // WQF: SHLNG published nothing; ALVRG is JuanSolo's tag.
+            (
+                "106270106",
+                ("SHLNG", "Loxodont"),
+                ("ALVRG", "Loxodont"),
+                ents(fizzy, juansolo),
+                fizzy.0,
+                "high",
+            ),
+            // WQF: the symbols-only tag, straight from the tag database.
+            (
+                "106270108",
+                ("***", "Kragg"),
+                ("SMSC", "Wrastor"),
+                ents(mfg, sama),
+                mfg.0,
+                "high",
+            ),
+            // WQF: BUB:) normalises to "bub" -> Kimchi.
+            (
+                "106270107",
+                ("BUB:)", "Zetterburn"),
+                ("JOULE", "Fleet"),
+                ents(kimchi, joule),
+                kimchi.0,
+                "high",
+            ),
+            (
+                "106270109",
+                ("JUGZ!", "Fleet"),
+                ("ORB", "Etalus"),
+                ents(jugeeya, orbital),
+                jugeeya.0,
+                "high",
+            ),
+            // LR3: "C" is unmatchable-with-certainty either way; the winner's
+            // own substring guess (orb ⊂ orbital) carries it at "low".
+            (
+                "106270169",
+                ("ORB", "Etalus"),
+                ("C", "Absa"),
+                ents(orbital, coopr),
+                orbital.0,
+                "low",
+            ),
+            (
+                "106270110",
+                ("SHLNG", "Loxodont"),
+                ("BUB:)", "Zetterburn"),
+                ents(fizzy, kimchi),
+                fizzy.0,
+                "high",
+            ),
+            (
+                "106270111",
+                ("JUGZ!", "Fleet"),
+                ("***", "Kragg"),
+                ents(mfg, jugeeya),
+                jugeeya.0,
+                "high",
+            ),
+            (
+                "106270173",
+                ("***", "Kragg"),
+                ("JOULE", "Fleet"),
+                ents(mfg, joule),
+                mfg.0,
+                "high",
+            ),
+            (
+                "106270112",
+                ("SHLNG", "Loxodont"),
+                ("JUGZ!", "Fleet"),
+                ents(fizzy, jugeeya),
+                fizzy.0,
+                "high",
+            ),
+            (
+                "106270175",
+                ("***", "Kragg"),
+                ("BUB:)", "Zetterburn"),
+                ents(mfg, kimchi),
+                mfg.0,
+                "high",
+            ),
+            (
+                "106270176",
+                ("***", "Kragg"),
+                ("JUGZ!", "Fleet"),
+                ents(jugeeya, mfg),
+                mfg.0,
+                "high",
+            ),
+            // Grand Final: neither tag matches directly — SHLNG published
+            // nothing and "***" needs the symbol fix — but with it, the
+            // loser is exactly threeleggeddog, so elimination names Fizzy.
+            (
+                "106270113",
+                ("SHLNG", "Loxodont"),
+                ("***", "Kragg"),
+                ents(fizzy, mfg),
+                fizzy.0,
+                "high",
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_bracket_set_names_the_right_winner() {
+        let tags = tagdb();
+        for (set_id, winner, loser, entrants, want_id, want_conf) in the_night() {
+            let st = set_1v1(winner, loser);
+            let w = match_winner(&st, Some(&entrants), Some(&tags));
+            assert_eq!(
+                w.candidate_winner_entrant_id,
+                Some(json!(want_id)),
+                "set {set_id}: {} vs {} should name entrant {want_id}, got {:?} ({})",
+                winner.0,
+                loser.0,
+                w.candidate_winner_entrant_id,
+                w.confidence,
+            );
+            assert_eq!(
+                w.confidence, want_conf,
+                "set {set_id}: {} vs {} expected {want_conf}",
+                winner.0, loser.0,
+            );
+        }
+    }
+
+    #[test]
+    fn twelve_of_thirteen_would_auto_report() {
+        // Before this work: 3. The one holdout is ORB vs C — a substring
+        // guess against an opponent who can't corroborate it.
+        let tags = tagdb();
+        let high = the_night()
+            .into_iter()
+            .filter(|(_, w, l, entrants, _, _)| {
+                match_winner(&set_1v1(*w, *l), Some(entrants), Some(&tags)).confidence == "high"
+            })
+            .count();
+        assert_eq!(high, 12);
+    }
+
+    #[test]
+    fn smsc_reads_as_an_abbreviation_of_samasicus() {
+        // Samasicus never won on this station that night, so the
+        // abbreviation tier wasn't load-bearing above — but their tag is the
+        // canonical example of one. With an unknown opponent (no elimination
+        // available), the abbreviation alone should name them at "low".
+        let st = set_1v1(("SMSC", "Wrastor"), ("XYZQ", "Kragg"));
+        let entrants = ents((24328678, "Samasicus"), (24311105, "Orbital"));
+        let w = match_winner(&st, Some(&entrants), Some(&tagdb()));
+        assert_eq!(w.candidate_winner_entrant_id, Some(json!(24328678)));
+        assert_eq!(w.confidence, "low");
+    }
+
+    #[test]
+    fn symbol_tags_survive_normalisation() {
+        assert_eq!(norm_key("***"), "***");
+        assert_eq!(norm_key("BUB:)"), "bub", "mixed tags still strip to alnum");
+        assert_eq!(norm_key("JUGZ!"), "jugz");
+    }
+
+    #[test]
+    fn symbol_tags_map_slots_for_live_scores() {
+        // Live pushes need slot -> entrant too; "***" must map exactly, not
+        // fall to pair-by-order.
+        let st = set_1v1(("***", "Kragg"), ("SHLNG", "Loxodont"));
+        let rec = json!({
+            "entrants": ents((24310923, "1mfg | threeleggeddog"), (24260111, "FizzyBrax | Potatoes")),
+            "set": summarize_set(&st),
+        });
+        let smap = map_slots_to_entrants(&rec, None, Some(&tagdb()));
+        assert_eq!(
+            smap,
+            Some(HashMap::from([
+                (0, "24310923".to_string()),
+                (1, "24260111".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_partial_guess_that_fits_both_entrants_names_nobody() {
+        // "AL" substring-hits both ALTN-ish entrants; a guess that points
+        // two ways points nowhere (the old code took whichever came first).
+        let st = set_1v1(("AL", "Kragg"), ("XYZQ", "Fleet"));
+        let entrants = ents((1, "Alton"), (2, "Alvara"));
+        let w = match_winner(&st, Some(&entrants), None);
+        assert_eq!(w.confidence, "none");
     }
 }

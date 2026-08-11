@@ -200,7 +200,11 @@ fn parse_manifest(body: &Value) -> HashMap<String, String> {
             if name.is_empty() || sgg.is_empty() {
                 continue;
             }
-            let key = matching::norm(&Value::String(name.to_string()));
+            // norm_key, not norm: a symbols-only tag like "***" would
+            // normalise to nothing and silently vanish from the database —
+            // which is exactly what happened to threeleggeddog's tag at
+            // The Hangout 4.1, costing every one of their sets its match.
+            let key = matching::norm_key(name);
             if !key.is_empty() {
                 map.insert(key, sgg.to_string());
             }

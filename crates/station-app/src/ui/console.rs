@@ -1,7 +1,13 @@
 //! The operator console — port of OperatorConsole.vue + OperatorSetRow.vue.
 //! Every station's sets in three groups (live / awaiting report / other),
-//! with the three operator actions. Report opens a winner picker and is the
-//! ONLY thing that advances the bracket.
+//! with the operator actions. Report opens a winner picker.
+//!
+//! Report used to be the only thing here that advanced a bracket. With
+//! auto-report on it isn't: an unambiguous finished set counts down and
+//! finalizes itself (see `station_core::hub::auto_report_blocker` for what
+//! qualifies). So an awaiting row has to show that countdown and offer a
+//! Hold — the operator finding out a set self-reported only by seeing the
+//! bracket move would be the worst version of this feature.
 
 use iced::widget::{button, column, container, row, text, tooltip, Space};
 use iced::{Alignment, Element, Length, Task};
@@ -23,6 +29,12 @@ pub enum Msg {
     Swap {
         station: i64,
         set_id: String,
+    },
+    /// Stop (or resume) this set finalizing itself.
+    Hold {
+        station: i64,
+        set_id: String,
+        hold: bool,
     },
     /// First click arms; the confirming second click deletes (the native
     /// stand-in for the old confirm dialog, one fewer window).
@@ -93,6 +105,34 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 blocking(move || {
                     crate::engine::commands::swap_players(&engine, station, &set_id)
                         .map(|_| "Players switched. Remembered for future sets.".to_string())
+                }),
+                |r| {
+                    Message::Console(Msg::Done {
+                        result: r,
+                        bracket_changed: false,
+                    })
+                },
+            );
+        }
+        Msg::Hold {
+            station,
+            set_id,
+            hold,
+        } => {
+            c.busy = true;
+            c.action_msg.clear();
+            let engine = app.engine.clone();
+            return Task::perform(
+                blocking(move || {
+                    crate::engine::commands::hold_auto_report(&engine, station, &set_id, hold).map(
+                        |_| {
+                            if hold {
+                                "Auto-report held — report it yourself when ready.".to_string()
+                            } else {
+                                "Auto-report resumed.".to_string()
+                            }
+                        },
+                    )
                 }),
                 |r| {
                     Message::Console(Msg::Done {
@@ -680,6 +720,14 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
     } else {
         // Action row.
         let mut actions = row![].spacing(8).align_y(Alignment::Center);
+        // A set finalizing itself has to say so before it happens, and be
+        // stoppable — otherwise the first the operator knows of a wrong
+        // mapping is the bracket already having advanced.
+        let auto_at = r.get("autoReportAt").and_then(|v| v.as_i64());
+        let held = r
+            .get("autoReportHold")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if reportable && status != "reported" {
             let mut b = button(text("Report").size(13))
                 .style(theme::button_primary_rich)
@@ -688,6 +736,53 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
                 b = b.on_press(Message::Console(Msg::OpenPicker(key.clone())));
             }
             actions = actions.push(b);
+
+            if let Some(at) = auto_at {
+                let left = (at - app.now_s).max(0);
+                actions = actions.push(
+                    text(if left == 0 {
+                        "reporting itself now…".to_string()
+                    } else {
+                        format!("reports itself in {left}s")
+                    })
+                    .size(12)
+                    .color(theme::TEXT_WARNING),
+                );
+                let mut hold = button(text("hold").size(12))
+                    .style(theme::button_surface)
+                    .padding([5, 10]);
+                if !busy {
+                    hold = hold.on_press(Message::Console(Msg::Hold {
+                        station,
+                        set_id: set_id.clone(),
+                        hold: true,
+                    }));
+                }
+                actions = actions.push(tooltip(
+                    hold,
+                    container(
+                        text("Stop this set reporting itself. You can still report it by hand.")
+                            .size(12),
+                    )
+                    .style(theme::tooltip_bubble)
+                    .padding(8)
+                    .max_width(300),
+                    tooltip::Position::Top,
+                ));
+            } else if held {
+                let mut resume = button(text("resume auto-report").size(12))
+                    .style(theme::button_linkish)
+                    .padding([5, 8]);
+                if !busy {
+                    resume = resume.on_press(Message::Console(Msg::Hold {
+                        station,
+                        set_id: set_id.clone(),
+                        hold: false,
+                    }));
+                }
+                actions = actions.push(text("held").size(12).color(theme::TEXT_MUTED));
+                actions = actions.push(resume);
+            }
         } else if status == "reported" {
             let mut b = button(text("Re-report").size(12))
                 .style(theme::button_surface)
@@ -696,6 +791,26 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
                 b = b.on_press(Message::Console(Msg::OpenPicker(key.clone())));
             }
             actions = actions.push(b);
+            // Who decided. Worth saying: a result nobody clicked for is
+            // exactly the one an operator will want to double-check.
+            if r.get("reportedBy").and_then(|v| v.as_str()) == Some("auto") {
+                actions = actions.push(
+                    text("reported automatically")
+                        .size(12)
+                        .color(theme::TEXT_MUTED),
+                );
+            }
+        }
+        // An auto-report that gave up says why, rather than leaving the set
+        // looking like it's still counting down to something.
+        if let Some(e) = r.get("autoReportError").and_then(|v| v.as_str()) {
+            if status != "reported" && auto_at.is_none() && !held {
+                actions = actions.push(
+                    text(format!("auto-report stopped: {e}"))
+                        .size(12)
+                        .color(theme::TEXT_FAILURE),
+                );
+            }
         }
         let mut swap = button(text("⇄ switch players").size(12))
             .style(theme::button_linkish)

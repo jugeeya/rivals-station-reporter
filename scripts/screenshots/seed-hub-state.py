@@ -9,9 +9,12 @@ places at once:
     "first to 4"); no games played yet.
   * Station 2 — BRUJITA vs NAVI mid-set (Winners Semi-Final), 2-1 after
     three games, NAVI switching Clairen -> Fleet in game 3.
-  * Station 3 — LOOM vs SLADE finished 3-1 (Winners Round 3) 13 minutes
-    ago, matched with a high-confidence candidate, awaiting the Report
-    click; the station sits idle now.
+  * Station 3 — LOOM vs SLADE just finished 3-1 (Winners Round 3), matched
+    with a high-confidence candidate; the station sits idle now. Auto-report
+    is on, so this one is counting down to finalizing itself rather than
+    waiting on a Report click — with Hold beside it. It has to be a RECENT
+    set: the countdown is computed live from ingestedAt plus the configured
+    delay, so an older one would render as already overdue.
 
 Current Sets mirrors the same bracket: both live sets under "playing now"
 with the same start times, and two startable sets whose FOUR players are all
@@ -72,9 +75,9 @@ station2 = {
 }
 
 station3 = {
-    "id": to_id(now - 2000), "station": 3, "ingestedAt": now - 750,
-    "set": {"setId": to_id(now - 2000), "complete": True, "startEpoch": now - 2000,
-            "endEpoch": now - 800, "durationSeconds": 1200, "winsRequired": 3,
+    "id": to_id(now - 1240), "station": 3, "ingestedAt": now - 22,
+    "set": {"setId": to_id(now - 1240), "complete": True, "startEpoch": now - 1240,
+            "endEpoch": now - 30, "durationSeconds": 1210, "winsRequired": 3,
             "matchCount": 4, "winnerSlot": 0, "winnerName": "LOOM",
             "winnerCharacter": "Zetterburn",
             "players": [{"slot": 0, "name": "LOOM", "character": "Zetterburn", "wins": 3},

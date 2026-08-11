@@ -337,7 +337,7 @@ fn slot_entrants(
     json!(rows)
 }
 
-fn snapshot_of(s: &HubState, event_slug: Option<&str>) -> Value {
+fn snapshot_of(s: &HubState, event_slug: Option<&str>, auto: AutoReport) -> Value {
     let buckets = |m: &Map<String, Value>| -> Vec<Value> {
         match event_slug {
             Some(slug) => m.get(slug).cloned().into_iter().collect(),
@@ -352,6 +352,17 @@ fn snapshot_of(s: &HubState, event_slug: Option<&str>) -> Value {
         }
     }
     out.sort_by_key(|b| std::cmp::Reverse(ingested(b)));
+    // When each set would finalize itself, as an absolute instant rather than
+    // a countdown: the snapshot is emitted on change, not every second, so a
+    // "seconds left" baked in here would be stale the moment it arrived. The
+    // console subtracts its own clock.
+    let now = now_sec();
+    for rec in out.iter_mut() {
+        rec["autoReportAt"] = match auto_report_in(rec, auto, now) {
+            Some(left) => json!(now + left),
+            None => Value::Null,
+        };
+    }
 
     let mut stations = Map::new();
     for bucket in buckets(&s.stations) {
@@ -464,6 +475,103 @@ pub struct Hub {
     /// didn't require growing that constructor's already-long argument list
     /// or touching its call site in `hub_glue.rs`.
     event_slug: Mutex<Option<String>>,
+    /// Whether finished sets finalize themselves, and how long they wait
+    /// first. Set from config right after construction, like `event_slug`.
+    auto_report: Mutex<AutoReport>,
+}
+
+/// Auto-report policy. Off, with no delay, is the historical behavior: every
+/// bracket write came from an operator clicking Report.
+#[derive(Debug, Clone, Copy)]
+pub struct AutoReport {
+    pub enabled: bool,
+    /// Seconds a finished set waits before finalizing itself. The window
+    /// exists so the operator can Swap a backwards mapping, Hold the set, or
+    /// just watch it go — an instant write past a wrong guess is the failure
+    /// mode this whole feature has to avoid.
+    pub delay_s: f64,
+}
+
+impl Default for AutoReport {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            delay_s: DEFAULT_AUTO_REPORT_DELAY_S,
+        }
+    }
+}
+
+pub const DEFAULT_AUTO_REPORT_DELAY_S: f64 = 60.0;
+
+/// How many times a failing auto-report is retried before the set is left to
+/// the operator. A network blip deserves another go; start.gg refusing the
+/// write does not, and a set silently retrying every sweep for the rest of
+/// the night would bury the reason in the log.
+pub const MAX_AUTO_REPORT_ATTEMPTS: i64 = 3;
+
+/// Why this record will never finalize itself, or `None` if it will (once its
+/// hold-off elapses).
+///
+/// Deliberately strict. Auto-reporting advances a bracket, which is the one
+/// thing in this app nobody can undo from here, so it only ever fires on a
+/// set that is unambiguous on every axis: it finished properly, it is bound
+/// to a start.gg set, and the winner's tag matched an entrant EXACTLY. A
+/// "low" confidence match is a substring guess (see `matching::match_winner`)
+/// — good enough to offer the operator as a default, nowhere near good enough
+/// to advance a bracket unwatched.
+pub fn auto_report_blocker(rec: &Value) -> Option<&'static str> {
+    if rec["status"] == *"reported" {
+        return Some("already reported");
+    }
+    // `record_for` sets "matched" only for a finished, reportable, bound set;
+    // "live" is still being played and the mode labels (online, ranked) are
+    // not bracket sets at all.
+    if rec["status"] != *"matched" {
+        return Some("not a finished bracket set");
+    }
+    if !get_default_true(rec, "reportable") {
+        return Some("not reportable");
+    }
+    if !truthy(rec.get("matchedStartggSetId")) {
+        return Some("no matched start.gg set");
+    }
+    // An idle timer can close a set the players never actually finished; the
+    // station says so, and that is not a result worth writing to a bracket.
+    if !truthy(rec.pointer("/set/complete")) {
+        return Some("set never closed out properly");
+    }
+    if rec["confidence"] != *"high" {
+        return Some("winner is only a guess");
+    }
+    if !truthy(rec.get("candidateWinnerEntrantId")) {
+        return Some("no winner");
+    }
+    if truthy(rec.get("autoReportHold")) {
+        return Some("held by the operator");
+    }
+    if rec
+        .get("autoReportAttempts")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        >= MAX_AUTO_REPORT_ATTEMPTS
+    {
+        return Some("auto-report failed too many times");
+    }
+    None
+}
+
+/// Seconds until this record finalizes itself: `Some(0)` means now, `None`
+/// means never (auto-report off, or something in `auto_report_blocker`).
+/// The console renders this as a countdown so an operator can see one coming
+/// and Hold it.
+pub fn auto_report_in(rec: &Value, policy: AutoReport, now: i64) -> Option<i64> {
+    if !policy.enabled || auto_report_blocker(rec).is_some() {
+        return None;
+    }
+    // Counted from the ingest that produced this record, so a set corrected
+    // (swapped, rebound) mid-countdown gets the full window again — the
+    // correction is exactly when someone is still looking at it.
+    Some((ingested(rec) + policy.delay_s as i64 - now).max(0))
 }
 
 impl Hub {
@@ -535,6 +643,7 @@ impl Hub {
             state_path,
             state: Mutex::new(state),
             event_slug: Mutex::new(None),
+            auto_report: Mutex::new(AutoReport::default()),
         }
     }
 
@@ -556,6 +665,20 @@ impl Hub {
     /// hub with no start.gg event has none).
     pub fn event_slug(&self) -> Option<String> {
         self.event_slug.lock().unwrap().clone()
+    }
+
+    /// Set the auto-report policy (see [`AutoReport`]). A non-positive delay
+    /// is clamped to zero rather than rejected: "report immediately" is a
+    /// coherent thing to ask for, a negative wait is not.
+    pub fn set_auto_report(&self, policy: AutoReport) {
+        *self.auto_report.lock().unwrap() = AutoReport {
+            delay_s: policy.delay_s.max(0.0),
+            ..policy
+        };
+    }
+
+    pub fn auto_report(&self) -> AutoReport {
+        *self.auto_report.lock().unwrap()
     }
 
     pub fn version(&self) -> i64 {
@@ -587,7 +710,7 @@ impl Hub {
         s.version += 1;
         self.save(s);
         if let Some(cb) = &self.on_change {
-            let snap = snapshot_of(s, self.event_slug().as_deref());
+            let snap = snapshot_of(s, self.event_slug().as_deref(), self.auto_report());
             // Python: try/except pass — an operator-UI error never stops the hub.
             let _ = catch_unwind(AssertUnwindSafe(|| cb(&snap)));
         }
@@ -956,8 +1079,10 @@ impl Hub {
         )
     }
 
-    /// A finished set. Stored and matched; never written to the bracket —
-    /// finalizing is the operator's call.
+    /// A finished set. Stored and matched; never written to the bracket from
+    /// here. Finalizing is either the operator's click (`do_report`) or, when
+    /// auto-report is on and the set is unambiguous, `sweep_auto_report` a
+    /// hold-off later — never this ingest path.
     pub fn handle_ingest(
         &self,
         slug: &str,
@@ -1006,7 +1131,7 @@ impl Hub {
         // holding the state lock can't deadlock against `touch` doing the same.
         let slug = self.event_slug();
         let s = self.state.lock().unwrap();
-        snapshot_of(&s, slug.as_deref())
+        snapshot_of(&s, slug.as_deref(), self.auto_report())
     }
 
     pub fn get_set(&self, slug: &str, station: i64, set_id: &Value) -> Option<Value> {
@@ -1306,6 +1431,110 @@ impl Hub {
                 "sweep: found {settled} set(s) already reported directly on start.gg"
             ));
         }
+    }
+
+    /// Report every set that is due to finalize itself, once.
+    ///
+    /// Runs off the same background thread as `sweep_reported_elsewhere` (see
+    /// `hub_glue`). Everything it reports goes through `do_report`, the exact
+    /// path the operator's own button uses -- so an auto-report and a clicked
+    /// report are the same write, with the same rebind, the same
+    /// already-reported check immediately beforehand, and the same per-game
+    /// character data. The only difference is who decided.
+    pub fn sweep_auto_report(&self, slug: &str) {
+        let policy = self.auto_report();
+        if !policy.enabled || !self.startgg.enabled() {
+            return;
+        }
+        let now = now_sec();
+        // Collect first, then write: `do_report` takes the state lock itself,
+        // and start.gg calls must never happen while holding it.
+        let due: Vec<(i64, Value, Value)> = {
+            let mut s = self.state.lock().unwrap();
+            set_bucket(&mut s, slug)
+                .values()
+                .filter(|r| auto_report_in(r, policy, now) == Some(0))
+                .filter_map(|r| {
+                    Some((
+                        r.get("station").and_then(|v| v.as_i64())?,
+                        r.get("id").cloned()?,
+                        r.get("candidateWinnerEntrantId").cloned()?,
+                    ))
+                })
+                .collect()
+        };
+
+        for (station, set_id, winner) in due {
+            let key = sid(station, &set_id);
+            match self.do_report(slug, station, &set_id, &winner) {
+                Ok(_) => {
+                    let mut s = self.state.lock().unwrap();
+                    if let Some(r) = set_bucket(&mut s, slug).get_mut(&key) {
+                        r["reportedBy"] = json!("auto");
+                    }
+                    self.touch(&mut s);
+                    drop(s);
+                    (self.log)(&format!(
+                        "auto-reported set {} on station {station}",
+                        py_str(&set_id)
+                    ));
+                }
+                Err((body, _)) => {
+                    // Leave the set for the operator rather than hammering
+                    // start.gg: after MAX_AUTO_REPORT_ATTEMPTS the record is
+                    // permanently manual, with the reason on it. A blip gets
+                    // retried; a real refusal (already reported elsewhere,
+                    // winner rejected) stops.
+                    let why = body["error"]
+                        .as_str()
+                        .unwrap_or("report failed")
+                        .to_string();
+                    let mut s = self.state.lock().unwrap();
+                    if let Some(r) = set_bucket(&mut s, slug).get_mut(&key) {
+                        let tries = r
+                            .get("autoReportAttempts")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0)
+                            + 1;
+                        r["autoReportAttempts"] = json!(tries);
+                        r["autoReportError"] = json!(why.clone());
+                    }
+                    self.touch(&mut s);
+                    drop(s);
+                    (self.log)(&format!(
+                        "auto-report of set {} on station {station} failed: {why}",
+                        py_str(&set_id)
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Stop this set from finalizing itself, leaving the operator's own Report
+    /// button as the only way it reaches the bracket. The escape hatch for
+    /// "the countdown is running and something looks wrong".
+    pub fn do_hold_auto_report(
+        &self,
+        slug: &str,
+        station: i64,
+        set_id: &Value,
+        hold: bool,
+    ) -> Result<Value, (Value, u16)> {
+        let key = sid(station, set_id);
+        let mut s = self.state.lock().unwrap();
+        let Some(rec) = set_bucket(&mut s, slug).get_mut(&key) else {
+            return Err((json!({"error": "Set not found."}), 404));
+        };
+        rec["autoReportHold"] = json!(hold);
+        let out = rec.clone();
+        self.touch(&mut s);
+        drop(s);
+        (self.log)(&format!(
+            "{} auto-report for set {} on station {station}",
+            if hold { "held" } else { "resumed" },
+            py_str(set_id)
+        ));
+        Ok(out)
     }
 
     /// Finalize a bracket set start.gg's own page would finalize -- for the
@@ -3748,6 +3977,193 @@ mod tests {
             err.1, 501,
             "no token configured -> 501, not a silent empty list"
         );
+    }
+
+    // ---- auto-report ------------------------------------------------------------
+    // Auto-reporting advances a bracket with nobody watching, so the bar it
+    // has to clear is the point of the feature. These pin that bar.
+
+    /// A record exactly as `record_for` leaves a finished, matched, unambiguous
+    /// set: the one shape that is allowed to report itself.
+    fn eligible_record() -> Value {
+        json!({
+            "id": "20260724_075508", "station": 1, "ingestedAt": 1_000_000,
+            "status": "matched", "reportable": true,
+            "matchedStartggSetId": 105639152i64,
+            "candidateWinnerEntrantId": 24186345i64,
+            "confidence": "high",
+            "set": {"complete": true},
+        })
+    }
+
+    fn on() -> AutoReport {
+        AutoReport {
+            enabled: true,
+            delay_s: 60.0,
+        }
+    }
+
+    #[test]
+    fn an_unambiguous_finished_set_reports_itself_after_the_hold_off() {
+        let rec = eligible_record();
+        assert_eq!(auto_report_blocker(&rec), None);
+        assert_eq!(
+            auto_report_in(&rec, on(), 1_000_000),
+            Some(60),
+            "the countdown starts at the full window"
+        );
+        assert_eq!(auto_report_in(&rec, on(), 1_000_030), Some(30));
+        assert_eq!(auto_report_in(&rec, on(), 1_000_060), Some(0), "due");
+        assert_eq!(
+            auto_report_in(&rec, on(), 1_000_600),
+            Some(0),
+            "still due, never negative"
+        );
+    }
+
+    #[test]
+    fn auto_report_off_means_nothing_ever_fires() {
+        let rec = eligible_record();
+        assert_eq!(auto_report_in(&rec, AutoReport::default(), 1_000_600), None);
+    }
+
+    #[test]
+    fn a_guessed_winner_never_advances_a_bracket() {
+        // "low" is match_winner's substring fallback — fine as a default for
+        // the operator to confirm, not something to write unwatched.
+        let mut rec = eligible_record();
+        rec["confidence"] = json!("low");
+        assert_eq!(auto_report_blocker(&rec), Some("winner is only a guess"));
+        assert_eq!(auto_report_in(&rec, on(), 1_000_600), None);
+    }
+
+    #[test]
+    fn a_set_that_never_closed_out_is_left_alone() {
+        // An idle timer can end a set the players didn't finish; that is not a
+        // result worth writing to a bracket.
+        let mut rec = eligible_record();
+        rec["set"]["complete"] = json!(false);
+        assert_eq!(
+            auto_report_blocker(&rec),
+            Some("set never closed out properly")
+        );
+    }
+
+    #[test]
+    fn only_finished_matched_bracket_sets_qualify() {
+        for (status, why) in [
+            ("live", "not a finished bracket set"),
+            ("recorded", "not a finished bracket set"),
+            ("online", "not a finished bracket set"),
+            ("reported", "already reported"),
+        ] {
+            let mut rec = eligible_record();
+            rec["status"] = json!(status);
+            assert_eq!(auto_report_blocker(&rec), Some(why), "status {status}");
+        }
+
+        let mut rec = eligible_record();
+        rec["reportable"] = json!(false);
+        assert_eq!(auto_report_blocker(&rec), Some("not reportable"));
+
+        let mut rec = eligible_record();
+        rec["matchedStartggSetId"] = Value::Null;
+        assert_eq!(auto_report_blocker(&rec), Some("no matched start.gg set"));
+
+        let mut rec = eligible_record();
+        rec["candidateWinnerEntrantId"] = Value::Null;
+        assert_eq!(auto_report_blocker(&rec), Some("no winner"));
+    }
+
+    #[test]
+    fn a_held_set_stays_the_operators() {
+        let mut rec = eligible_record();
+        rec["autoReportHold"] = json!(true);
+        assert_eq!(auto_report_blocker(&rec), Some("held by the operator"));
+    }
+
+    #[test]
+    fn a_set_that_keeps_failing_stops_retrying() {
+        let mut rec = eligible_record();
+        rec["autoReportAttempts"] = json!(MAX_AUTO_REPORT_ATTEMPTS - 1);
+        assert_eq!(auto_report_blocker(&rec), None, "still worth another go");
+        rec["autoReportAttempts"] = json!(MAX_AUTO_REPORT_ATTEMPTS);
+        assert_eq!(
+            auto_report_blocker(&rec),
+            Some("auto-report failed too many times")
+        );
+    }
+
+    /// The sweep end to end, against a fake start.gg: ingest a finished set,
+    /// watch it sit through its hold-off, then report itself.
+    #[test]
+    fn the_sweep_reports_a_due_set_and_leaves_the_rest() {
+        let fake = FakeStartgg::new();
+        fake.set_state(2); // TO pressed Start Match
+        let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        h.set_auto_report(AutoReport {
+            enabled: true,
+            delay_s: 60.0,
+        });
+        h.handle_ingest(SLUG, 1, &real_set()).unwrap();
+
+        // Nothing is due yet: the record was ingested just now.
+        h.sweep_auto_report(SLUG);
+        assert!(
+            fake.reports().is_empty(),
+            "the hold-off has to actually hold"
+        );
+
+        // Wind the record back past the window, as the clock would.
+        {
+            let mut s = h.state.lock().unwrap();
+            for r in set_bucket(&mut s, SLUG).values_mut() {
+                r["ingestedAt"] = json!(now_sec() - 120);
+            }
+        }
+        h.sweep_auto_report(SLUG);
+
+        let reports = fake.reports();
+        assert_eq!(reports.len(), 1, "reported exactly once");
+        assert_eq!(reports[0].1, json!("24186345"), "the matched winner");
+
+        // And it does not report again on the next tick.
+        h.sweep_auto_report(SLUG);
+        assert_eq!(fake.reports().len(), 1, "reported once, not every sweep");
+
+        let snap = h.event_view(SLUG);
+        let rec = &snap["sets"][0];
+        assert_eq!(rec["status"], json!("reported"));
+        assert_eq!(
+            rec["reportedBy"],
+            json!("auto"),
+            "the console can tell who decided"
+        );
+    }
+
+    #[test]
+    fn the_sweep_will_not_touch_a_set_the_operator_held() {
+        let fake = FakeStartgg::new();
+        fake.set_state(2);
+        let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        h.set_auto_report(AutoReport {
+            enabled: true,
+            delay_s: 0.0,
+        });
+        h.handle_ingest(SLUG, 1, &real_set()).unwrap();
+        h.do_hold_auto_report(SLUG, 1, &json!("20260724_075508"), true)
+            .unwrap();
+
+        h.sweep_auto_report(SLUG);
+        assert!(fake.reports().is_empty(), "held means held");
+
+        // Releasing it lets the next sweep through.
+        h.do_hold_auto_report(SLUG, 1, &json!("20260724_075508"), false)
+            .unwrap();
+        h.sweep_auto_report(SLUG);
+        assert_eq!(fake.reports().len(), 1);
     }
 
     // ---- Bracket screen: do_report_set ------------------------------------------

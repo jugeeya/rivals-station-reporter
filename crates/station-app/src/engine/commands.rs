@@ -75,6 +75,16 @@ pub fn report_bracket_set(
     hub_glue::do_report_bracket_set(engine, set_id, winner_entrant_id)
 }
 
+/// Hold (or release) one set's auto-report — the console's Hold button.
+pub fn hold_auto_report(
+    engine: &Arc<EngineInner>,
+    station: i64,
+    set_id: &str,
+    hold: bool,
+) -> Result<Value, String> {
+    hub_glue::do_hold_auto_report(engine, station, set_id, hold)
+}
+
 pub fn swap_players(
     engine: &Arc<EngineInner>,
     station: i64,

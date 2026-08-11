@@ -101,7 +101,7 @@ mkdir -p "$WORK/operator"
 cat > "$WORK/operator/config.json" <<EOF
 {"mode":"operator","station":1,"broker":"","slug":"$SLUG","key":"k","startgg_token":"",
  "save":"","replays":"","dir":"","idle":420,"poll":2,"hub_port":28788,"dry_run":false,
- "configured":true}
+ "auto_report":true,"auto_report_delay":60,"configured":true}
 EOF
 python3 scripts/screenshots/seed-hub-state.py "$WORK/operator" "$SLUG" "$NOW"
 # An empty-but-present seed freezes background refreshes without touching the

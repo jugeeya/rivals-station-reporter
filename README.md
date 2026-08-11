@@ -75,7 +75,9 @@ separately from finished-and-unreported ones, elapsed time and best-of taken
 from start.gg's own data when present (station 1 reads 18m and "first to 4"
 from the bracket, not the station's local guess), a per-game character strip
 with each game's winner ringed, and the tag-to-entrant mapping the hub would
-actually report, per player.
+actually report, per player. Station 3's set is counting down to reporting
+itself — auto-report is on and that set is unambiguous — with `hold` beside
+it to stop that and keep it manual.
 
 ![Current Sets panel](docs/screenshots/available-sets.png)
 
@@ -153,6 +155,37 @@ leave the window open — or minimized — while sets are being played.
 An existing `config.json` from the Python reporter uses the same keys and can
 be pasted into Settings field-by-field (the file lives at the app config dir
 once saved).
+
+## Auto-report
+
+Off by default; turn it on in Settings (operator only). With it on, a set
+that finishes finalizes itself on start.gg after a hold-off — 60 seconds by
+default — instead of waiting for a Report click.
+
+It is deliberately hard to qualify for, because advancing a bracket is the
+one thing this app does that nobody can take back from here. A set reports
+itself only when **all** of the following hold:
+
+- it finished cleanly (the station's own journal says `complete`, so a set an
+  idle timer closed out doesn't count),
+- it is bound to a start.gg set, and that set is startable or in progress,
+- it is a local bracket game, not an online or ranked match, and
+- the winner's tag matched a bracket entrant **exactly**. A partial match is
+  good enough to pre-select for you; it is nowhere near good enough to
+  advance a bracket unwatched.
+
+Anything that doesn't clear that bar behaves exactly as before and waits for
+you. Dry-run disables auto-report entirely.
+
+While a set is counting down the console row says so and offers `hold`, which
+takes that one set off auto-report and leaves the manual Report button. The
+countdown restarts whenever the record changes, so switching players
+mid-countdown gives you the full window again on the corrected mapping.
+Auto-reported sets are labelled as such afterwards, and the write itself goes
+through exactly the same path as the button — same rebind, same
+already-reported-elsewhere check immediately before the write, same per-game
+character data. If start.gg refuses, the set is retried a couple of times and
+then handed back to you with the reason on the row.
 
 ## Bracket
 

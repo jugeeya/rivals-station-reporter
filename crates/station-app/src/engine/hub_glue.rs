@@ -16,7 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use station_core::hub::{Hub, HubServer};
+use station_core::hub::{AutoReport, Hub, HubServer};
 use station_core::matching;
 
 use crate::engine::config::Config;
@@ -33,6 +33,12 @@ use crate::engine::core::EngineInner;
 /// not sit looking at a stale "awaiting report" row for long after a TO
 /// finalizes it directly on start.gg, without adding meaningful load.
 const SWEEP_INTERVAL_S: u64 = 90;
+
+/// How often the auto-report sweep looks for a set whose hold-off has run
+/// out. Must divide `SWEEP_INTERVAL_S`, since both share one thread. Cheap
+/// when nothing is due — a lock and a filter over the event's records — so
+/// this is about the countdown being honest, not about load.
+const AUTO_REPORT_TICK_S: u64 = 5;
 
 pub struct HubPieces {
     pub url: String,
@@ -93,6 +99,13 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
     // — reports which event this hub is running, instead of a station
     // auto-connecting to an anonymous address.
     hub.set_event_slug(&cfg.slug);
+    // A dry run must never advance a bracket on its own — that is the whole
+    // point of the mode, and auto-report is the one path that would otherwise
+    // write without anyone touching anything.
+    hub.set_auto_report(AutoReport {
+        enabled: cfg.auto_report && !cfg.dry_run,
+        delay_s: cfg.auto_report_delay,
+    });
 
     let mut server = HubServer::new(hub.clone(), cfg.hub_port, "0.0.0.0");
     // Bind before spawning the sweep: if the port is taken, `?` returns here,
@@ -100,7 +113,7 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
     // leaked thread polling start.gg every 90s against an orphaned hub, plus
     // one more per failed rebuild.
     let url = server.start()?;
-    let sweep_stop = spawn_reported_elsewhere_sweep(&hub);
+    let sweep_stop = spawn_hub_sweeps(&hub);
     inner.set_hub_snapshot(hub.snapshot());
     inner.set_hub(Some(hub));
     Ok(HubPieces {
@@ -111,40 +124,51 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
     })
 }
 
-/// Background safety net for a set someone finalized directly on start.gg's
-/// own page: without this, a set sitting in "awaiting report" stays looking
-/// actionable indefinitely, since `do_report`'s own check only runs at the
-/// moment someone clicks Report. Modeled on `station_core::tagdb::TagDb`'s
-/// `spawn_refresh` (`Arc<Self>`, `thread::spawn` loop, `thread::sleep`):
-/// always spawns, but each tick only does real work when there is something
-/// to check, exactly like `TagDb`'s own refresher only fetches when a refresh
-/// is actually due. `Hub` itself stays a plain struct with a callable
-/// `sweep_reported_elsewhere` method; this Tauri-side glue owns the thread's
-/// lifetime, not `Hub::new` -- the same split as `TagDb::load` (no thread)
-/// versus `engine.rs` calling `spawn_refresh` separately.
-fn spawn_reported_elsewhere_sweep(hub: &Arc<Hub>) -> Arc<AtomicBool> {
+/// The hub's two background sweeps, on one thread.
+///
+/// * **auto-report** (every [`AUTO_REPORT_TICK_S`]) finalizes sets whose
+///   hold-off has elapsed. It has to tick far faster than the other sweep:
+///   the operator is told a set reports "in 60s", and a 90-second poll would
+///   make that mean anything up to 150.
+/// * **reported-elsewhere** (every [`SWEEP_INTERVAL_S`]) is the safety net for
+///   a set someone finalized directly on start.gg's own page. Without it a set
+///   sits in "awaiting report" looking actionable forever, since `do_report`'s
+///   own check only runs at the moment someone clicks Report.
+///
+/// Modeled on `station_core::tagdb::TagDb`'s `spawn_refresh` (`Arc<Self>`,
+/// `thread::spawn` loop, `thread::sleep`): always spawns, but each tick only
+/// does real work when there is something to do. `Hub` itself stays a plain
+/// struct with callable sweep methods; this glue owns the thread's lifetime,
+/// not `Hub::new` — the same split as `TagDb::load` (no thread) versus
+/// `engine.rs` calling `spawn_refresh` separately.
+fn spawn_hub_sweeps(hub: &Arc<Hub>) -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let hub = hub.clone();
     thread::spawn(move || {
+        let mut elapsed = 0u64;
         while !stop_thread.load(Ordering::SeqCst) {
-            // Nothing to check without both a token (start.gg calls need one)
-            // and a configured event slug (there's no bucket to sweep without
-            // one) -- mirrors TagDb's own "only do real work when due" gate.
+            // Nothing to do without both a token (start.gg calls need one) and
+            // a configured event slug (there's no bucket to sweep without one)
+            // — mirrors TagDb's own "only do real work when due" gate.
             if hub.startgg.enabled() {
                 if let Some(slug) = hub.event_slug() {
-                    hub.sweep_reported_elsewhere(&slug);
+                    hub.sweep_auto_report(&slug);
+                    if elapsed % SWEEP_INTERVAL_S == 0 {
+                        hub.sweep_reported_elsewhere(&slug);
+                    }
                 }
             }
             // Sleep in 1s increments rather than one long sleep so a rebuild
             // stops this thread promptly instead of leaving it (and the
-            // `Arc<Hub>` it holds) alive for up to SWEEP_INTERVAL_S more.
-            for _ in 0..SWEEP_INTERVAL_S {
+            // `Arc<Hub>` it holds) alive for the rest of a tick.
+            for _ in 0..AUTO_REPORT_TICK_S {
                 if stop_thread.load(Ordering::SeqCst) {
                     break;
                 }
                 thread::sleep(Duration::from_secs(1));
             }
+            elapsed += AUTO_REPORT_TICK_S;
         }
     });
     stop
@@ -192,6 +216,19 @@ pub fn do_report_bracket_set(
 ) -> Result<Value, String> {
     let (hub, slug) = hub_and_slug(inner)?;
     hub.do_report_set(&slug, &json!(set_id), winner)
+        .map_err(err_text)
+}
+
+/// Stop (or resume) one set finalizing itself. The operator's escape hatch
+/// while a countdown is running; see `Hub::do_hold_auto_report`.
+pub fn do_hold_auto_report(
+    inner: &Arc<EngineInner>,
+    station: i64,
+    set_id: &str,
+    hold: bool,
+) -> Result<Value, String> {
+    let (hub, slug) = hub_and_slug(inner)?;
+    hub.do_hold_auto_report(&slug, station, &json!(set_id), hold)
         .map_err(err_text)
 }
 

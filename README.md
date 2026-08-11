@@ -21,8 +21,10 @@ widget. The full design is in `rivals-station-reporter-architecture.md`
 - **Operator** — the TO machine. Runs the LAN hub every station posts to and
   is the only PC that talks to start.gg (the API token never leaves it).
   Gets the all-stations console: live scores stream to the bracket
-  automatically, but **naming a winner is always an explicit click** —
-  nothing ever advances the bracket on its own.
+  automatically, and a set that finishes **unambiguously** reports itself (see
+  Auto-report — on by default, and strict about what qualifies). Anything it
+  can't be sure of still waits for your click, and anything it got wrong is
+  fixable after the fact with `edit result`.
 - **Both** — one PC doing both jobs.
 
 There's also a built-in **Tag Installer** (header → Tag Installer): before
@@ -87,15 +89,53 @@ sets are grouped separately, each with its own station AND stream picker (a
 set can sit at a station and on a stream at once); for a startable set,
 picking and clicking Start Match happens as a single action.
 
-![Bracket](docs/screenshots/bracket.png)
+### The Bracket screen, in three states
 
-The Bracket screen: the whole tree, so nobody has to keep start.gg's page
-open on a second monitor. Each set sits level with the sets that feed it,
-with the lines drawn in, so it reads as a bracket rather than a grid of
-rounds. Finished sets recede, the live one is highlighted,
-called-but-not-started is flagged, and empty seats show what's still waiting
-on an earlier round. Clicking any set opens the bar underneath — assign a
-station, call the match, or report a winner without leaving the app.
+<details open>
+<summary><b>Mid-event</b> — what a TO looks at between calls</summary>
+
+![Bracket, mid-event](docs/screenshots/bracket.png)
+
+Each set sits level with the sets that feed it, with the lines drawn in, so
+it reads as a bracket rather than a grid of rounds. Every card state is
+visible at once:
+
+| | |
+|---|---|
+| **indigo, `● live`** | being played right now |
+| **amber, `ready`** | both seats filled, nobody has called it — the set to hand to the next free setup |
+| `called` | assigned to a setup, not started yet |
+| dimmed | finished; the winner's tag is green and their score bold |
+| `—` seats | still waiting on an earlier round |
+
+The station (`St 2`) shows only on sets that haven't finished — on a played
+set it's history, on an upcoming one it's where to walk. Selecting a set
+opens the bar underneath: assign a station, start the match, or report a
+winner.
+</details>
+
+<details>
+<summary><b>Not started on start.gg</b> — every set a placeholder</summary>
+
+![Bracket, not yet started](docs/screenshots/bracket-unstarted.png)
+
+Before anyone calls the first match, start.gg holds the sets as placeholders.
+The banner says so, and the first-round sets show as `ready`. Starting any one
+of them materialises the whole phase — the same thing start.gg's own page does
+— and the app rebinds to the real set ids it gets back. Reporting is the one
+thing that needs the bracket live first, so the bar offers **Start match** and
+says why the winner buttons aren't there.
+</details>
+
+<details>
+<summary><b>Finished</b> — the whole event as a record</summary>
+
+![Bracket, finished](docs/screenshots/bracket-done.png)
+
+Every set played out. Nothing is actionable, so nothing is highlighted and no
+stations are shown; the tree is just the result, winners in green with their
+characters and scores.
+</details>
 
 ![Station, idle between sets](docs/screenshots/station-idle.png)
 

@@ -479,6 +479,31 @@ pub fn bracket_set_done(_theme: &Theme, status: button::Status) -> button::Style
     )
 }
 
+/// Both seats filled, nobody has called it: the set a TO should be handing
+/// to a free setup next. Warm rather than accent-coloured so it reads as
+/// "needs you" against the live set's indigo, and so the two are still
+/// distinguishable at a glance across a whole tree.
+pub fn bracket_set_ready(_theme: &Theme, status: button::Status) -> button::Style {
+    set_card(
+        Some(vertical_gradient(
+            Color {
+                a: 0.13,
+                ..TEXT_WARNING
+            },
+            Color {
+                a: 0.04,
+                ..TEXT_WARNING
+            },
+        )),
+        Color {
+            a: 0.40,
+            ..TEXT_WARNING
+        },
+        1.0,
+        status,
+    )
+}
+
 /// The selected node, whatever its state — a heavier accent ring, so it stays
 /// findable after the action bar below has pushed the tree around.
 pub fn bracket_set_selected(_theme: &Theme, status: button::Status) -> button::Style {

@@ -123,8 +123,14 @@ cat > "$WORK/bracket/config.json" <<EOF
  "startgg_token":"seeded-for-the-screenshot","save":"","replays":"","dir":"",
  "idle":420,"poll":2,"hub_port":28789,"dry_run":false,"configured":true}
 EOF
-python3 scripts/screenshots/seed-bracket.py "$WORK/bracket" "$NOW"
+# Three shapes: mid-event, a bracket nobody has started on start.gg yet, and
+# one played out. The README shows them as a click-through gallery.
+for variant in live unstarted done; do
+  python3 scripts/screenshots/seed-bracket.py "$WORK/bracket" "$NOW" "$variant"
+done
 shot "$WORK/bracket" "$WORK/bracket/bracket-seed.json" bracket bracket.png
+shot "$WORK/bracket" "$WORK/bracket/bracket-unstarted-seed.json" bracket bracket-unstarted.png
+shot "$WORK/bracket" "$WORK/bracket/bracket-done-seed.json" bracket bracket-done.png
 
 # ---- settings drawer ------------------------------------------------------------
 shot "$WORK/st-idle" "$WORK/idle-seed.json" settings settings.png

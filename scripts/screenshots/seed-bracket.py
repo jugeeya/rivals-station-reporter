@@ -22,6 +22,8 @@ import json
 import sys
 
 profile, now = sys.argv[1], int(sys.argv[2])
+# live (default) | unstarted | done — the three shapes the README shows.
+variant = sys.argv[3] if len(sys.argv) > 3 else "live"
 
 COMPLETED, CREATED, ONGOING, CALLED = 3, 1, 2, 6
 
@@ -110,7 +112,9 @@ add("l-c", "M", -2, "Losers Round 2", "E8", "E5", winner="E5", score=(1, 3),
     state=COMPLETED, station=2, started=now - 44 * m, ended=now - 26 * m)
 
 # Seeded and callable: nobody has assigned these yet.
-add("l-d", "N", -3, "Losers Round 3", "E6", "E7", feeds=(None, "l-b"))
+# Both seats filled, nobody has called them: these render as "ready", the
+# state a TO is scanning for. One already sits at a free setup.
+add("l-d", "N", -3, "Losers Round 3", "E6", "E7", feeds=(None, "l-b"), station=3)
 add("l-e", "O", -3, "Losers Round 3", "E5", "E9", feeds=("l-c", None))
 
 add("l-f", "P", -4, "Losers Quarter-Final", None, None, feeds=("l-d", "l-e"))
@@ -135,5 +139,50 @@ seed = {
         "sets": sets,
     },
 }
-json.dump(seed, open(profile + "/bracket-seed.json", "w"))
-print("seeded bracket fixture in", profile)
+if variant == "unstarted":
+    # Nothing has been started on start.gg: every set is a placeholder, no
+    # scores, no stations. This is what a TO sees before the first call.
+    for st in sets:
+        st["preview"] = True
+        st["state"] = CREATED
+        st["station"] = None
+        st["stream"] = None
+        st["winner_id"] = None
+        st["started_at"] = None
+        st["completed_at"] = None
+        for sl in st["slots"]:
+            sl["score"] = None
+            sl["character"] = None
+    # Only the sets seeded from entry have players before a bracket runs.
+    seeded_from_entry = {"w-a", "w-b", "w-c", "w-d", "w-e", "w-f", "l-a"}
+    for st in sets:
+        if st["id"] not in seeded_from_entry:
+            for sl in st["slots"]:
+                sl["entrant_id"] = None
+                sl["name"] = None
+    seed["bracket"]["selected"] = "w-a"
+
+elif variant == "done":
+    # Everything played out. Nothing is actionable; the tree is a record.
+    finals = {"w-i": ("E3", "E1", (3, 1)), "w-j": ("E3", "E5", (3, 2)),
+              "l-f": ("E5", "E6", (3, 0)), "l-g": ("E5", "E9", (3, 1)),
+              "l-h": ("E5", "E1", (3, 2))}
+    for st in sets:
+        st["state"] = COMPLETED
+        st["station"] = st["station"] or 1
+        if st["id"] in finals:
+            w, l, (a, b) = finals[st["id"]]
+            st["winner_id"] = w
+            st["slots"] = [
+                {"entrant_id": w, "name": NAMES[w], "score": a,
+                 "character": CHARS[w], "prereq_set_id": st["slots"][0]["prereq_set_id"]},
+                {"entrant_id": l, "name": NAMES[l], "score": b,
+                 "character": CHARS[l], "prereq_set_id": st["slots"][1]["prereq_set_id"]},
+            ]
+        elif st["winner_id"] is None:
+            st["winner_id"] = st["slots"][0]["entrant_id"]
+    seed["bracket"]["selected"] = None
+
+name = "bracket-seed.json" if variant == "live" else f"bracket-{variant}-seed.json"
+json.dump(seed, open(profile + "/" + name, "w"))
+print("seeded", variant, "bracket fixture in", profile)

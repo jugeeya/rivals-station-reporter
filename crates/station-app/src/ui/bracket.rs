@@ -633,10 +633,14 @@ fn set_card(set: &BracketSet, is_selected: bool) -> Element<'_, Msg> {
         .into()
     };
 
-    // Top line: only whether this set needs attention. No station and no set
-    // label — across a full bracket both are noise, and both read as an id
-    // that means something it doesn't. The detail bar carries them for the
-    // one set actually selected.
+    // Top line: where this set is and whether it needs attention. No set
+    // label — across a full bracket it is noise, and it reads as an id that
+    // means something it doesn't.
+    //
+    // The station shows only on sets that HAVEN'T finished: on a played set
+    // it is history nobody is looking for, but on a live or upcoming one it
+    // is the thing a TO walks to.
+    let ready = set.is_startable();
     let mut top = row![Space::new().width(Length::Fill)]
         .spacing(6)
         .align_y(Alignment::Center);
@@ -644,6 +648,18 @@ fn set_card(set: &BracketSet, is_selected: bool) -> Element<'_, Msg> {
         top = top.push(text("● live").size(10).color(theme::ACCENT_HOVER));
     } else if set.is_called() {
         top = top.push(text("called").size(10).color(theme::TEXT_WARNING));
+    } else if ready {
+        top = top.push(
+            text("ready")
+                .size(10)
+                .font(theme::FONT_BODY_SEMIBOLD)
+                .color(theme::TEXT_WARNING),
+        );
+    }
+    if !set.is_complete() {
+        if let Some(n) = set.station {
+            top = top.push(text(format!("St {n}")).size(10).color(theme::TEXT_MUTED));
+        }
     }
     if let Some(s) = &set.stream {
         top = top.push(text(s.clone()).size(10).color(theme::TEXT_MUTED));
@@ -655,6 +671,8 @@ fn set_card(set: &BracketSet, is_selected: bool) -> Element<'_, Msg> {
         theme::bracket_set_live
     } else if set.is_complete() {
         theme::bracket_set_done
+    } else if ready {
+        theme::bracket_set_ready
     } else {
         theme::bracket_set
     };
@@ -694,6 +712,9 @@ pub struct Seed {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct SeedSet {
     pub id: String,
+    /// Placeholder set from a bracket start.gg hasn't started yet.
+    #[serde(default)]
+    pub preview: bool,
     #[serde(default)]
     pub state: i64,
     #[serde(default)]
@@ -753,7 +774,7 @@ pub fn apply_seed(app: &mut App, seed: Seed) {
         .into_iter()
         .map(|s| BracketSet {
             id: s.id,
-            preview: false,
+            preview: s.preview,
             state: s.state,
             round: s.round,
             identifier: s.identifier,

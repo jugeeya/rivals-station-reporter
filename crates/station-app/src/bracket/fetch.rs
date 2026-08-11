@@ -156,6 +156,13 @@ impl BracketSet {
         self.slots.iter().all(|s| s.entrant_id.is_some())
     }
 
+    /// Both seats filled and nobody has called it yet — the set a TO should
+    /// be putting on the next free setup. A preview set counts: starting one
+    /// is what brings the bracket to life.
+    pub fn is_startable(&self) -> bool {
+        self.is_ready() && !self.is_complete() && !self.is_ongoing() && !self.is_called()
+    }
+
     pub fn winner_slot(&self) -> Option<usize> {
         let w = self.winner_id.as_deref()?;
         self.slots

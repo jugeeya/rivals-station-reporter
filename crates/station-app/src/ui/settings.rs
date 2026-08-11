@@ -524,9 +524,7 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
         if s.auto_report {
             col = col.push(
                 text(
-                    "Reported as soon as the set ends — but only sets that finished cleanly and \
-                     whose winner matched a bracket entrant exactly. Anything else still waits \
-                     for you. Got one wrong? Fix it with \"edit result\" on the row.",
+                    "Reported as soon as the set ends — but only sets that finished cleanly and whose winner matched a bracket entrant exactly. Anything else still waits for you. Got one wrong? Fix it with \"edit result\" on the row.",
                 )
                 .size(11)
                 .color(theme::TEXT_MUTED),

@@ -977,10 +977,6 @@ impl Hub {
                     lbl
                 }
             ));
-        } else if truthy(Some(&sg)) && !matching::set_started(Some(&sg)) {
-            // Called to this station but the TO hasn't pressed Start Match, so
-            // anything played here is still a warmup.
-            reason = Some("match not started on start.gg".to_string());
         } else if !truthy(Some(&sg)) {
             reason = Some("no start.gg set at this station".to_string());
         }
@@ -1010,6 +1006,14 @@ impl Hub {
             "startggTotalGames": sg.get("totalGames").cloned().unwrap_or(Value::Null),
             "reportable": reason.is_none(),
             "notReportableReason": reason.clone(),
+            // The set is assigned to this station but nobody pressed Start
+            // Match on start.gg. That used to make the record unreportable
+            // outright, on the reasoning that anything played before the
+            // call is a warmup -- which dead-ended every set at any event
+            // where the TO assigns setups but never presses Start Match, and
+            // (with auto-report) silently reported nothing all night. The
+            // report path now presses it instead; see `do_report`.
+            "needsStartMatch": truthy(Some(&sg)) && !matching::set_started(Some(&sg)),
             // Which in-game slot the hub believes is which bracket entrant.
             // The console cannot work this out for itself: its only other
             // handle is candidateWinnerEntrantId, which needs a set winner,
@@ -1102,6 +1106,13 @@ impl Hub {
                 _ => "not reportable".to_string(),
             };
             reason = Some(format!("{why}; logged, not reported"));
+        } else if truthy(rec.get("needsStartMatch")) {
+            // Reporting such a set is allowed (`do_report` presses Start
+            // Match first), but pushing a live score into a set the TO has
+            // not called is a continuous write to someone else's bracket
+            // row -- whatever is being played here is still a warmup until
+            // it is called, and only its FINAL result is worth claiming.
+            reason = Some("match not started on start.gg; logged, not pushed".to_string());
         } else if !self.startgg.enabled() {
             reason = Some("no start.gg token".to_string());
         } else if !truthy(rec.get("matchedStartggSetId")) {
@@ -1380,6 +1391,25 @@ impl Hub {
                 json!({"error": "This set was already reported directly on start.gg."}),
                 409,
             ));
+        }
+        // start.gg will not accept a result for a set it does not consider
+        // underway, so press Start Match first when nobody has. A TO who
+        // assigns setups but never presses it is normal -- refusing the
+        // report instead just meant the set never reached the bracket.
+        //
+        // Best-effort: if this fails, the report below fails too and says so
+        // with start.gg's own words, which beats a second error about a
+        // button the operator never pressed.
+        if truthy(rec.get("needsStartMatch"))
+            && !crate::startgg::is_preview_set_id(&rec["matchedStartggSetId"])
+        {
+            match self.startgg.start_match(&rec["matchedStartggSetId"]) {
+                Ok(()) => (self.log)(&format!(
+                    "started match for set {} on start.gg (nobody had)",
+                    py_str(&rec["matchedStartggSetId"])
+                )),
+                Err(e) => (self.log)(&format!("could not start match before reporting: {e}")),
+            }
         }
         // Python: winner_entrant_id = str(winner_entrant_id or '')
         let wid = if truthy(Some(winner_entrant_id)) {
@@ -3461,7 +3491,7 @@ mod tests {
 
     // ---- safeguard: nothing happens until the TO presses Start Match -----------
     #[test]
-    fn nothing_reported_until_to_presses_start_match() {
+    fn a_called_but_unstarted_match_is_started_on_the_way_to_reporting() {
         let workdir = tmpdir("hubtest_h4");
         let called = FakeStartgg::new();
         called.set_state(6); // called to the station, but NOT started
@@ -3511,42 +3541,22 @@ mod tests {
         )
         .unwrap();
         let nrec = h4.get_set(SLUG, 1, &json!("NS")).unwrap();
-        assert_eq!(
-            nrec["reportable"],
-            json!(false),
-            "not-started set is not reportable"
-        );
-        assert!(
-            nrec["matchedStartggSetId"].is_null(),
-            "not-started set isn't bound to the bracket set"
-        );
-        assert_eq!(
-            nrec["status"],
-            json!("waiting for start"),
-            "status 'waiting for start'  [{}]",
-            nrec["status"]
-        );
-        let rep_ns = h4.do_report(SLUG, 1, &json!("NS"), &json!(24186345));
-        assert_eq!(
-            rep_ns.unwrap_err().1,
-            409,
-            "reporting a not-started match is refused"
-        );
-        assert_eq!(
-            called.reports().len(),
-            0,
-            "nothing was reported to start.gg"
-        );
+        // The set IS bound and reportable — reporting it presses Start Match
+        // on the way, since a TO who assigns setups but never presses it is
+        // normal and used to leave the set stranded. Only the live PUSH
+        // waits for the call (asserted above).
+        assert_eq!(nrec["needsStartMatch"], json!(true));
+        assert!(get_default_true(&nrec, "reportable"));
+        assert!(!nrec["matchedStartggSetId"].is_null());
 
-        // ...and once the TO does start it, Report re-checks and goes through
-        called.set_state(2);
         let rep_ok = h4
             .do_report(SLUG, 1, &json!("NS"), &json!(24186345))
-            .expect("after Start Match, the same set reports fine");
+            .expect("a set nobody called still reports");
+        assert_eq!(rep_ok["ok"], json!(true));
         assert_eq!(
-            rep_ok["ok"],
-            json!(true),
-            "after Start Match, the same set reports fine  [{rep_ok}]"
+            called.start_calls().len(),
+            1,
+            "Start Match was pressed for the operator"
         );
         assert_eq!(
             called.reports().len(),
@@ -4358,19 +4368,65 @@ mod tests {
     #[test]
     fn the_sweep_leaves_a_set_it_cannot_be_sure_about() {
         // The blocker is the only gate now that there is no hold-off, so a
-        // set it rejects must survive a sweep untouched.
+        // set it rejects must survive a sweep untouched. An online game is
+        // never a bracket result, whatever else is true of it.
         let fake = FakeStartgg::new();
-        fake.set_state(6); // called, but Start Match never pressed
+        fake.set_state(2);
+        let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        h.set_auto_report(on());
+        h.handle_ingest(SLUG, 1, &with(real_set(), &[("mode", json!("ONLINE"))]))
+            .unwrap();
+
+        h.sweep_auto_report(SLUG);
+        assert!(
+            fake.reports().is_empty(),
+            "ladder games stay off the bracket"
+        );
+    }
+
+    #[test]
+    fn a_set_nobody_called_is_started_then_reported() {
+        // The TO assigned setups but never pressed Start Match. That used to
+        // dead-end the set — and with auto-report, silently report nothing
+        // all night. Now the report presses it first.
+        let fake = FakeStartgg::new();
+        fake.set_state(6); // called, not started
         let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
         h.set_auto_report(on());
         h.handle_ingest(SLUG, 1, &real_set()).unwrap();
 
-        h.sweep_auto_report(SLUG);
+        let rec = h.get_set(SLUG, 1, &json!("20260724_075508")).unwrap();
+        assert_eq!(rec["needsStartMatch"], json!(true));
         assert!(
-            fake.reports().is_empty(),
-            "a set played before Start Match is not a bracket result"
+            get_default_true(&rec, "reportable"),
+            "reportable now, rather than refused"
         );
+
+        h.sweep_auto_report(SLUG);
+        assert_eq!(
+            fake.start_calls().len(),
+            1,
+            "Start Match pressed on the way"
+        );
+        assert_eq!(fake.reports().len(), 1, "and then reported");
+    }
+
+    #[test]
+    fn a_set_nobody_called_still_gets_no_live_score_pushed_into_it() {
+        // Reporting a finished set is claiming a result; streaming a running
+        // score into a set the TO has not called is writing to a bracket row
+        // that may not even be the set being played.
+        let fake = FakeStartgg::new();
+        fake.set_state(6);
+        let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        let out = h
+            .handle_live(SLUG, 1, &with(real_set(), &[("complete", json!(false))]))
+            .unwrap();
+        assert_eq!(out["live"], json!(false));
+        assert!(fake.pushes().is_empty(), "nothing pushed before the call");
     }
 
     // ---- correcting a result ------------------------------------------------------

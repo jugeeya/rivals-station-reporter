@@ -371,7 +371,38 @@ fn screen<'a>(st: &'a State, ctx: &Ctx) -> Element<'a, Msg> {
         (None, _) => notice("Nothing loaded yet.", false),
     };
 
-    let mut content = column![header, body].spacing(14);
+    // A phase that has not been started on start.gg reports its sets with
+    // placeholder ids: the tree is real enough to look at, but nothing in it
+    // can be assigned, started or reported, and auto-report will quietly do
+    // nothing all night. Say that once, up here, rather than only when
+    // someone clicks an action and gets refused per set. start.gg has no API
+    // to start a phase, so the fix genuinely is "go and press it there".
+    let unstarted = st
+        .bracket
+        .as_ref()
+        .zip(st.group.as_ref())
+        .map(|(b, g)| {
+            let mine: Vec<_> = b.sets.iter().filter(|x| x.phase_group_id == g.id).collect();
+            !mine.is_empty() && mine.iter().all(|x| x.preview)
+        })
+        .unwrap_or(false);
+
+    let mut content = column![header].spacing(14);
+    if unstarted {
+        content = content.push(
+            container(
+                text(
+                    "This bracket hasn't been started on start.gg yet, so none of these sets exist there — they can't be assigned, started or reported, and nothing will report itself. Start the bracket on start.gg first.",
+                )
+                .size(12)
+                .color(theme::TEXT_WARNING),
+            )
+            .style(theme::panel_warning)
+            .padding(10)
+            .width(Length::Fill),
+        );
+    }
+    content = content.push(body);
     if let Some(bar) = action_bar(st, ctx) {
         content = content.push(bar);
     }

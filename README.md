@@ -171,11 +171,20 @@ reports itself only when **all** of the following hold:
 
 - it finished cleanly (the station's own journal says `complete`, so a set an
   idle timer closed out doesn't count),
-- it is bound to a start.gg set, and that set is startable or in progress,
+- it is bound to a start.gg set (if nobody pressed Start Match on it, the
+  report presses it for you — a TO who assigns setups but never calls them is
+  normal, and refusing the report just stranded the set),
 - it is a local bracket game, not an online or ranked match, and
 - the winner's tag matched a bracket entrant **exactly**. A partial match is
   good enough to pre-select for you; it is nowhere near good enough to
   advance a bracket unwatched.
+
+One thing it can't work around: a bracket that hasn't been **started** on
+start.gg at all. Its sets don't exist there yet — start.gg reports them with
+placeholder ids and there is no API to start a phase — so nothing can be
+assigned, started or reported, and auto-report would silently do nothing all
+night. The Bracket screen says so in a banner rather than leaving you to
+discover it one refused click at a time.
 
 Anything short of that behaves exactly as before and waits for a click.
 Dry-run disables auto-report entirely. Auto-reported sets are labelled as

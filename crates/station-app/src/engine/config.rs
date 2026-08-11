@@ -44,9 +44,9 @@ pub struct Config {
     /// Finalize a finished set on start.gg without waiting for the operator's
     /// Report click. Only ever fires on an unambiguous set — see
     /// `station_core::hub::auto_report_blocker` for the full bar it has to
-    /// clear. Off by default: advancing a bracket is the one thing this app
-    /// does that nobody can take back from here, so an install has to ask for
-    /// it rather than inherit it on upgrade.
+    /// clear; anything short of that still waits for a click. On by default,
+    /// with a hold-off during which the console shows the countdown and
+    /// offers Hold, so nothing reaches the bracket unannounced.
     pub auto_report: bool,
     /// Seconds a finished set waits before auto-reporting, so the operator can
     /// see it coming and Swap or Hold it.
@@ -67,7 +67,7 @@ impl Default for Config {
             save: String::new(),
             replays: String::new(),
             dir: String::new(),
-            auto_report: false,
+            auto_report: true,
             auto_report_delay: station_core::hub::DEFAULT_AUTO_REPORT_DELAY_S,
             idle: 420.0,
             poll: 2.0,

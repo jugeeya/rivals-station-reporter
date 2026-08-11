@@ -219,6 +219,19 @@ pub fn do_report_bracket_set(
         .map_err(err_text)
 }
 
+/// Replace a set's result with what the operator says happened — see
+/// `Hub::do_override_result`.
+pub fn do_override_result(
+    inner: &Arc<EngineInner>,
+    station: i64,
+    set_id: &str,
+    games: &Value,
+) -> Result<Value, String> {
+    let (hub, slug) = hub_and_slug(inner)?;
+    hub.do_override_result(&slug, station, &json!(set_id), games)
+        .map_err(err_text)
+}
+
 /// Stop (or resume) one set finalizing itself. The operator's escape hatch
 /// while a countdown is running; see `Hub::do_hold_auto_report`.
 pub fn do_hold_auto_report(

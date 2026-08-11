@@ -77,7 +77,7 @@ from the bracket, not the station's local guess), a per-game character strip
 with each game's winner ringed, and the tag-to-entrant mapping the hub would
 actually report, per player. Station 3's set is counting down to reporting
 itself — auto-report is on and that set is unambiguous — with `hold` beside
-it to stop that and keep it manual.
+it to stop that, and `edit result` to correct the games before it goes.
 
 ![Current Sets panel](docs/screenshots/available-sets.png)
 
@@ -158,9 +158,9 @@ once saved).
 
 ## Auto-report
 
-Off by default; turn it on in Settings (operator only). With it on, a set
-that finishes finalizes itself on start.gg after a hold-off — 60 seconds by
-default — instead of waiting for a Report click.
+On by default (Settings, operator only). A set that finishes finalizes itself
+on start.gg after a hold-off — 60 seconds by default — instead of waiting for
+a Report click.
 
 It is deliberately hard to qualify for, because advancing a bracket is the
 one thing this app does that nobody can take back from here. A set reports
@@ -179,8 +179,23 @@ you. Dry-run disables auto-report entirely.
 
 While a set is counting down the console row says so and offers `hold`, which
 takes that one set off auto-report and leaves the manual Report button. The
-countdown restarts whenever the record changes, so switching players
-mid-countdown gives you the full window again on the corrected mapping.
+countdown restarts whenever you correct the set — switching players or
+editing the result gives you the full window again on the corrected version,
+rather than firing the moment you finish.
+
+### Correcting a result
+
+The station reads results out of the game's own save data, which is right
+almost always and wrong in ways it can't detect: a game the save never
+recorded, a mis-read character, a set the idle timer cut short. `edit result`
+on any unreported row opens the games — one line each, with who won and what
+both players picked — plus add/remove game. The score, the winner and the
+game count are all **derived** from those lines, so they can't end up
+disagreeing with each other or with what start.gg is told.
+
+That correction is what gets reported, by you or by auto-report, and it
+survives the station re-ingesting the set (which has no idea you changed
+anything). A 1–1 correction won't save: a set needs a winner.
 Auto-reported sets are labelled as such afterwards, and the write itself goes
 through exactly the same path as the button — same rebind, same
 already-reported-elsewhere check immediately before the write, same per-game

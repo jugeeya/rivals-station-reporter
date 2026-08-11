@@ -75,6 +75,17 @@ pub fn report_bracket_set(
     hub_glue::do_report_bracket_set(engine, set_id, winner_entrant_id)
 }
 
+/// Replace a set's result with the operator's own — the console's result
+/// editor. `games` is `[{winnerSlot, chars:[{slot, character}]}]`.
+pub fn override_result(
+    engine: &Arc<EngineInner>,
+    station: i64,
+    set_id: &str,
+    games: &Value,
+) -> Result<Value, String> {
+    hub_glue::do_override_result(engine, station, set_id, games)
+}
+
 /// Hold (or release) one set's auto-report — the console's Hold button.
 pub fn hold_auto_report(
     engine: &Arc<EngineInner>,

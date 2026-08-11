@@ -509,6 +509,149 @@ pub const DEFAULT_AUTO_REPORT_DELAY_S: f64 = 60.0;
 /// the night would bury the reason in the log.
 pub const MAX_AUTO_REPORT_ATTEMPTS: i64 = 3;
 
+/// Longest set anyone plays. A bound so a malformed override can't turn one
+/// set into a thousand games of start.gg game data.
+pub const MAX_GAMES_PER_SET: usize = 21;
+
+/// Put an operator's game list into the canonical shape `derive_games`
+/// produces, so everything downstream (the console strip, the report's game
+/// data) reads corrected games exactly as it reads detected ones.
+fn normalize_games(games: &[Value]) -> Value {
+    let out: Vec<Value> = games
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let chars: Vec<Value> = (0..2)
+                .map(|slot| {
+                    let character = g
+                        .get("chars")
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| {
+                            a.iter()
+                                .find(|c| c.get("slot").and_then(|v| v.as_i64()) == Some(slot))
+                        })
+                        .and_then(|c| c.get("character").cloned())
+                        .filter(|v| truthy(Some(v)))
+                        .unwrap_or(Value::Null);
+                    json!({ "slot": slot, "character": character })
+                })
+                .collect();
+            json!({
+                // Renumbered, not taken from the input: games are a sequence,
+                // and one deleted from the middle would otherwise leave a hole.
+                "gameNum": i as i64 + 1,
+                "winnerSlot": g.get("winnerSlot").cloned().unwrap_or(Value::Null),
+                "chars": chars,
+            })
+        })
+        .collect();
+    Value::Array(out)
+}
+
+/// Rewrite a record's set summary from a corrected game list: score, winner,
+/// game count, and each player's character all follow from the games, so they
+/// cannot end up disagreeing with what start.gg is told.
+fn apply_games_override(rec: &mut Value, games: &Value, tag_map: &HashMap<String, String>) {
+    let empty = Vec::new();
+    let games_arr = games.as_array().unwrap_or(&empty);
+
+    let wins = |slot: i64| -> i64 {
+        games_arr
+            .iter()
+            .filter(|g| g.get("winnerSlot").and_then(|v| v.as_i64()) == Some(slot))
+            .count() as i64
+    };
+    // Last character each slot is recorded as having played — a counterpick
+    // in the final game is what the set's "character" should read as, which
+    // is also what the station's own summary means by it.
+    let last_char = |slot: i64| -> Option<Value> {
+        games_arr.iter().rev().find_map(|g| {
+            g.get("chars")
+                .and_then(|v| v.as_array())?
+                .iter()
+                .find(|c| c.get("slot").and_then(|v| v.as_i64()) == Some(slot))?
+                .get("character")
+                .filter(|v| truthy(Some(v)))
+                .cloned()
+        })
+    };
+
+    let (w0, w1) = (wins(0), wins(1));
+    let winner_slot = match w0.cmp(&w1) {
+        std::cmp::Ordering::Greater => Some(0),
+        std::cmp::Ordering::Less => Some(1),
+        // A drawn correction is a mistake, but refusing to store it would
+        // lose the operator's edit; leave the winner unset and let
+        // `auto_report_blocker` keep it off the bracket.
+        std::cmp::Ordering::Equal => None,
+    };
+
+    if let Some(players) = rec
+        .pointer_mut("/set/players")
+        .and_then(|v| v.as_array_mut())
+    {
+        for p in players.iter_mut() {
+            let Some(slot) = p.get("slot").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            p["wins"] = json!(wins(slot));
+            if let Some(c) = last_char(slot) {
+                p["character"] = c;
+            }
+        }
+    }
+
+    let winner_name = winner_slot.and_then(|slot| {
+        rec.pointer("/set/players")
+            .and_then(|v| v.as_array())?
+            .iter()
+            .find(|p| p.get("slot").and_then(|v| v.as_i64()) == Some(slot))?
+            .get("name")
+            .cloned()
+    });
+
+    if let Some(set) = rec.get_mut("set") {
+        set["games"] = games.clone();
+        set["matchCount"] = json!(games_arr.len());
+        set["winnerSlot"] = winner_slot.map(|s| json!(s)).unwrap_or(Value::Null);
+        set["winnerName"] = winner_name.clone().unwrap_or(Value::Null);
+        set["winnerCharacter"] = winner_slot.and_then(last_char).unwrap_or(Value::Null);
+        // The station's own completeness flag described the set it detected,
+        // not the one the operator just described. An operator-entered result
+        // is by definition a finished set.
+        set["complete"] = json!(true);
+    }
+
+    // The winner changed, so the bracket entrant it maps to has to be
+    // recomputed — including the operator's standing swap, exactly as
+    // `record_for` does after a fresh ingest.
+    let summary = rec.get("set").cloned().unwrap_or(Value::Null);
+    let wm = matching::match_winner(&summary, rec.get("entrants"), Some(tag_map));
+    let mut cand = wm
+        .candidate_winner_entrant_id
+        .clone()
+        .unwrap_or(Value::Null);
+    if truthy(rec.get("swap")) && truthy(Some(&cand)) {
+        if let Some(arr) = rec.get("entrants").and_then(|v| v.as_array()) {
+            let cand_s = py_str(&cand);
+            if let Some(other) = arr
+                .iter()
+                .find(|e| py_str(e.get("id").unwrap_or(&Value::Null)) != cand_s)
+            {
+                cand = other.get("id").cloned().unwrap_or(Value::Null);
+            }
+        }
+    }
+    rec["candidateWinnerEntrantId"] = cand;
+    rec["confidence"] = json!(wm.confidence);
+    rec["slotEntrants"] = slot_entrants(
+        &summary,
+        rec.get("entrants"),
+        tag_map,
+        truthy(rec.get("swap")),
+    );
+}
+
 /// Why this record will never finalize itself, or `None` if it will (once its
 /// hold-off elapses).
 ///
@@ -540,11 +683,14 @@ pub fn auto_report_blocker(rec: &Value) -> Option<&'static str> {
     if !truthy(rec.pointer("/set/complete")) {
         return Some("set never closed out properly");
     }
-    if rec["confidence"] != *"high" {
-        return Some("winner is only a guess");
-    }
+    // Checked before confidence, which would otherwise describe a set with no
+    // winner at all (a drawn correction, an unfinished set) as one whose
+    // winner is "only a guess".
     if !truthy(rec.get("candidateWinnerEntrantId")) {
         return Some("no winner");
+    }
+    if rec["confidence"] != *"high" {
+        return Some("winner is only a guess");
     }
     if truthy(rec.get("autoReportHold")) {
         return Some("held by the operator");
@@ -568,10 +714,15 @@ pub fn auto_report_in(rec: &Value, policy: AutoReport, now: i64) -> Option<i64> 
     if !policy.enabled || auto_report_blocker(rec).is_some() {
         return None;
     }
-    // Counted from the ingest that produced this record, so a set corrected
-    // (swapped, rebound) mid-countdown gets the full window again — the
-    // correction is exactly when someone is still looking at it.
-    Some((ingested(rec) + policy.delay_s as i64 - now).max(0))
+    // Counted from the last time someone touched this set (a swap, a result
+    // correction), falling back to the ingest that created it. A correction
+    // is exactly when someone is still looking, so it earns the full window
+    // again rather than firing the moment they finish typing.
+    let from = rec
+        .get("autoReportFrom")
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| ingested(rec));
+    Some((from + policy.delay_s as i64 - now).max(0))
 }
 
 impl Hub {
@@ -933,10 +1084,22 @@ impl Hub {
             "reportedWinnerEntrantId",
             "reportedGames",
             "reportedBy",
+            "autoReportHold",
+            "autoReportFrom",
+            "editedGames",
+            "editedAt",
         ] {
             if let Some(v) = prev.get(k) {
                 rec[k] = v.clone();
             }
+        }
+        // A correction outranks whatever the station has since detected: the
+        // operator looked at the setup, the save file only looked at itself.
+        // Applied before the swap fix-up below because it recomputes the
+        // candidate winner (swap included) from the corrected games.
+        if let Some(edited) = prev.get("editedGames").filter(|v| truthy(Some(v))).cloned() {
+            apply_games_override(&mut rec, &edited, &s.tag_map);
+            return (key, rec);
         }
         if truthy(prev.get("swap")) && truthy(Some(&cand)) {
             let ents = rec.get("entrants").cloned().unwrap_or(Value::Null);
@@ -1510,6 +1673,83 @@ impl Hub {
         }
     }
 
+    /// Replace what the station thinks happened with what the operator says
+    /// happened: a new list of games, each with a winning slot and the two
+    /// characters played.
+    ///
+    /// The station reads results out of the game's own save data, which is
+    /// right almost always and wrong in ways it can't detect — a game the
+    /// save never recorded, a mis-read character, a set the idle timer cut
+    /// short. Before this the operator's only tools were Swap (fix who is
+    /// who) and Report (accept the score or don't), so a set with a wrong
+    /// GAME COUNT could only be reported wrong or not at all. With
+    /// auto-report on that gap matters more, not less: a correction has to be
+    /// possible for letting sets report themselves to be reasonable.
+    ///
+    /// Everything else is derived from the games rather than set alongside
+    /// them, so the score, the winner and the per-game data start.gg receives
+    /// can't disagree with each other.
+    ///
+    /// The override is stored on the record (`editedGames`) and re-applied by
+    /// `record_for`, so a later ingest from the station can't quietly undo it
+    /// — the same treatment `swap` gets.
+    pub fn do_override_result(
+        &self,
+        slug: &str,
+        station: i64,
+        set_id: &Value,
+        games: &Value,
+    ) -> Result<Value, (Value, u16)> {
+        let Some(games) = games.as_array().filter(|g| !g.is_empty()) else {
+            return Err((json!({"error": "A set needs at least one game."}), 400));
+        };
+        if games.len() > MAX_GAMES_PER_SET {
+            return Err((
+                json!({"error": format!("A set can't have more than {MAX_GAMES_PER_SET} games.")}),
+                400,
+            ));
+        }
+        // Every game must name a winner, and it must be one of the two slots:
+        // the whole point is to hand start.gg a result it can act on.
+        for g in games {
+            match g.get("winnerSlot").and_then(|v| v.as_i64()) {
+                Some(0) | Some(1) => {}
+                _ => return Err((json!({"error": "Every game needs a winner."}), 400)),
+            }
+        }
+
+        let tag_map = self.state.lock().unwrap().tag_map.clone();
+        let key = sid(station, set_id);
+        let mut s = self.state.lock().unwrap();
+        let Some(rec) = set_bucket(&mut s, slug).get_mut(&key) else {
+            return Err((json!({"error": "Set not found."}), 404));
+        };
+        if rec["status"] == *"reported" {
+            return Err((
+                json!({"error": "This set is already reported. Re-report it to change the result."}),
+                409,
+            ));
+        }
+
+        let normalized = normalize_games(games);
+        rec["editedGames"] = normalized.clone();
+        rec["editedAt"] = json!(now_sec());
+        apply_games_override(rec, &normalized, &tag_map);
+        // A correction is exactly when someone is still looking at this set,
+        // so give them the full hold-off again on the corrected result rather
+        // than letting a countdown that was nearly up fire immediately.
+        rec["autoReportFrom"] = json!(now_sec());
+        let out = rec.clone();
+        self.touch(&mut s);
+        drop(s);
+        (self.log)(&format!(
+            "operator corrected set {} on station {station} to {} game(s)",
+            py_str(set_id),
+            games.len()
+        ));
+        Ok(out)
+    }
+
     /// Stop this set from finalizing itself, leaving the operator's own Report
     /// button as the only way it reaches the bracket. The escape hatch for
     /// "the countdown is running and something looks wrong".
@@ -1921,6 +2161,10 @@ impl Hub {
             };
             let now_swapped = !truthy(rec.get("swap"));
             rec["swap"] = json!(now_swapped);
+            // Someone is looking at this set right now, so a pending
+            // auto-report gets its full hold-off back on the corrected
+            // mapping instead of firing seconds after the fix.
+            rec["autoReportFrom"] = json!(now_sec());
             // The stored display mapping must flip WITH the flag — the report
             // path computes its mapping fresh (and honors swap), but the
             // console renders this stored view, and leaving it stale showed
@@ -4164,6 +4408,229 @@ mod tests {
             .unwrap();
         h.sweep_auto_report(SLUG);
         assert_eq!(fake.reports().len(), 1);
+    }
+
+    // ---- correcting a result ------------------------------------------------------
+    // The station reads results out of the save file, which is right almost
+    // always and wrong in ways it cannot detect. With auto-report on, being
+    // able to correct a set is what makes letting sets report themselves
+    // reasonable -- so these pin that the correction is what gets reported.
+
+    fn game(winner_slot: i64, c0: &str, c1: &str) -> Value {
+        json!({
+            "winnerSlot": winner_slot,
+            "chars": [{"slot": 0, "character": c0}, {"slot": 1, "character": c1}],
+        })
+    }
+
+    fn hub_with_ingested_set() -> (Hub, std::sync::Arc<FakeStartgg>) {
+        let fake = FakeStartgg::new();
+        fake.set_state(2);
+        let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        h.handle_ingest(SLUG, 1, &real_set()).unwrap();
+        (h, fake)
+    }
+
+    #[test]
+    fn a_corrected_result_rewrites_the_score_winner_and_game_count() {
+        // The station saw JUGZ! 2-0. The operator says it actually went five
+        // games and KIM won it.
+        let (h, _) = hub_with_ingested_set();
+        let games = json!([
+            game(0, "Orc", "Gal"),
+            game(1, "Orc", "Gal"),
+            game(0, "Orc", "Gal"),
+            game(1, "Orc", "Zet"),
+            game(1, "Orc", "Zet"),
+        ]);
+        let rec = h
+            .do_override_result(SLUG, 1, &json!("20260724_075508"), &games)
+            .unwrap();
+
+        assert_eq!(rec["set"]["matchCount"], json!(5));
+        assert_eq!(rec["set"]["winnerSlot"], json!(1));
+        assert_eq!(rec["set"]["winnerName"], json!("KIM"));
+        let players = rec["set"]["players"].as_array().unwrap();
+        assert_eq!(players[0]["wins"], json!(2));
+        assert_eq!(players[1]["wins"], json!(3));
+        assert_eq!(
+            players[1]["character"],
+            json!("Zet"),
+            "the character follows the last game, so a counterpick sticks"
+        );
+        assert_eq!(
+            rec["candidateWinnerEntrantId"],
+            json!(24186347),
+            "the bracket entrant is recomputed from the new winner"
+        );
+        assert_eq!(rec["confidence"], json!("high"));
+        // Games are renumbered as a sequence, whatever the caller sent.
+        let out: Vec<i64> = rec["set"]["games"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["gameNum"].as_i64().unwrap())
+            .collect();
+        assert_eq!(out, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_corrected_result_is_what_gets_reported() {
+        let (h, fake) = hub_with_ingested_set();
+        h.do_override_result(
+            SLUG,
+            1,
+            &json!("20260724_075508"),
+            &json!([game(1, "Orc", "Gal"), game(1, "Orc", "Gal")]),
+        )
+        .unwrap();
+        h.do_report(SLUG, 1, &json!("20260724_075508"), &json!(24186347))
+            .unwrap();
+
+        let reports = fake.reports();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].1, json!("24186347"), "the corrected winner");
+        let games = reports[0].2.as_ref().expect("game data went with it");
+        assert_eq!(
+            games.as_array().unwrap().len(),
+            2,
+            "start.gg gets the corrected game count, not the detected one"
+        );
+    }
+
+    #[test]
+    fn a_correction_survives_the_station_re_ingesting_the_set() {
+        // The station has no idea the operator corrected anything; a later
+        // ingest must not quietly restore what the save file thinks.
+        let (h, _) = hub_with_ingested_set();
+        h.do_override_result(
+            SLUG,
+            1,
+            &json!("20260724_075508"),
+            &json!([game(1, "Orc", "Gal"), game(1, "Orc", "Gal")]),
+        )
+        .unwrap();
+        h.handle_ingest(SLUG, 1, &real_set()).unwrap();
+
+        let rec = h.get_set(SLUG, 1, &json!("20260724_075508")).unwrap();
+        assert_eq!(rec["set"]["winnerName"], json!("KIM"), "correction held");
+        assert_eq!(rec["set"]["matchCount"], json!(2));
+        assert_eq!(rec["candidateWinnerEntrantId"], json!(24186347));
+    }
+
+    #[test]
+    fn a_correction_restarts_the_auto_report_countdown() {
+        // Otherwise a set with two seconds left on its countdown would fire
+        // the instant the operator finished correcting it.
+        let (h, _) = hub_with_ingested_set();
+        {
+            let mut s = h.state.lock().unwrap();
+            for r in set_bucket(&mut s, SLUG).values_mut() {
+                r["ingestedAt"] = json!(now_sec() - 55);
+            }
+        }
+        let rec = h.get_set(SLUG, 1, &json!("20260724_075508")).unwrap();
+        assert_eq!(
+            auto_report_in(&rec, on(), now_sec()),
+            Some(5),
+            "nearly due before the correction"
+        );
+
+        let rec = h
+            .do_override_result(
+                SLUG,
+                1,
+                &json!("20260724_075508"),
+                &json!([game(1, "Orc", "Gal"), game(1, "Orc", "Gal")]),
+            )
+            .unwrap();
+        assert_eq!(
+            auto_report_in(&rec, on(), now_sec()),
+            Some(60),
+            "the full window, on the corrected result"
+        );
+    }
+
+    #[test]
+    fn a_swap_also_restarts_the_countdown() {
+        let (h, _) = hub_with_ingested_set();
+        {
+            let mut s = h.state.lock().unwrap();
+            for r in set_bucket(&mut s, SLUG).values_mut() {
+                r["ingestedAt"] = json!(now_sec() - 55);
+            }
+        }
+        h.do_swap(SLUG, 1, &json!("20260724_075508")).unwrap();
+        let rec = h.get_set(SLUG, 1, &json!("20260724_075508")).unwrap();
+        assert_eq!(auto_report_in(&rec, on(), now_sec()), Some(60));
+    }
+
+    #[test]
+    fn a_drawn_correction_is_stored_but_kept_off_the_bracket() {
+        // 1-1 is a mistake, not a result. Refusing it outright would throw
+        // away the operator's work; storing it with no winner keeps it
+        // visible and keeps auto-report away from it.
+        let (h, _) = hub_with_ingested_set();
+        let rec = h
+            .do_override_result(
+                SLUG,
+                1,
+                &json!("20260724_075508"),
+                &json!([game(0, "Orc", "Gal"), game(1, "Orc", "Gal")]),
+            )
+            .unwrap();
+        assert_eq!(rec["set"]["winnerSlot"], Value::Null);
+        assert_eq!(auto_report_blocker(&rec), Some("no winner"));
+    }
+
+    #[test]
+    fn a_correction_needs_real_games_with_real_winners() {
+        let (h, _) = hub_with_ingested_set();
+        let id = json!("20260724_075508");
+        assert_eq!(
+            h.do_override_result(SLUG, 1, &id, &json!([]))
+                .unwrap_err()
+                .1,
+            400,
+            "a set is at least one game"
+        );
+        assert_eq!(
+            h.do_override_result(SLUG, 1, &id, &json!([{"winnerSlot": Value::Null}]))
+                .unwrap_err()
+                .1,
+            400,
+            "every game needs a winner"
+        );
+        assert_eq!(
+            h.do_override_result(SLUG, 1, &id, &json!([{"winnerSlot": 7}]))
+                .unwrap_err()
+                .1,
+            400,
+            "and it has to be one of the two slots"
+        );
+        let many: Vec<Value> = (0..MAX_GAMES_PER_SET + 1)
+            .map(|_| game(0, "Orc", "Gal"))
+            .collect();
+        assert_eq!(
+            h.do_override_result(SLUG, 1, &id, &json!(many))
+                .unwrap_err()
+                .1,
+            400
+        );
+    }
+
+    #[test]
+    fn an_already_reported_set_is_not_silently_re_scored() {
+        let (h, _) = hub_with_ingested_set();
+        let id = json!("20260724_075508");
+        h.do_report(SLUG, 1, &id, &json!(24186345)).unwrap();
+        assert_eq!(
+            h.do_override_result(SLUG, 1, &id, &json!([game(1, "Orc", "Gal")]))
+                .unwrap_err()
+                .1,
+            409
+        );
     }
 
     // ---- Bracket screen: do_report_set ------------------------------------------

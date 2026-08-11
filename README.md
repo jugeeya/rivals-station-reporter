@@ -27,8 +27,8 @@ widget. The full design is in `rivals-station-reporter-architecture.md`
   fixable after the fact with `edit result`.
 - **Both** — one PC doing both jobs.
 
-The hub speaks the same `/matchlogger/*` HTTP API as the Cloudflare broker
-(`jugeeya.github.io/broker/worker.js`), so stations can point at either, and
+The hub speaks the same `/matchlogger/*` HTTP API the old Cloudflare broker
+defined (`jugeeya.github.io/broker/worker.js`), and
 old Python stations interoperate with a Rust hub (and vice versa) during
 migration. Online/ranked ladder games are detected via the save's game mode
 and never touch the bracket.
@@ -45,7 +45,7 @@ regenerates all of them (see Development).
 | pick what this PC is | everything else, without restarting |
 
 First run: pick what this PC is; everything else is auto-detected or
-validated inline. Settings covers mode, event, hub/broker (with LAN
+validated inline. Settings covers mode, event, hub (found by LAN
 auto-discovery), paths, auto-report and the update checker — all editable
 while sets are being played.
 

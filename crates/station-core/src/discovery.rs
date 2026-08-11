@@ -36,7 +36,7 @@ const PROBE_CONCURRENCY: usize = 64;
 /// A hub that answered a probe.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FoundHub {
-    /// Ready to paste straight into the station's "Hub / broker URL" field.
+    /// The hub's base URL, ready for the station's forwarder to post to.
     pub url: String,
     /// The event this hub is running, if it has one configured. Shown to the
     /// user so an auto-connect is never a silent guess.

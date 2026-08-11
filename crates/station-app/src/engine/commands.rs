@@ -41,19 +41,6 @@ pub fn default_paths() -> Value {
     })
 }
 
-/// Sweep the local /24 for operator hubs. Blocking (~1-2s of parallel HTTP).
-pub fn find_hubs(engine: &Arc<EngineInner>) -> Value {
-    let (port, is_operator) = {
-        let cfg = engine.cfg.lock().unwrap();
-        (cfg.hub_port, cfg.is_operator())
-    };
-    let skip = is_operator
-        .then(station_core::discovery::local_ipv4)
-        .flatten();
-    let found = station_core::discovery::scan(port, skip);
-    json!({ "hubs": found })
-}
-
 // ---- operator actions (delegated to the hub; all blocking) -------------------
 
 pub fn report_winner(

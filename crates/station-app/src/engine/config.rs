@@ -4,13 +4,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The public Cloudflare broker. Still reachable, and still the right answer
-/// for a station that genuinely isn't on the operator's LAN — but NOT the
-/// default: a station that ships pointing at someone else's hosted service
-/// sends this event's sets off the network before anyone chooses to. A blank
-/// broker means "find the hub on this LAN", which is what every station at a
-/// normal event wants.
-pub const PUBLIC_BROKER: &str = "https://r2tag-broker.jdsambasivam.workers.dev";
 pub const DEFAULT_HUB_PORT: u16 = 8787;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,14 +12,8 @@ pub struct Config {
     /// station | operator | both — same trichotomy as the Python widget.
     pub mode: String,
     pub station: i64,
-    /// Hub / broker URL the forwarder posts to (a LAN hub or the Cloudflare
-    /// broker — same API either way).
-    pub broker: String,
     /// start.gg event slug (or empty: local scoreboard only, nothing sent).
     pub slug: String,
-    /// Shared key — same value as the hub/broker's OPERATOR_KEY. Required to
-    /// send; the live-score push is a real (non-advancing) bracket write.
-    pub key: String,
     /// start.gg API token — operator only; never leaves the operator machine.
     pub startgg_token: String,
     /// Stats save path; empty = auto-detect (%LOCALAPPDATA%).
@@ -64,9 +51,7 @@ impl Default for Config {
         Self {
             mode: "station".into(),
             station: 1,
-            broker: String::new(),
             slug: String::new(),
-            key: String::new(),
             startgg_token: String::new(),
             save: String::new(),
             replays: String::new(),
@@ -309,10 +294,10 @@ pub fn save(config_dir: &Path, cfg: &Config) -> Result<(), String> {
     let tmp = config_dir.join("config.json.tmp");
     let body = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
-    // config.json holds the start.gg API token and the shared key; a default
-    // umask leaves fs::write's file world-readable, so tighten it to
-    // owner-only before it lands at its real name. Windows has no mode bits
-    // — the profile dir's ACL already scopes it to the user there.
+    // config.json holds the start.gg API token; a default umask leaves
+    // fs::write's file world-readable, so tighten it to owner-only before it
+    // lands at its real name. Windows has no mode bits — the profile dir's
+    // ACL already scopes it to the user there.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

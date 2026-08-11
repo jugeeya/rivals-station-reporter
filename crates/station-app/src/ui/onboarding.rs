@@ -56,8 +56,6 @@ pub enum Msg {
     EventUrl(String),
     CheckEvent,
     EventResolved(Result<EventSummary, String>),
-    Key(String),
-    Broker(String),
     Token(String),
     Finish,
     Saved(Result<(), String>),
@@ -72,8 +70,6 @@ pub struct State {
     event_info: Option<EventSummary>,
     event_error: String,
     resolving: bool,
-    key: String,
-    broker: String,
     token: String,
     saving: bool,
     save_error: String,
@@ -84,7 +80,7 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(cfg: &Config) -> Self {
+    pub fn new(_cfg: &Config) -> Self {
         let paths = commands::default_paths();
         Self {
             step: 1,
@@ -94,8 +90,6 @@ impl State {
             event_info: None,
             event_error: String::new(),
             resolving: false,
-            key: String::new(),
-            broker: cfg.broker.clone(),
             token: String::new(),
             saving: false,
             save_error: String::new(),
@@ -149,8 +143,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 Err(e) => ob.event_error = e,
             }
         }
-        Msg::Key(s) => ob.key = s,
-        Msg::Broker(s) => ob.broker = s,
         Msg::Token(s) => ob.token = s,
         Msg::Finish => {
             ob.saving = true;
@@ -175,12 +167,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                             station_core::forwarder::normalize_slug(raw)
                         }
                     }),
-                broker: if ob.broker.trim().is_empty() {
-                    app.st.config.broker.clone()
-                } else {
-                    ob.broker.trim().to_string()
-                },
-                key: ob.key.trim().to_string(),
                 startgg_token: ob.token.trim().to_string(),
                 configured: true,
                 ..app.st.config.clone()
@@ -345,48 +331,11 @@ fn step_two(ob: &State) -> Element<'_, Message> {
     col = col.push(event_field);
 
     if ob.mode == Mode::Station {
-        col = col.push(
-            column![
-                label("Hub / broker URL"),
-                text_input(
-                    "http://192.168.…:8787 (from the operator's screen)",
-                    &ob.broker
-                )
-                .style(theme::input)
-                .padding(9)
-                .on_input(|s| Message::Onboarding(Msg::Broker(s))),
-                help(
-                    "Shown big on the operator's screen, or leave the cloud broker default.".into()
-                ),
-            ]
-            .spacing(6),
-        );
+        col = col.push(help(
+            "The operator's hub is found automatically on this network — nothing to type in."
+                .into(),
+        ));
     }
-
-    let mut key_field = column![
-        row![
-            label("Shared key"),
-            opt("(required to send; ask whoever runs the event)")
-        ]
-        .spacing(6),
-        text_input("", &ob.key)
-            .style(theme::input)
-            .padding(9)
-            .secure(true)
-            .on_input(|s| Message::Onboarding(Msg::Key(s))),
-    ]
-    .spacing(6);
-    if ob.is_operator() && ob.key.trim().is_empty() {
-        key_field = key_field.push(
-            text(
-                "Without a key, anyone on the venue's network can post to this hub — \
-                 including reporting sets to your bracket. Pick one and give it to your stations.",
-            )
-            .size(12)
-            .color(theme::TEXT_WARNING),
-        );
-    }
-    col = col.push(key_field);
 
     if ob.is_operator() {
         col = col.push(

@@ -5,19 +5,19 @@
 //! POST to it, and it is the only thing that talks to start.gg. Cloudflare is
 //! then not in the loop at all (no KV reads, writes or list ops).
 //!
-//! It deliberately speaks the SAME `/matchlogger/*` HTTP API as
-//! broker/worker.js, so a station switches over by pointing its broker URL at
-//! the operator's LAN address — no station code changes:
+//! It deliberately speaks the historical `/matchlogger/*` HTTP API (the
+//! shape the Cloudflare broker defined), which every station's forwarder
+//! posts to at the hub's discovered LAN address:
 //!
 //! ```text
-//! POST /matchlogger/current   {slug, station, key, current}
-//! POST /matchlogger/live      {slug, station, key, set}    -> live start.gg score
-//! POST /matchlogger/ingest    {slug, station, key, set}
+//! POST /matchlogger/current   {slug, station, current}
+//! POST /matchlogger/live      {slug, station, set}    -> live start.gg score
+//! POST /matchlogger/ingest    {slug, station, set}
 //! GET  /matchlogger/event?slug=...
 //! GET  /matchlogger/version?slug=...
-//! POST /matchlogger/report    {slug, station, setId, winnerEntrantId, passcode}
-//! POST /matchlogger/swap      {slug, station, setId, passcode}
-//! POST /matchlogger/delete    {slug, station, setId, passcode}
+//! POST /matchlogger/report    {slug, station, setId, winnerEntrantId}
+//! POST /matchlogger/swap      {slug, station, setId}
+//! POST /matchlogger/delete    {slug, station, setId}
 //! ```
 //!
 //! Reporting a winner (which advances the bracket) is never automatic — only
@@ -444,7 +444,6 @@ fn load_state(log: &dyn Fn(&str), state_path: Option<&str>, s: &mut HubState) {
 /// Event state + the start.gg side effects. Transport-agnostic: the HTTP
 /// handler and the operator UI both call these methods.
 pub struct Hub {
-    pub key: Option<String>,
     /// Corrections the operator has made (save tag -> start.gg tag), kept
     /// apart from the hand-written players.json so that file is never
     /// rewritten. Merged over it, so a manual entry can be corrected once.
@@ -691,7 +690,6 @@ pub fn auto_reports(rec: &Value, policy: AutoReport) -> bool {
 impl Hub {
     #[allow(clippy::too_many_arguments)] // mirrors the Python __init__ keywords
     pub fn new(
-        key: Option<&str>,
         token: Option<String>,
         tag_map: Option<HashMap<String, String>>,
         tagdb_map: Option<HashMap<String, String>>,
@@ -700,11 +698,6 @@ impl Hub {
         on_change: Option<OnChangeFn>,
         learned_path: Option<String>,
     ) -> Hub {
-        // Python: self.key = (key or '').strip() or None
-        let key = key
-            .map(str::trim)
-            .filter(|k| !k.is_empty())
-            .map(String::from);
         let log: Arc<dyn Fn(&str) + Send + Sync> = match log {
             Some(b) => Arc::from(b),
             None => Arc::new(|_m: &str| {}),
@@ -749,7 +742,6 @@ impl Hub {
             load_state(&l, state_path.as_deref(), &mut state);
         }
         Hub {
-            key,
             learned_path,
             log,
             on_change,
@@ -768,8 +760,7 @@ impl Hub {
 
     /// Record which event this hub is running (the operator's `cfg.slug`),
     /// so `/matchlogger/health` — and therefore a LAN discovery scan — can
-    /// report it. Blank/whitespace-only clears it, matching how `key` is
-    /// normalized above.
+    /// report it. Blank/whitespace-only clears it.
     pub fn set_event_slug(&self, slug: &str) {
         let slug = slug.trim();
         *self.event_slug.lock().unwrap() = (!slug.is_empty()).then(|| slug.to_string());
@@ -826,23 +817,6 @@ impl Hub {
     }
 
     // -- helpers ------------------------------------------------------------
-    /// Stations/console must present the shared key when one is set. On a
-    /// LAN this is mostly about catching misconfiguration, but it also stops a
-    /// stray machine polluting the event.
-    pub fn check_key(&self, supplied: Option<&Value>) -> bool {
-        match &self.key {
-            None => true,
-            Some(k) => {
-                // Python: str(supplied or '') == self.key
-                let s = match supplied {
-                    Some(v) if truthy(Some(v)) => py_str(v),
-                    _ => String::new(),
-                };
-                &s == k
-            }
-        }
-    }
-
     /// Look up which start.gg set is at this station (entrants, round).
     fn bind_station_set(&self, slug: &str, station: i64) -> Value {
         if !self.startgg.enabled() {
@@ -2481,16 +2455,6 @@ fn route_post(hub: &Hub, req: &mut tiny_http::Request, url: &str) -> (Value, u16
     if slug.is_empty() {
         return (json!({"error": "Bad or missing event slug."}), 400);
     }
-    // One shared key for stations and operator actions, like the broker.
-    let supplied = if matches!(op.as_str(), "current" | "live" | "ingest") {
-        body.get("key")
-    } else {
-        body.get("passcode")
-    };
-    if !hub.check_key(supplied) {
-        return (json!({"error": "Bad key."}), 401);
-    }
-
     let station = py_int(body.get("station"));
     if station.is_none()
         && matches!(
@@ -2669,7 +2633,6 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     const SLUG: &str = "tournament/the-hangout-4-1/event/rivals-of-aether-ii-singles";
-    const KEY: &str = "thehangout2026!";
 
     /// A set still being played resolves its slot to entrant pairing.
     ///
@@ -2719,7 +2682,7 @@ mod tests {
     #[test]
     fn do_swap_flips_the_stored_slot_entrants() {
         let fake = FakeStartgg::new();
-        let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         h.handle_current(SLUG, 1, Some(&json!({"state": "set_start"})))
@@ -3187,7 +3150,6 @@ mod tests {
         let state_path = path_str(&workdir.join("hub-state.json"));
         let fake = FakeStartgg::new();
         let mut h = Hub::new(
-            Some(KEY),
             None,
             Some(tags()),
             None,
@@ -3216,7 +3178,7 @@ mod tests {
         // heartbeat: a set is starting at station 1
         let r = post(
             "/matchlogger/current",
-            json!({"slug": SLUG, "station": 1, "key": KEY,
+            json!({"slug": SLUG, "station": 1,
                    "current": {"state": "set_start", "epoch": 1784879708i64,
                                "setId": "20260724_075508"}}),
         );
@@ -3241,7 +3203,7 @@ mod tests {
         );
         post(
             "/matchlogger/live",
-            json!({"slug": SLUG, "station": 1, "key": KEY, "set": live_body}),
+            json!({"slug": SLUG, "station": 1, "set": live_body}),
         );
         let pushes = fake.pushes();
         assert_eq!(pushes.len(), 1, "live update pushed to start.gg");
@@ -3269,7 +3231,7 @@ mod tests {
         // ingest: the finished set
         post(
             "/matchlogger/ingest",
-            json!({"slug": SLUG, "station": 1, "key": KEY, "set": real_set()}),
+            json!({"slug": SLUG, "station": 1, "set": real_set()}),
         );
         let view = h.event_view(SLUG);
         assert_eq!(
@@ -3360,16 +3322,7 @@ mod tests {
 
         // ---- persistence ---------------------------------------------------------
         h.handle_ingest(SLUG, 3, &real_set()).unwrap();
-        let h3 = Hub::new(
-            Some(KEY),
-            None,
-            Some(tags()),
-            None,
-            Some(state_path),
-            None,
-            None,
-            None,
-        );
+        let h3 = Hub::new(None, Some(tags()), None, Some(state_path), None, None, None);
         assert_eq!(
             h3.event_view(SLUG)["sets"].as_array().unwrap().len(),
             1,
@@ -3400,12 +3353,6 @@ mod tests {
             "a hub with no event configured has nothing to scope to, so shows everything"
         );
         h.set_event_slug(SLUG);
-
-        // ---- key gate --------------------------------------------------------
-        assert!(
-            h.check_key(Some(&json!(KEY))) && !h.check_key(Some(&json!("wrong"))),
-            "shared key gate works"
-        );
 
         // ---- online / ranked games are logged but never reported ---------------
         let before = fake.pushes().len();
@@ -3485,19 +3432,6 @@ mod tests {
             "LOCAL sets still match and stay reportable"
         );
 
-        // a station with the wrong key is rejected
-        let r = post(
-            "/matchlogger/current",
-            json!({"slug": SLUG, "station": 9, "key": "wrong-key",
-                   "current": {"state": "idle"}}),
-        );
-        assert_eq!(
-            r.status().as_u16(),
-            401,
-            "a station with the wrong key is rejected"
-        );
-        assert_eq!(r.json::<Value>().unwrap()["error"], json!("Bad key."));
-
         server.stop();
         let _ = fs::remove_dir_all(&workdir);
     }
@@ -3511,16 +3445,7 @@ mod tests {
     /// bind on the same port succeed immediately, no retry needed.
     #[test]
     fn restart_on_the_same_port_back_to_back_does_not_lose_the_bind_race() {
-        let h = Arc::new(Hub::new(
-            Some(KEY),
-            None,
-            Some(tags()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        ));
+        let h = Arc::new(Hub::new(None, Some(tags()), None, None, None, None, None));
 
         // free_port() drops its probe listener before returning, so a test
         // running in parallel can steal the port in that gap -- retry with a
@@ -3545,7 +3470,7 @@ mod tests {
     // ---- report with no token degrades honestly --------------------------------
     #[test]
     fn report_with_no_token_degrades_honestly() {
-        let h2 = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        let h2 = Hub::new(None, Some(tags()), None, None, None, None, None);
         h2.handle_ingest(SLUG, 2, &real_set()).unwrap();
         let res2 = h2.do_report(SLUG, 2, &json!("20260724_075508"), &json!(1));
         let (_, code) = res2.expect_err("no token / unmatched must error");
@@ -3562,7 +3487,6 @@ mod tests {
         let called = FakeStartgg::new();
         called.set_state(6); // called to the station, but NOT started
         let mut h4 = Hub::new(
-            None,
             None,
             Some(tags()),
             None,
@@ -3646,7 +3570,6 @@ mod tests {
         }));
         let mut h = Hub::new(
             None,
-            None,
             Some(tags()),
             None,
             Some(path_str(&workdir.join("h.json"))),
@@ -3697,7 +3620,7 @@ mod tests {
     #[test]
     fn a_set_open_heartbeat_for_a_new_set_binds_the_station() {
         let fake = FakeStartgg::new();
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -3717,7 +3640,7 @@ mod tests {
     #[test]
     fn a_repeat_set_open_heartbeat_keeps_the_original_binding() {
         let fake = FakeStartgg::new();
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         h.handle_current(
@@ -3752,7 +3675,7 @@ mod tests {
         // looked up fresh -- NOT carried over from set A, which would
         // live-push set B's games onto set A's bracket entry.
         let fake = FakeStartgg::new();
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         h.handle_current(
@@ -3779,7 +3702,7 @@ mod tests {
     #[test]
     fn an_idle_heartbeat_preserves_the_binding() {
         let fake = FakeStartgg::new();
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         h.handle_current(
@@ -3809,7 +3732,6 @@ mod tests {
         let workdir = tmpdir("hubtest_alreadydone");
         let fake = FakeStartgg::new();
         let mut h = Hub::new(
-            None,
             None,
             Some(tags()),
             None,
@@ -3869,7 +3791,6 @@ mod tests {
         fake.set_state_will_answer(json!(matching::STARTGG_STATE_ONGOING));
         let mut h = Hub::new(
             None,
-            None,
             Some(tags()),
             None,
             Some(path_str(&workdir.join("h.json"))),
@@ -3910,7 +3831,6 @@ mod tests {
         fake.set_station_set_id(2, json!(910002));
         fake.set_station_set_id(3, json!(910003));
         let mut h = Hub::new(
-            None,
             None,
             Some(tags()),
             None,
@@ -4005,7 +3925,6 @@ mod tests {
         fake.set_state_will_answer(json!(matching::STARTGG_STATE_ONGOING));
         let mut h = Hub::new(
             None,
-            None,
             Some(tags()),
             None,
             Some(path_str(&workdir.join("h.json"))),
@@ -4042,7 +3961,6 @@ mod tests {
         let workdir = tmpdir("hubtest_liveconfirm_ok");
         let fake = FakeStartgg::new();
         let mut h = Hub::new(
-            None,
             None,
             Some(tags()),
             None,
@@ -4091,7 +4009,6 @@ mod tests {
         // after still sees nothing for the set.
         fake.set_games_will_answer(Some(Value::Null));
         let mut h = Hub::new(
-            None,
             None,
             Some(tags()),
             None,
@@ -4164,7 +4081,6 @@ mod tests {
         let fake = FakeStartgg::new();
         let mut h5 = Hub::new(
             None,
-            None,
             Some(tags()),
             None,
             Some(path_str(&workdir.join("h5.json"))),
@@ -4204,7 +4120,6 @@ mod tests {
         );
         let h6 = Hub::new(
             None,
-            None,
             Some(tags()),
             None,
             None,
@@ -4234,7 +4149,6 @@ mod tests {
         // and the tag database still fills in one players.json never mentions.
         let h = Hub::new(
             None,
-            None,
             Some(tags()),
             Some(tagdb_map.clone()),
             None,
@@ -4258,7 +4172,6 @@ mod tests {
         let learned_path = path_str(&workdir.join("learned.json"));
         fs::write(&learned_path, r#"{"JUGZ!": "operator-correction"}"#).unwrap();
         let h2 = Hub::new(
-            None,
             None,
             Some(tags()),
             Some(tagdb_map),
@@ -4286,7 +4199,7 @@ mod tests {
             "stations": [{"id": "opaque-1", "number": 1}],
         });
         fake.set_available_sets(payload.clone());
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake));
         assert_eq!(
             h.available_sets(SLUG).unwrap(),
@@ -4298,7 +4211,7 @@ mod tests {
     #[test]
     fn available_sets_wrapper_errors_without_a_token() {
         // No override: the real (disabled, no token) Startgg client.
-        let h = Hub::new(None, None, None, None, None, None, None, None);
+        let h = Hub::new(None, None, None, None, None, None, None);
         let err = h.available_sets(SLUG).unwrap_err();
         assert_eq!(
             err.1, 501,
@@ -4406,7 +4319,7 @@ mod tests {
     fn the_sweep_reports_a_due_set_and_leaves_the_rest() {
         let fake = FakeStartgg::new();
         fake.set_state(2); // TO pressed Start Match
-        let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
         h.set_auto_report(on());
         h.handle_ingest(SLUG, 1, &real_set()).unwrap();
@@ -4438,7 +4351,7 @@ mod tests {
         // never a bracket result, whatever else is true of it.
         let fake = FakeStartgg::new();
         fake.set_state(2);
-        let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
         h.set_auto_report(on());
         h.handle_ingest(SLUG, 1, &with(real_set(), &[("mode", json!("ONLINE"))]))
@@ -4458,7 +4371,7 @@ mod tests {
         // all night. Now the report presses it first.
         let fake = FakeStartgg::new();
         fake.set_state(6); // called, not started
-        let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
         h.set_auto_report(on());
         h.handle_ingest(SLUG, 1, &real_set()).unwrap();
@@ -4486,7 +4399,7 @@ mod tests {
         // that may not even be the set being played.
         let fake = FakeStartgg::new();
         fake.set_state(6);
-        let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
         let out = h
             .handle_live(SLUG, 1, &with(real_set(), &[("complete", json!(false))]))
@@ -4511,7 +4424,7 @@ mod tests {
     fn hub_with_ingested_set() -> (Hub, std::sync::Arc<FakeStartgg>) {
         let fake = FakeStartgg::new();
         fake.set_state(2);
-        let mut h = Hub::new(None, None, Some(tags()), None, None, None, None, None);
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
         h.handle_ingest(SLUG, 1, &real_set()).unwrap();
         (h, fake)
@@ -4735,7 +4648,7 @@ mod tests {
     fn hub_with_sets(sets: Value) -> (Hub, std::sync::Arc<FakeStartgg>) {
         let fake = FakeStartgg::new();
         fake.set_available_sets(json!({"sets": sets, "stations": [], "streams": []}));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
         (h, fake)
     }
@@ -4803,7 +4716,7 @@ mod tests {
         assert!(fake.reports().is_empty());
 
         // No override: the real (token-less) client.
-        let h = Hub::new(None, None, None, None, None, None, None, None);
+        let h = Hub::new(None, None, None, None, None, None, None);
         assert_eq!(
             h.do_report_set(SLUG, &json!("S1"), &json!("E1"))
                 .unwrap_err()
@@ -4847,7 +4760,7 @@ mod tests {
             "sets": [set_with_station("S1", Value::Null)],
             "stations": stations_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -4872,7 +4785,7 @@ mod tests {
             "sets": [set_with_station("S1", Value::Null)],
             "stations": stations_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -4898,7 +4811,7 @@ mod tests {
             "sets": [set_with_station("S1", json!(2))],
             "stations": stations_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -4924,7 +4837,7 @@ mod tests {
             "sets": [set_with_station("S1", json!(1))],
             "stations": stations_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -4951,7 +4864,7 @@ mod tests {
             "stations": stations_list(),
         }));
         fake.fail_assign_station();
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
@@ -4972,7 +4885,7 @@ mod tests {
             "sets": [set_with_station("S1", Value::Null)],
             "stations": stations_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
@@ -5001,7 +4914,7 @@ mod tests {
             "stations": stations_list(),
             "streams": streams_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let out = h
@@ -5040,7 +4953,7 @@ mod tests {
             "streams": streams_list(),
         }));
         fake.fail_assign_station();
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
@@ -5061,7 +4974,7 @@ mod tests {
             "stations": stations_list(),
             "streams": streams_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
@@ -5087,7 +5000,7 @@ mod tests {
 
     #[test]
     fn do_start_match_requires_a_start_gg_token() {
-        let h = Hub::new(None, None, None, None, None, None, None, None);
+        let h = Hub::new(None, None, None, None, None, None, None);
         let err = h
             .do_start_match(SLUG, &json!("S1"), None, None)
             .unwrap_err();
@@ -5102,7 +5015,7 @@ mod tests {
             "stations": stations_list(),
             "streams": streams_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -5129,7 +5042,7 @@ mod tests {
             "stations": stations_list(),
             "streams": streams_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -5151,7 +5064,7 @@ mod tests {
             "stations": stations_list(),
             "streams": streams_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
@@ -5173,7 +5086,7 @@ mod tests {
             "stations": stations_list(),
             "streams": streams_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -5202,7 +5115,7 @@ mod tests {
             "stations": stations_list(),
             "streams": streams_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -5229,7 +5142,7 @@ mod tests {
             "streams": streams_list(),
         }));
         fake.fail_assign_stream();
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
@@ -5253,7 +5166,7 @@ mod tests {
             "sets": [set_with_station("S1", Value::Null)],
             "stations": stations_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -5279,7 +5192,7 @@ mod tests {
             "sets": [set_with_station("S1", json!(1))],
             "stations": stations_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -5304,7 +5217,7 @@ mod tests {
             "sets": [set_with_station("S1", Value::Null)],
             "stations": stations_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
@@ -5324,7 +5237,7 @@ mod tests {
             "sets": [set_with_station("S1", Value::Null)],
             "stations": stations_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
@@ -5342,7 +5255,7 @@ mod tests {
             "stations": stations_list(),
         }));
         fake.fail_assign_station();
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
@@ -5353,7 +5266,7 @@ mod tests {
 
     #[test]
     fn do_reassign_station_requires_a_start_gg_token() {
-        let h = Hub::new(None, None, None, None, None, None, None, None);
+        let h = Hub::new(None, None, None, None, None, None, None);
         let err = h
             .do_reassign_destination(SLUG, &json!("S1"), Some(2), None)
             .unwrap_err();
@@ -5368,7 +5281,7 @@ mod tests {
             "stations": stations_list(),
             "streams": streams_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -5395,7 +5308,7 @@ mod tests {
             "stations": stations_list(),
             "streams": streams_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let err = h
@@ -5414,7 +5327,7 @@ mod tests {
             "stations": stations_list(),
             "streams": streams_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h
@@ -5442,7 +5355,7 @@ mod tests {
             "stations": stations_list(),
             "streams": streams_list(),
         }));
-        let mut h = Hub::new(None, None, None, None, None, None, None, None);
+        let mut h = Hub::new(None, None, None, None, None, None, None);
         h.startgg = Box::new(Shared(fake.clone()));
 
         let res = h

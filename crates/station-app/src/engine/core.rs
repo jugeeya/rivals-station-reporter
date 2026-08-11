@@ -67,6 +67,10 @@ pub struct EngineInner {
     snapshot: Mutex<Value>,     // station producer snapshot {history, live}
     hub_snapshot: Mutex<Value>, // operator hub snapshot {sets, stations}
     hub_url: Mutex<Option<String>>,
+    /// Where this station's forwarder is currently posting (the discovered
+    /// LAN hub, or loopback in "both" mode). `None` = not forwarding, either
+    /// because no event is configured or because no hub has been found yet.
+    forward_url: Mutex<Option<String>>,
     // The running hub (operator mode), for the report/swap/delete commands.
     hub: Mutex<Option<Arc<station_core::hub::Hub>>>,
     armed: AtomicBool, // stats save readable at least once
@@ -95,7 +99,7 @@ pub struct EngineInner {
     // fine, now bad"/"was bad, now fine" transitions, not on every wobble.
     clock_skew_bad: Mutex<Option<(String, i64)>>, // (message, first-seen t)
 
-    // Hub/broker connectivity warning (see `check_forward_health` and
+    // Hub connectivity warning (see `check_forward_health` and
     // `Forwarder::forward_status`). Same shape and same anti-jitter
     // reasoning as `clock_skew_bad` (the failure kind can flip between
     // calls, e.g. unreachable while the hub restarts, then a bad key once
@@ -195,7 +199,7 @@ impl EngineInner {
     /// `check_replay_autosave` and for the same reason.
     ///
     /// `skew_s` is `None` whenever the forwarder has nothing confirmed to
-    /// report either way (dry run, no hub reachable, or a hub/broker too old
+    /// report either way (dry run, no hub reachable, or a hub too old
     /// to answer with its own clock) - that is deliberately treated as "no
     /// news", not "confirmed fine": a transient probe failure must not
     /// silently clear a real warning that's still true. A station with no
@@ -223,7 +227,7 @@ impl EngineInner {
         }
     }
 
-    /// Re-latch the hub/broker connectivity warning from the forwarder's
+    /// Re-latch the hub connectivity warning from the forwarder's
     /// consecutive-failure tracking (`Forwarder::forward_status`). Same
     /// mechanism as `check_clock_skew` above, including "no reading yet"
     /// (`None`, e.g. dry run or too few failures to be sure) leaving any
@@ -244,14 +248,14 @@ impl EngineInner {
                 let was_bad = bad.take().is_some();
                 drop(bad);
                 if was_bad {
-                    self.log_line("Hub/broker connection recovered.");
+                    self.log_line("Hub connection recovered.");
                 }
             }
         }
     }
 
     /// Called on every tick where there is no forwarder at all (no
-    /// hub/broker configured, or station mode is off): there is nothing to
+    /// hub found, or station mode is off): there is nothing to
     /// compare a clock against or fail to reach, so a warning latched under
     /// a previous configuration must not linger forever.
     pub fn clear_forward_warnings(&self) {
@@ -317,6 +321,7 @@ impl EngineInner {
             "snapshot": annotate_sgg(&self.snapshot.lock().unwrap(), &self.tagdb.map()),
             "hubSnapshot": *self.hub_snapshot.lock().unwrap(),
             "hubUrl": *self.hub_url.lock().unwrap(),
+            "forwardUrl": *self.forward_url.lock().unwrap(),
             "log": self.log.lock().unwrap().iter().cloned().collect::<Vec<_>>(),
             "health": self.dev_health.lock().unwrap().clone().unwrap_or_else(|| json!({
                 "savePath": save.to_string_lossy(),
@@ -531,32 +536,34 @@ fn build(inner: &Arc<EngineInner>) -> Built {
             Err(e) => inner.log_line(&format!("stats setup error: {e}")),
         }
 
-        // Forwarding is OPTIONAL — with no broker/slug it runs local-only
+        // Forwarding is OPTIONAL — with no event slug it runs local-only
         // (scoreboard + files), so it works even without a bracket.
-        let broker = match &hub_pieces {
-            // "both": talk to our own hub over loopback.
-            Some(p) => format!("http://127.0.0.1:{}", p.port),
-            None => cfg.broker.clone(),
-        };
-        if !broker.is_empty() && !cfg.slug.is_empty() {
-            let log_inner = inner.clone();
-            forwarder = Some(Forwarder::new(
-                &broker,
-                &cfg.slug,
-                cfg.station,
-                &inner.out_dir(&cfg),
-                None,
-                cfg.dry_run,
-                if cfg.key.is_empty() {
-                    None
-                } else {
-                    Some(&cfg.key)
-                },
-                Box::new(move |m| log_inner.log_line(m)),
-            ));
+        if !cfg.slug.is_empty() {
+            let hub_url = match &hub_pieces {
+                // "both": talk to our own hub over loopback.
+                Some(p) => Some(format!("http://127.0.0.1:{}", p.port)),
+                // Pure station: the operator's hub is found on the LAN, not
+                // typed in. Nothing found yet is normal (the operator may not
+                // have started theirs) — the loop below keeps looking.
+                None => discover_hub_url(inner, &cfg),
+            };
+            match hub_url {
+                Some(url) => forwarder = Some(make_forwarder(inner, &cfg, &url)),
+                None => {
+                    inner.log_line(
+                        "no hub found on this network yet — games are recorded \
+                         locally; still looking",
+                    );
+                    *inner.forward_url.lock().unwrap() = None;
+                }
+            }
         } else {
-            inner.log_line("local-only: no event/broker configured, nothing is sent");
+            inner.log_line("local-only: no event configured, nothing is sent");
+            *inner.forward_url.lock().unwrap() = None;
         }
+    }
+    if !cfg.is_station() {
+        *inner.forward_url.lock().unwrap() = None;
     }
 
     Built {
@@ -564,6 +571,47 @@ fn build(inner: &Arc<EngineInner>) -> Built {
         forwarder,
         hub_pieces,
     }
+}
+
+/// Build a forwarder posting to `url`, and record the URL for the UI's
+/// Sending chip.
+fn make_forwarder(inner: &Arc<EngineInner>, cfg: &Config, url: &str) -> Forwarder {
+    *inner.forward_url.lock().unwrap() = Some(url.to_string());
+    let log_inner = inner.clone();
+    Forwarder::new(
+        url,
+        &cfg.slug,
+        cfg.station,
+        &inner.out_dir(cfg),
+        None,
+        cfg.dry_run,
+        Box::new(move |m| log_inner.log_line(m)),
+    )
+}
+
+/// Sweep the LAN for the operator's hub. Prefers a hub running this
+/// station's own event when several answer; falls back to the first one.
+/// Blocking (~1-2s of parallel HTTP) — called from the engine loop thread,
+/// never the UI.
+fn discover_hub_url(inner: &Arc<EngineInner>, cfg: &Config) -> Option<String> {
+    let found = station_core::discovery::scan(cfg.hub_port, None);
+    if found.is_empty() {
+        return None;
+    }
+    let slug = station_core::forwarder::normalize_slug(&cfg.slug);
+    let hub = found
+        .iter()
+        .find(|h| h.slug.as_deref() == Some(slug.as_str()))
+        .or_else(|| found.first())?;
+    inner.log_line(&format!(
+        "found the operator's hub at {}{}",
+        hub.url,
+        hub.slug
+            .as_deref()
+            .map(|s| format!(" (running {s})"))
+            .unwrap_or_default()
+    ));
+    Some(hub.url.clone())
 }
 
 /// Create the engine and start its loop thread.
@@ -586,6 +634,7 @@ pub fn start(config_dir: PathBuf) -> Engine {
         snapshot: Mutex::new(json!({ "history": [], "live": null })),
         hub_snapshot: Mutex::new(json!({ "sets": [], "stations": {} })),
         hub_url: Mutex::new(None),
+        forward_url: Mutex::new(None),
         hub: Mutex::new(None),
         armed: AtomicBool::new(false),
         tagdb,
@@ -611,6 +660,10 @@ pub fn start(config_dir: PathBuf) -> Engine {
             forwarder: None,
             hub_pieces: None,
         };
+        // The last LAN sweep for the operator's hub — sweeps are throttled
+        // so a disconnected station isn't scanning the subnet every tick.
+        let mut last_discovery: Option<std::time::Instant> = None;
+        const DISCOVERY_RETRY_S: u64 = 30;
         loop {
             if loop_inner.rebuild.swap(false, Ordering::SeqCst) {
                 // Drop the old pieces first so ports/files release.
@@ -619,11 +672,39 @@ pub fn start(config_dir: PathBuf) -> Engine {
                     p.stop();
                 }
                 built = build(&loop_inner);
+                last_discovery = Some(std::time::Instant::now());
                 loop_inner.emit_state();
             }
             if let Some(p) = &mut built.producer {
                 p.poll();
                 loop_inner.armed.store(p.armed(), Ordering::Relaxed);
+            }
+            // A pure station keeps looking for the operator's hub: nothing
+            // found yet, or the one it had stopped answering (hub restarted
+            // on a new address). Throttled; the sweep itself takes ~1-2s.
+            {
+                let cfg = loop_inner.cfg.lock().unwrap().clone();
+                let pure_station = cfg.is_station() && !cfg.is_operator();
+                let needs_hub = pure_station
+                    && !cfg.slug.is_empty()
+                    && (built.forwarder.is_none()
+                        || built.forwarder.as_ref().is_some_and(|f| f.is_failing()));
+                let due = last_discovery
+                    .map(|t| t.elapsed().as_secs() >= DISCOVERY_RETRY_S)
+                    .unwrap_or(true);
+                if needs_hub && due {
+                    last_discovery = Some(std::time::Instant::now());
+                    if let Some(url) = discover_hub_url(&loop_inner, &cfg) {
+                        let changed = built
+                            .forwarder
+                            .as_ref()
+                            .map(|f| f.hub_url() != url)
+                            .unwrap_or(true);
+                        if changed {
+                            built.forwarder = Some(make_forwarder(&loop_inner, &cfg, &url));
+                        }
+                    }
+                }
             }
             if let Some(f) = &mut built.forwarder {
                 f.tick();
@@ -634,8 +715,8 @@ pub fn start(config_dir: PathBuf) -> Engine {
                 loop_inner.check_forward_health(f.forward_status());
                 loop_inner.check_clock_skew(f.clock_skew_check());
             } else {
-                // No hub/broker configured at all (or station mode is off)
-                // - nothing to compare a clock against or fail to reach.
+                // No hub found yet (or station mode is off) - nothing to
+                // compare a clock against or fail to reach.
                 loop_inner.clear_forward_warnings();
             }
             // mtime-gated, so this is a no-op stat() call on almost every

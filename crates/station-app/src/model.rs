@@ -94,6 +94,10 @@ pub struct EngineState {
     pub hub_snapshot: HubSnapshot,
     #[serde(default, rename = "hubUrl")]
     pub hub_url: Option<String>,
+    /// Where this station's forwarder posts (the discovered LAN hub, or
+    /// loopback in "both" mode); `None` while still looking.
+    #[serde(default, rename = "forwardUrl")]
+    pub forward_url: Option<String>,
     #[serde(default)]
     pub log: Vec<String>,
     #[serde(default)]

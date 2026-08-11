@@ -7,7 +7,7 @@
 //! * [`matching`]    — set/entrant matching (port of broker/worker.js logic)
 //! * [`startgg`]     — token-authed start.gg client (operator only)
 //! * [`hub`]         — LAN hub state machine + `/matchlogger/*` HTTP server
-//! * [`forwarder`]   — station-side POSTs to a hub/broker with dedup state
+//! * [`forwarder`]   — station-side POSTs to the LAN hub with dedup state
 //! * [`tagdb`]       — the public tag database (jugeeya.github.io/tags), cached to disk
 //!
 //! Design note: records, sets, and snapshots are `serde_json::Value` (dynamic

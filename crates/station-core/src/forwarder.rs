@@ -1,17 +1,16 @@
 //! Station-side forwarder — port of `station_sender.py`'s `Sender`.
 //!
-//! Watches the output folder the set machine writes and forwards to a hub (or
-//! the Cloudflare broker — same API), stamping this machine's station number:
+//! Watches the output folder the set machine writes and forwards to the
+//! operator's LAN hub (found by discovery — see `crate::discovery`),
+//! stamping this machine's station number:
 //!
-//! * new  `<dir>/sets/*.json`     -> POST `<broker>/matchlogger/ingest`
-//! * changed `<dir>/current.json` -> POST `<broker>/matchlogger/current`
-//! * changed `<dir>/live.json`    -> POST `<broker>/matchlogger/live`
+//! * new  `<dir>/sets/*.json`     -> POST `<hub>/matchlogger/ingest`
+//! * changed `<dir>/current.json` -> POST `<hub>/matchlogger/current`
+//! * changed `<dir>/live.json`    -> POST `<hub>/matchlogger/live`
 //!
-//! It DOES hold one secret — the shared key — since the running-score push
-//! writes to start.gg automatically, no human involved; it's the same value as
-//! the hub/broker's OPERATOR_KEY, not a separate lower-stakes one. It does NOT
-//! let this station finalize a set on its own — naming a winner always
-//! requires an explicit operator click.
+//! It does NOT let this station finalize a set on its own — naming a winner
+//! always requires an explicit operator click (or the operator's own
+//! auto-report), and both of those happen on the hub.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -24,18 +23,14 @@ use crate::set_machine::LogFn;
 
 const STATE_VERSION: i64 = 1;
 
-/// Classifies why a POST to the hub/broker failed, so the operator sees
-/// *why* nothing is arriving instead of just "something went wrong" - a bad
-/// shared key and an unreachable hub have completely different fixes (check
-/// the Key field vs check the Hub/broker URL and that the hub is running).
+/// Classifies why a POST to the hub failed, so the operator sees *why*
+/// nothing is arriving instead of just "something went wrong".
 #[derive(Debug, Clone, PartialEq)]
 enum ForwardFailureKind {
     /// The request never got a response at all (DNS failure, connection
-    /// refused, timeout) - the hub/broker isn't there or isn't reachable.
+    /// refused, timeout) - the hub isn't there or isn't reachable.
     Unreachable,
-    /// 401/403: the shared key doesn't match the hub/broker's.
-    BadKey,
-    /// Any other non-2xx status.
+    /// Any non-2xx status.
     Http(u16),
 }
 
@@ -43,21 +38,17 @@ impl ForwardFailureKind {
     fn message(&self, endpoint: &str) -> String {
         match self {
             ForwardFailureKind::Unreachable => format!(
-                "cannot reach the hub/broker for {endpoint}: check the Hub/broker URL \
-                 and that the hub is running"
-            ),
-            ForwardFailureKind::BadKey => format!(
-                "the hub/broker rejected the shared key for {endpoint} (401/403): \
-                 check the Key field matches the hub/broker's"
+                "cannot reach the hub for {endpoint}: check that the operator's \
+                 hub is running on this network"
             ),
             ForwardFailureKind::Http(code) => {
-                format!("the hub/broker returned HTTP {code} for {endpoint}")
+                format!("the hub returned HTTP {code} for {endpoint}")
             }
         }
     }
 }
 
-/// Reduce a pasted start.gg event/bracket URL to the broker's event slug.
+/// Reduce a pasted start.gg event/bracket URL to the wire's event slug.
 ///
 /// The wire wants exactly `tournament/<t>/event/<e>`. People naturally paste
 /// the whole URL (with https://www.start.gg/ and a trailing /brackets/… path),
@@ -71,10 +62,9 @@ pub fn normalize_slug(slug: &str) -> String {
 }
 
 pub struct Forwarder {
-    broker: String,
+    hub: String,
     slug: String,
     station: i64,
-    key: Option<String>,
     out_dir: PathBuf,
     sets_dir: PathBuf,
     current_path: PathBuf,
@@ -97,13 +87,12 @@ pub struct Forwarder {
 impl Forwarder {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        broker: &str,
+        hub: &str,
         slug: &str,
         station: i64,
         out_dir: &Path,
         state_path: Option<&Path>,
         dry_run: bool,
-        key: Option<&str>,
         log: LogFn,
     ) -> Self {
         let out_dir = out_dir.to_path_buf();
@@ -111,10 +100,9 @@ impl Forwarder {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| out_dir.join(".station-sender-state.json"));
         let mut f = Self {
-            broker: broker.trim_end_matches('/').to_string(),
+            hub: hub.trim_end_matches('/').to_string(),
             slug: normalize_slug(slug),
             station,
-            key: key.filter(|k| !k.is_empty()).map(|k| k.to_string()),
             sets_dir: out_dir.join("sets"),
             current_path: out_dir.join("current.json"),
             live_path: out_dir.join("live.json"),
@@ -146,6 +134,18 @@ impl Forwarder {
 
     pub fn out_dir(&self) -> &Path {
         &self.out_dir
+    }
+
+    /// The hub URL this forwarder posts to.
+    pub fn hub_url(&self) -> &str {
+        &self.hub
+    }
+
+    /// True once enough consecutive POSTs have failed that the hub is
+    /// probably gone (restarted on a new address, operator machine moved) —
+    /// the engine uses this to trigger a fresh LAN discovery.
+    pub fn is_failing(&self) -> bool {
+        self.consecutive_failures >= Self::FORWARD_FAIL_WARN_THRESHOLD
     }
 
     // -- persistence --------------------------------------------------------
@@ -184,9 +184,6 @@ impl Forwarder {
     // -- work helpers ---------------------------------------------------------
     fn payload(&self, extra: Value) -> Value {
         let mut p = json!({ "slug": self.slug, "station": self.station });
-        if let Some(k) = &self.key {
-            p["key"] = json!(k);
-        }
         if let (Some(obj), Some(ex)) = (p.as_object_mut(), extra.as_object()) {
             for (k, v) in ex {
                 obj.insert(k.clone(), v.clone());
@@ -197,7 +194,7 @@ impl Forwarder {
 
     // -- network --------------------------------------------------------------
     fn post(&mut self, endpoint: &str, payload: &Value) -> bool {
-        let url = format!("{}{}", self.broker, endpoint);
+        let url = format!("{}{}", self.hub, endpoint);
         if self.dry_run {
             let body = serde_json::to_string_pretty(payload).unwrap_or_default();
             (self.log)(&format!(
@@ -224,12 +221,7 @@ impl Forwarder {
             Ok(resp) => {
                 let status = resp.status();
                 (self.log)(&format!("POST {endpoint} -> HTTP {status}"));
-                let kind = if status.as_u16() == 401 || status.as_u16() == 403 {
-                    ForwardFailureKind::BadKey
-                } else {
-                    ForwardFailureKind::Http(status.as_u16())
-                };
-                self.note_failure(kind, endpoint);
+                self.note_failure(ForwardFailureKind::Http(status.as_u16()), endpoint);
                 false
             }
             Err(e) => {
@@ -290,7 +282,7 @@ impl Forwarder {
     /// restart.
     const CLOCK_CHECK_INTERVAL_S: u64 = 60;
 
-    /// Probe the hub/broker's own clock (via `/matchlogger/health`'s
+    /// Probe the hub's own clock (via `/matchlogger/health`'s
     /// `serverTime`) and return this station's skew against it in seconds
     /// (positive = this station is ahead), accounting for request
     /// round-trip so ordinary network latency isn't mistaken for skew - see
@@ -300,10 +292,9 @@ impl Forwarder {
     /// real hub to ask), still within the throttle window (returns the last
     /// known reading instead, so a caller polling every tick doesn't see it
     /// flicker to "unknown" between real probes), the request failed
-    /// (unreachable - indistinguishable here from "no hub configured", which
+    /// (unreachable - indistinguishable here from "no hub found", which
     /// is also nothing to warn about), or the response has no `serverTime`
-    /// field (an older hub, or the Cloudflare broker, neither of which
-    /// implements this).
+    /// field (an older hub that predates it).
     pub fn clock_skew_check(&mut self) -> Option<i64> {
         if self.dry_run {
             return None;
@@ -320,7 +311,7 @@ impl Forwarder {
 
     fn probe_clock_skew(&self) -> Option<i64> {
         let sent = SystemTime::now();
-        let url = format!("{}/matchlogger/health", self.broker);
+        let url = format!("{}/matchlogger/health", self.hub);
         let resp = self.client.get(&url).send().ok()?;
         if !resp.status().is_success() {
             return None;
@@ -502,7 +493,6 @@ mod tests {
             &dir,
             None,
             true, // dry run: post() never touches the network
-            Some("k"),
             Box::new(move |m| l2.lock().unwrap().push(m.to_string())),
         );
         f.tick();
@@ -518,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_carries_slug_station_key() {
+    fn payload_carries_slug_and_station() {
         let dir = std::env::temp_dir().join(format!("fwdtest2_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -529,13 +519,11 @@ mod tests {
             &dir,
             None,
             true,
-            Some("secret"),
             Box::new(|_| {}),
         );
         let p = f.payload(json!({"set": {"a": 1}}));
         assert_eq!(p["slug"], "tournament/t/event/e");
         assert_eq!(p["station"], 7);
-        assert_eq!(p["key"], "secret");
         assert_eq!(p["set"]["a"], 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -559,7 +547,6 @@ mod tests {
             &dir,
             None,
             dry_run,
-            Some("k"),
             Box::new(|_| {}),
         )
     }
@@ -600,24 +587,6 @@ mod tests {
             None,
             "the very next success should clear it, not require a streak of successes"
         );
-    }
-
-    #[test]
-    fn bad_key_and_unreachable_produce_different_messages() {
-        let mut bad_key = test_forwarder(false);
-        for _ in 0..Forwarder::FORWARD_FAIL_WARN_THRESHOLD {
-            bad_key.note_failure(ForwardFailureKind::BadKey, "/matchlogger/current");
-        }
-        let mut unreachable = test_forwarder(false);
-        for _ in 0..Forwarder::FORWARD_FAIL_WARN_THRESHOLD {
-            unreachable.note_failure(ForwardFailureKind::Unreachable, "/matchlogger/current");
-        }
-
-        let key_msg = bad_key.forward_status().unwrap();
-        let unreachable_msg = unreachable.forward_status().unwrap();
-        assert_ne!(key_msg, unreachable_msg);
-        assert!(key_msg.contains("key"), "{key_msg}");
-        assert!(unreachable_msg.contains("reach"), "{unreachable_msg}");
     }
 
     #[test]
@@ -693,7 +662,6 @@ mod tests {
             &dir,
             None,
             false,
-            None,
             Box::new(|_| {}),
         );
         assert_eq!(f.clock_skew_check(), None);

@@ -74,7 +74,6 @@ pub fn build_hub(inner: &Arc<EngineInner>, cfg: &Config) -> Result<HubPieces, St
     let log_inner = inner.clone();
     let snap_inner = inner.clone();
     let hub = Arc::new(Hub::new(
-        Some(&cfg.key),
         (!cfg.startgg_token.is_empty()).then(|| cfg.startgg_token.clone()),
         Some(tag_map),
         // Lowest-precedence alias source — see `Hub::new`'s doc comment for

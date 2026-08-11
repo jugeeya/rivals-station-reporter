@@ -17,8 +17,6 @@ pub enum Msg {
     Mode(String),
     Station(String),
     Slug(String),
-    Broker(String),
-    Key(String),
     Token(String),
     Save(String),
     Replays(String),
@@ -41,19 +39,8 @@ pub enum Msg {
     ApplyUpdate,
     UpdateApplied(Result<(), String>),
     RestartNow,
-    ScanHubs,
-    HubsFound(Vec<FoundHub>),
-    UseHub(String),
     ForgetTag(String),
     TagForgotten(Result<(), String>),
-}
-
-/// One hub the LAN sweep found — url plus what its /health advertises.
-#[derive(Debug, Clone)]
-pub struct FoundHub {
-    pub url: String,
-    pub slug: Option<String>,
-    pub startgg: bool,
 }
 
 #[derive(Default)]
@@ -79,8 +66,6 @@ pub struct State {
     mode: String,
     station: String,
     slug: String,
-    broker: String,
-    key: String,
     token: String,
     save: String,
     replays: String,
@@ -94,9 +79,6 @@ pub struct State {
     saving: bool,
     err: String,
     update: UpdateFlow,
-    scanning: bool,
-    scanned: bool,
-    hubs: Vec<FoundHub>,
     learned: Vec<(String, String)>,
 }
 
@@ -106,8 +88,6 @@ impl State {
             mode: cfg.mode.clone(),
             station: cfg.station.to_string(),
             slug: cfg.slug.clone(),
-            broker: cfg.broker.clone(),
-            key: cfg.key.clone(),
             token: cfg.startgg_token.clone(),
             save: cfg.save.clone(),
             replays: cfg.replays.clone(),
@@ -121,9 +101,6 @@ impl State {
             saving: false,
             err: String::new(),
             update: UpdateFlow::Idle,
-            scanning: false,
-            scanned: false,
-            hubs: Vec::new(),
             learned: commands::learned_tags(engine),
         }
     }
@@ -166,8 +143,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Mode(v) => s.mode = v,
         Msg::Station(v) => s.station = v,
         Msg::Slug(v) => s.slug = v,
-        Msg::Broker(v) => s.broker = v,
-        Msg::Key(v) => s.key = v,
         Msg::Token(v) => s.token = v,
         Msg::Save(v) => s.save = v,
         Msg::Replays(v) => s.replays = v,
@@ -243,8 +218,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 // Accept a full start.gg URL here too — saved as the bare
                 // slug the API actually wants.
                 slug: station_core::forwarder::normalize_slug(s.slug.trim()),
-                broker: s.broker.trim().to_string(),
-                key: s.key.trim().to_string(),
                 startgg_token: s.token.trim().to_string(),
                 save: s.save.trim().to_string(),
                 replays: s.replays.trim().to_string(),
@@ -301,40 +274,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             if let Err(e) = super::updater::restart() {
                 s.update = UpdateFlow::Failed(e);
             }
-        }
-        Msg::ScanHubs => {
-            s.scanning = true;
-            s.hubs.clear();
-            let engine = app.engine.clone();
-            return Task::perform(
-                blocking(move || {
-                    let found = commands::find_hubs(&engine);
-                    found["hubs"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|h| FoundHub {
-                            url: h["url"].as_str().unwrap_or_default().to_string(),
-                            slug: h["slug"].as_str().map(str::to_string),
-                            startgg: h["startgg"].as_bool().unwrap_or(false),
-                        })
-                        .collect::<Vec<_>>()
-                }),
-                |hubs| Message::Settings(Msg::HubsFound(hubs)),
-            );
-        }
-        Msg::HubsFound(hubs) => {
-            s.scanning = false;
-            s.scanned = true;
-            // Exactly one hub on the LAN (the normal case): connect to it
-            // without a second click, same as the web drawer did.
-            if hubs.len() == 1 {
-                s.broker = hubs[0].url.clone();
-            }
-            s.hubs = hubs;
-        }
-        Msg::UseHub(url) => {
-            s.broker = url;
         }
         Msg::ForgetTag(tag) => {
             let engine = app.engine.clone();
@@ -405,61 +344,6 @@ pub fn view<'a>(_app: &'a App, s: &'a State) -> Element<'a, Message> {
     col = col.push(field(
         "start.gg event slug",
         ti("tournament/…/event/…", &s.slug, Msg::Slug).into(),
-    ));
-    if is_station {
-        let mut hub_field = column![
-            label("Hub / broker URL"),
-            row![
-                ti("http://…:8787", &s.broker, Msg::Broker),
-                button(
-                    text(if s.scanning {
-                        "Scanning…"
-                    } else {
-                        "Find hub"
-                    })
-                    .size(12)
-                )
-                .style(theme::button_surface)
-                .padding([7, 10])
-                .on_press_maybe((!s.scanning).then_some(Message::Settings(Msg::ScanHubs))),
-            ]
-            .spacing(6),
-        ]
-        .spacing(4);
-        for h in &s.hubs {
-            let label_txt = format!(
-                "{} · {}{}",
-                h.url,
-                h.slug
-                    .clone()
-                    .unwrap_or_else(|| "no event configured".into()),
-                if h.startgg { "" } else { ", no start.gg token" }
-            );
-            hub_field = hub_field.push(
-                button(text(label_txt).size(11))
-                    .style(theme::button_linkish)
-                    .padding([2, 4])
-                    .on_press(Message::Settings(Msg::UseHub(h.url.clone()))),
-            );
-        }
-        if s.scanned && s.hubs.is_empty() {
-            hub_field = hub_field.push(
-                text("No hub found on this network.")
-                    .size(11)
-                    .color(theme::TEXT_MUTED),
-            );
-        }
-        col = col.push(hub_field);
-    }
-    col = col.push(field(
-        "Shared key",
-        text_input("", &s.key)
-            .style(theme::input)
-            .padding(8)
-            .size(13)
-            .secure(true)
-            .on_input(|v| Message::Settings(Msg::Key(v)))
-            .into(),
     ));
     if is_operator {
         col = col.push(field(

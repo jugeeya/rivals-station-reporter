@@ -30,8 +30,8 @@ BIN="${CARGO_TARGET_DIR:-target}/release/rivals-station-reporter"
 station_config() { # dir station-number
   mkdir -p "$1"
   cat > "$1/config.json" <<EOF
-{"mode":"station","station":$2,"broker":"http://192.168.1.42:8787","slug":"$SLUG",
- "key":"k","startgg_token":"","save":"","replays":"","dir":"","idle":420,"poll":2,
+{"mode":"station","station":$2,"slug":"$SLUG",
+ "startgg_token":"","save":"","replays":"","dir":"","idle":420,"poll":2,
  "hub_port":28787,"dry_run":false,"configured":true}
 EOF
 }
@@ -99,7 +99,7 @@ shot "$WORK/st-fin" "$WORK/fin-seed.json" "" station-finished.png
 # ---- operator console -----------------------------------------------------------
 mkdir -p "$WORK/operator"
 cat > "$WORK/operator/config.json" <<EOF
-{"mode":"operator","station":1,"broker":"","slug":"$SLUG","key":"k","startgg_token":"",
+{"mode":"operator","station":1,"slug":"$SLUG","startgg_token":"",
  "save":"","replays":"","dir":"","idle":420,"poll":2,"hub_port":28788,"dry_run":false,
  "auto_report":false,"configured":true}
 EOF
@@ -119,7 +119,7 @@ RSR_SCROLL=end shot "$WORK/operator" "$WORK/operator/available-seed.json" "" ava
 # chip from ⚠ to ✓.
 mkdir -p "$WORK/bracket"
 cat > "$WORK/bracket/config.json" <<EOF
-{"mode":"operator","station":1,"broker":"","slug":"$SLUG","key":"k",
+{"mode":"operator","station":1,"slug":"$SLUG",
  "startgg_token":"seeded-for-the-screenshot","save":"","replays":"","dir":"",
  "idle":420,"poll":2,"hub_port":28789,"dry_run":false,"configured":true}
 EOF

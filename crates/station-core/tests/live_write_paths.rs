@@ -80,7 +80,6 @@ fn every_write_path_against_a_real_bracket() {
     let state = dir.join("hub-state.json").to_string_lossy().into_owned();
 
     let hub = Hub::new(
-        None,
         Some(token),
         None,
         None,

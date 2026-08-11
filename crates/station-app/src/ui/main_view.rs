@@ -85,19 +85,22 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 "Replays folder not found. Timestamps and slots degrade without it.".into()
             },
         ));
-        let sending_ok =
-            !cfg.slug.is_empty() && (!cfg.broker.is_empty() || app.st.hub_url.is_some());
+        let sending_to = app
+            .st
+            .forward_url
+            .clone()
+            .or_else(|| app.st.hub_url.clone());
         chips = chips.push(chip(
             "Sending",
-            sending_ok,
+            !cfg.slug.is_empty() && sending_to.is_some(),
             cfg.slug.is_empty(),
-            if !cfg.slug.is_empty() {
-                format!(
-                    "Reporting to {}",
-                    app.st.hub_url.clone().unwrap_or_else(|| cfg.broker.clone())
-                )
-            } else {
+            if cfg.slug.is_empty() {
                 "No event configured. Local scoreboard only, nothing is sent.".into()
+            } else {
+                match &sending_to {
+                    Some(url) => format!("Reporting to {url}"),
+                    None => "Looking for the operator's hub on this network…".into(),
+                }
             },
         ));
     }

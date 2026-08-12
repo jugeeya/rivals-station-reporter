@@ -2,40 +2,24 @@
 
 Desktop app for tournament stations running Rivals of Aether II: it watches
 the game's stats save + replays, reconstructs each set as it's played, and
-reports live scores to your bracket — same stack and look as the
-[Rivals 2 Tag Tool](https://github.com/jugeeya/rivals-2-tag-tool)
-(Tauri 2 + Vue 3, Rust core).
-
-This is the Rust rewrite of the Python station reporter that lived in
-[`jugeeya.github.io/matchlogger/sender/`](https://github.com/jugeeya/jugeeya.github.io/tree/main/matchlogger/sender)
-— one installer instead of a Python install, a real UI instead of a Tk
-widget. The full design is in `rivals-station-reporter-architecture.md`
-(kept alongside this repo).
+reports live scores to your bracket. It also includes the [Tag Installer](#tag-installer) and [VOD Splitter](#vod-splitter)!
 
 ## What each PC runs
 
-- **Station** — a PC people play on. Watches
-  `Rivals2_StatsSaveSlot.sav` + the `Replays` folder (no game mod, no
-  injection), rebuilds each game/set, and forwards them to the hub with this
+- **Station:** a PC people play on. Watches
+  `Rivals2_StatsSaveSlot.sav` + the `Replays` folder, rebuilds each game/set, and forwards them to the operator hub with this
   station's number.
-- **Operator** — the TO machine. Runs the LAN hub every station posts to and
-  is the only PC that talks to start.gg (the API token never leaves it).
+- **Operator:** the TO machine. Runs the LAN hub every station posts to and
+  is the only PC that talks to start.gg.
   Gets the all-stations console: live scores stream to the bracket
   automatically, and a set that finishes **unambiguously** reports itself (see
-  Auto-report — on by default, and strict about what qualifies). Anything it
+  [Auto-report](#auto-report)). Anything it
   can't be sure of still waits for your click, and anything it got wrong is
   fixable after the fact with `edit result`.
-- **Both** — one PC doing both jobs.
+- **Both:** one PC doing both jobs.
 
-The hub speaks the same `/matchlogger/*` HTTP API the old Cloudflare broker
-defined (`jugeeya.github.io/broker/worker.js`), and
-old Python stations interoperate with a Rust hub (and vice versa) during
-migration. Online/ranked ladder games are detected via the save's game mode
+Online/ranked ladder games are detected via the save's game mode
 and never touch the bracket.
-
-Every screenshot below is sample data, not a live event — the NATIVE app
-(Iced), captured by the app itself. `./scripts/screenshots/native.sh`
-regenerates all of them (see Development).
 
 ## Setup
 
@@ -44,12 +28,7 @@ regenerates all of them (see Development).
 | **First run** | **Settings**, any time after |
 | pick what this PC is | everything else, without restarting |
 
-First run: pick what this PC is; everything else is auto-detected or
-validated inline. Settings covers mode, event, hub (found by LAN
-auto-discovery), paths, auto-report and the update checker — all editable
-while sets are being played.
-
-## The operator screen
+## Operator Screen
 
 | [<img src="docs/screenshots/operator-console.png" width="400">](docs/screenshots/operator-console.png) | [<img src="docs/screenshots/available-sets.png" width="400">](docs/screenshots/available-sets.png) |
 |:--:|:--:|
@@ -58,12 +37,8 @@ while sets are being played.
 
 The console watches three stations at once: live sets grouped separately from
 finished-and-unreported ones, elapsed time and best-of taken from start.gg's
-own data when present (station 1 reads 18m and "first to 4" from the bracket,
-not the station's local guess), a per-game character strip with each game's
-winner ringed, and the tag-to-entrant mapping the hub would actually report,
-per player. Station 3's set is finished and awaiting a report — with
-auto-report on it would already have gone out; `edit result` corrects a set's
-games, characters and score whether or not it has.
+own data when present, a per-game character/winner data series, and the tag-to-entrant mapping the hub would actually report,
+per player.
 
 Below it, Current Sets shows everything start.gg's bracket has happening
 right now, across the whole event. Playing-now and startable sets are grouped
@@ -90,44 +65,7 @@ lines drawn in, so it reads as a bracket rather than a grid of rounds.
 | dimmed | finished; the winner's tag is green and their score bold |
 | `—` seats | still waiting on an earlier round |
 
-The station (`St 2`) shows only on sets that haven't finished — on a played
-set it's history, on an upcoming one it's where to walk. Selecting a set
-opens the bar underneath, offering only what that set can accept:
-
-- **Not called yet, or live:** separate station and stream pickers (a set can
-  sit at a station and on a stream at once), Start match / Re-call, and the
-  two winner buttons. Both pickers start on where start.gg already has the
-  set, so calling it without touching them moves nothing. The stream picker
-  hides itself at tournaments with no stream setups.
-- **Already reported:** who advanced, plus **Change result** — this is the
-  one place in the app that can fix such a set, since the operator console
-  can only correct sets one of *its* stations recorded, and by top 8 the
-  results worth fixing are usually on sets no station saw. It takes a second
-  click on purpose (it resets the set on start.gg first), and says plainly
-  that rounds already played out of that set keep their results.
-
-**Before anyone calls the first match**, start.gg holds the sets as
-placeholders (middle shot). Starting any one of them materialises the whole
-phase — the same thing start.gg's own page does — and the app rebinds to the
-real set ids it gets back. Reporting is the one thing that needs the bracket
-live first, so the bar offers Start match and says why the winner buttons
-aren't there.
-
-Reading the bracket needs **no API token** — it uses start.gg's public
-website endpoint, so a station PC can pull the tree up too (its action bar
-just says why it's read-only there). Writing does: stations, streams, Start
-match (`markSetInProgress`) and reporting all go through the operator's token,
-and only ever from an explicit click — the cards themselves carry no write, so
-panning around a bracket can't advance anyone.
-
-Reporting from here sends the winner alone, with no per-game data — that's
-the difference from the operator console's Report button, which reports a set
-a station actually tracked and carries its character data up with it. Prefer
-the console for sets your stations covered; use this for everything else
-(an untracked setup, a DQ, a set someone played before the reporter was up,
-a result that needs changing after the fact).
-
-## A station, over one evening
+## Station Screen
 
 | [<img src="docs/screenshots/station-idle.png" width="270">](docs/screenshots/station-idle.png) | [<img src="docs/screenshots/station-live.png" width="270">](docs/screenshots/station-live.png) | [<img src="docs/screenshots/station-finished.png" width="270">](docs/screenshots/station-finished.png) |
 |:--:|:--:|:--:|
@@ -148,11 +86,7 @@ operator's hub.
 
 On by default (Settings, operator only). A set that finishes reports itself
 on start.gg within a few seconds, instead of waiting for a Report click.
-
-There is deliberately **no hold-off**. A waiting period only helps if someone
-is watching the console at that moment, and it delays every correct result —
-the overwhelming majority — to hedge against the rare wrong one. Wrong ones
-are fixed after the fact instead (see below).
+Wrong results can be fixed after the fact instead (see [below](#correcting-a-result)).
 
 What still waits for you is anything the hub can't be sure about. A set
 reports itself only when **all** of the following hold:
@@ -167,68 +101,33 @@ reports itself only when **all** of the following hold:
   good enough to pre-select for you; it is nowhere near good enough to
   advance a bracket unwatched.
 
-A bracket that hasn't been **started** on start.gg yet is handled too. Its
-sets are placeholders there, but starting any one of them from the Bracket
-screen (or Current Sets) materialises the whole phase — the same thing
-start.gg's own page does when you hit Start Match on an unstarted bracket —
-and the app rebinds to the real set ids it gets back. The Bracket screen
-notes the state so you know the first Start Match will do it. Reporting is
-the one thing that still needs the bracket live first, since a placeholder
-set has no id to report against.
-
-Anything short of that behaves exactly as before and waits for a click.
-Dry-run disables auto-report entirely. Auto-reported sets are labelled as
-such on the row, and the write goes through exactly the same path as the
-button — same rebind, same already-reported-elsewhere check immediately
-before the write, same per-game character data.
-
 ### Correcting a result
 
 The station reads results out of the game's own save data, which is right
 almost always and wrong in ways it can't detect: a game the save never
 recorded, a mis-read character, a set the idle timer cut short. `edit result`
-on any row — **including one that already reported** — opens the games, one
+on any row (including one that already reported) opens the games, one
 line each with who won and what both players picked, plus add/remove game.
 The score, the winner and the game count are all *derived* from those lines,
 so they can't end up disagreeing with each other or with what start.gg is
 told.
 
-On a set that already went out, the button reads **Save & re-report**:
-start.gg won't accept a second result for a completed set, so the correction
-resets the set there first and then reports the new one. The reset does not
-cascade to dependent sets — fixing one score must not unseed rounds that have
-already been played. If your correction changes who *won*, the rounds below
-it are wrong too and need fixing on start.gg's own page.
-
-A correction survives the station re-ingesting the set (which has no idea you
-changed anything), and a 1–1 correction won't save: a set needs a winner.
-
 ## Tag Installer
-
-Before the bracket, pull every entrant's saved tag — name, colors, controls — from
-the community tag database
-([jugeeya.github.io/tags](https://jugeeya.github.io/tags/)) and install them into this setup's own Rivals 2 save. Paste the bracket URL
-and Find: entrants are matched to published tags by their start.gg account
-(never by name), matches are selected in one go, and whoever has nothing
-published is listed so you know before they walk up. Installs check
-save-format compatibility, overwrite same-named tags by default, never touch
-slot 0 (the setup owner's tag), and rename to the start.gg tag when two
-people share an in-game name so both land. Local `.r2tag` files install the
-same way. Every row has a "changes" expander — an Option | Old | New table
-(same field list as the website's "View changes") showing exactly what
-installing would alter, compared against the same-name tag already in this
-save, or against the default settings when it's new here.
 
 ![Tag Installer](docs/screenshots/tag-installer.png)
 
-The Tag Installer, before the bracket: one Find against the event URL matched
-four entrants' published tags (selected, marked "bracket") and named the two
-entrants with nothing published. KAZE's row is expanded to its changes table
-— what installing alters versus the KAZE already in this save, per option.
-Install writes them into the game's own tag save on this setup — names,
-colors, and controls, no in-game retyping.
+Before the bracket, pull every entrant's saved tag from
+the community tag database
+([jugeeya.github.io/tags](https://jugeeya.github.io/tags/)) and install them into this setup's own Rivals 2 save. 
+
+1. Paste the bracket URL and click `Find`
+2. Entrants are matched to published tags by their start.gg account
+3. You can view each tag's individual changes
+4. Install those tags to this setup with `Install X tag(s)...`
 
 ## VOD Splitter
+
+![VOD Splitter](docs/screenshots/vod-splitter.png)
 
 Point it at a station's full OBS recording after the event and it cuts one clip per set,
 named `[Tournament] P1 (Char) vs. P2 (Char) - Round`. It fetches the
@@ -251,17 +150,6 @@ Filenames come out like
 This works very well for single-stream setups and multi-recording setups
 alike — it was built for [The Hangout](https://start.gg/thehangout), which
 runs 4 recording setups to capture all winners-side and top 8 sets.
-
-![VOD Splitter](docs/screenshots/vod-splitter.png)
-
-The VOD Splitter, after the event: station 3's recording cut into one clip
-per set, with real preview frames at each edge and ±nudge buttons. Sets the
-station recorded carry a green ⏱ station mark — their edges come from the
-station's own measurements and rarely need touching — while the flagged row
-shows the failure mode the warning exists for: start.gg never got a proper
-end time, so the clip runs 57 minutes. Split in place with ffmpeg (lossless
-stream copy), or export the cut list as CSV (LosslessCut), JSON, or a shell
-script.
 
 ### What to do during your tournament
 

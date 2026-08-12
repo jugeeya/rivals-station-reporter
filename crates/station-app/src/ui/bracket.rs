@@ -35,8 +35,9 @@ const COLUMN_GAP: f32 = 28.0;
 const CARD_GAP: f32 = 12.0;
 /// One layout row: a card plus the gap under it.
 const PITCH: f32 = CARD_H + CARD_GAP;
-/// The picker entry that leaves a set where start.gg already has it.
+/// The picker entries that leave a set's destination as start.gg has it.
 const NO_STATION: &str = "leave station as is";
+const NO_STREAM: &str = "leave stream as is";
 
 #[derive(Debug, Clone)]
 pub enum Msg {
@@ -46,9 +47,16 @@ pub enum Msg {
     Select(String),
     Deselect,
     PickStation(String),
+    PickStream(String),
     StartMatch,
     /// Finalize the selected set with this entrant id as the winner.
     Report(String),
+    /// Reveal (or hide) the winner buttons on a set the bracket already has a
+    /// result for. Deliberately a second click: re-reporting resets the set on
+    /// start.gg, so it must never be one stray tap away.
+    ToggleChangeResult,
+    /// Replace an already-reported result with this entrant as the winner.
+    Rereport(String),
     ActionDone(Box<Result<String, String>>),
     Close,
 }
@@ -64,6 +72,9 @@ pub struct State {
     /// Selected set id, the one the action bar acts on.
     pub selected: Option<String>,
     pub picked_station: Option<String>,
+    pub picked_stream: Option<String>,
+    /// The selected set is reported and the operator asked to change it.
+    pub changing_result: bool,
     pub busy: bool,
     pub action_msg: String,
     pub action_err: bool,
@@ -83,6 +94,25 @@ impl State {
             .as_deref()
             .and_then(|v| v.strip_prefix("Station "))
             .and_then(|v| v.parse().ok())
+    }
+
+    /// Same for the stream setup. Both halves are independent: a set can be
+    /// on a station AND on a stream at once (see `Destination::from_parts`).
+    fn stream_choice(&self) -> Option<String> {
+        self.picked_stream
+            .as_deref()
+            .and_then(|v| v.strip_prefix("Stream: "))
+            .map(str::to_string)
+    }
+
+    /// Seed both pickers from where start.gg already has this set, so acting
+    /// without touching them is a no-op reassignment rather than a move.
+    fn seed_pickers(&mut self) {
+        let set = self.selected_set();
+        let station = set.and_then(|s| s.station);
+        let stream = set.and_then(|s| s.stream.clone()).filter(|s| !s.is_empty());
+        self.picked_station = station.map(|n| format!("Station {n}"));
+        self.picked_stream = stream.map(|s| format!("Stream: {s}"));
     }
 }
 
@@ -159,12 +189,14 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                         if let Some(g) = &st.group {
                             if let Some(s) = layout::set_needing_attention(&b, &g.id) {
                                 st.selected = Some(s.id.clone());
-                                st.picked_station = s.station.map(|n| format!("Station {n}"));
                             }
                         }
                     }
                     st.bracket = Some(b);
                     st.load_err.clear();
+                    // After the tree lands, so the pickers read the freshly
+                    // fetched assignment rather than the one they were on.
+                    st.seed_pickers();
                 }
                 Err(e) => {
                     st.load_err = e;
@@ -176,6 +208,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::PickGroup(key) => {
             app.bracket.group = Some(key);
             app.bracket.selected = None;
+            app.bracket.changing_result = false;
             Task::none()
         }
         Msg::Select(id) => {
@@ -185,23 +218,32 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 st.selected = None;
             } else {
                 st.selected = Some(id);
-                // Seed the picker from where start.gg already has this set, so
-                // Start Match without touching it is a no-op reassignment.
-                st.picked_station = st
-                    .selected_set()
-                    .and_then(|s| s.station)
-                    .map(|n| format!("Station {n}"));
+                st.seed_pickers();
             }
+            // A different set's result is not the one the operator just asked
+            // to change.
+            st.changing_result = false;
             st.action_msg.clear();
             st.action_err = false;
             Task::none()
         }
         Msg::Deselect => {
             app.bracket.selected = None;
+            app.bracket.changing_result = false;
             Task::none()
         }
         Msg::PickStation(v) => {
             app.bracket.picked_station = (v != NO_STATION).then_some(v);
+            Task::none()
+        }
+        Msg::PickStream(v) => {
+            app.bracket.picked_stream = (v != NO_STREAM).then_some(v);
+            Task::none()
+        }
+        Msg::ToggleChangeResult => {
+            app.bracket.changing_result = !app.bracket.changing_result;
+            app.bracket.action_msg.clear();
+            app.bracket.action_err = false;
             Task::none()
         }
         Msg::StartMatch => {
@@ -210,15 +252,19 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             };
             let id = set.id.clone();
             let station = app.bracket.station_choice();
+            let stream = app.bracket.stream_choice();
             app.bracket.busy = true;
             app.bracket.action_msg.clear();
             let engine = app.engine.clone();
             Task::perform(
                 blocking(move || {
-                    commands::start_match(&engine, &id, station, None).map(|_| match station {
-                        Some(n) => format!("Called to station {n}."),
-                        None => "Match started.".to_string(),
-                    })
+                    let told = match (station, stream.clone()) {
+                        (Some(n), Some(s)) => format!("Called to station {n}, on {s}."),
+                        (Some(n), None) => format!("Called to station {n}."),
+                        (None, Some(s)) => format!("Put on {s}."),
+                        (None, None) => "Match started.".to_string(),
+                    };
+                    commands::start_match(&engine, &id, station, stream).map(|_| told)
                 }),
                 |r| Message::Bracket(Msg::ActionDone(Box::new(r))),
             )
@@ -245,6 +291,28 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 |r| Message::Bracket(Msg::ActionDone(Box::new(r))),
             )
         }
+        Msg::Rereport(winner_id) => {
+            let Some(set) = app.bracket.selected_set() else {
+                return Task::none();
+            };
+            let id = set.id.clone();
+            let winner_name = set
+                .slots
+                .iter()
+                .find(|s| s.entrant_id.as_deref() == Some(winner_id.as_str()))
+                .and_then(|s| s.name.clone())
+                .unwrap_or_else(|| "winner".into());
+            app.bracket.busy = true;
+            app.bracket.action_msg.clear();
+            let engine = app.engine.clone();
+            Task::perform(
+                blocking(move || {
+                    commands::rereport_bracket_set(&engine, &id, &json!(winner_id))
+                        .map(|_| format!("Result changed — {winner_name} advances."))
+                }),
+                |r| Message::Bracket(Msg::ActionDone(Box::new(r))),
+            )
+        }
         Msg::ActionDone(result) => {
             let st = &mut app.bracket;
             st.busy = false;
@@ -252,6 +320,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 Ok(msg) => {
                     st.action_msg = msg;
                     st.action_err = false;
+                    // Whatever was being changed is changed; don't leave the
+                    // winner buttons open over a fresh result.
+                    st.changing_result = false;
                     // The tree just changed underneath us — an advanced set
                     // seeds the next round, so re-read rather than patch.
                     refresh(app)
@@ -273,10 +344,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
 /// an engine behind it — the same reason the other screens take `&State`.
 pub struct Ctx {
     pub now_s: i64,
-    /// Station numbers for the action bar's picker, from the Current Sets read.
-    pub stations: Vec<i64>,
     /// Why this install can't act on the bracket at all, if it can't. Set-level
-    /// reasons (already reported, waiting on a round) are decided per set.
+    /// reasons (waiting on a round) are decided per set.
     pub blocked: Option<String>,
 }
 
@@ -285,13 +354,6 @@ impl Ctx {
         let cfg = &app.st.config;
         Self {
             now_s: app.now_s,
-            stations: app
-                .current_sets
-                .data
-                .stations
-                .iter()
-                .map(|s| s.number)
-                .collect(),
             blocked: if !cfg.configured || cfg.mode == "station" {
                 Some("Bracket actions run on the operator PC.".into())
             } else if cfg.startgg_token.is_empty() {
@@ -705,6 +767,15 @@ pub struct Seed {
     /// `set_needing_attention` choose.
     #[serde(default)]
     pub selected: Option<String>,
+    /// Open the winner buttons on an already-reported selected set, as if the
+    /// operator had clicked "Change result".
+    #[serde(default)]
+    pub changing_result: bool,
+    /// The tournament's stations and streams, for the action bar's pickers.
+    #[serde(default)]
+    pub stations: Vec<i64>,
+    #[serde(default)]
+    pub streams: Vec<String>,
     #[serde(default)]
     pub sets: Vec<SeedSet>,
 }
@@ -798,6 +869,8 @@ pub fn apply_seed(app: &mut App, seed: Seed) {
     let bracket = Bracket {
         event_name: seed.event_name,
         tournament_name: seed.tournament_name,
+        stations: seed.stations,
+        streams: seed.streams,
         sets,
     };
     let st = &mut app.bracket;
@@ -808,15 +881,11 @@ pub fn apply_seed(app: &mut App, seed: Seed) {
             .and_then(|g| layout::set_needing_attention(&bracket, &g.id))
             .map(|s| s.id.clone())
     });
-    st.picked_station = st
-        .selected
-        .as_deref()
-        .and_then(|id| bracket.sets.iter().find(|s| s.id == id))
-        .and_then(|s| s.station)
-        .map(|n| format!("Station {n}"));
     st.bracket = Some(bracket);
     st.loading = false;
     st.load_err.clear();
+    st.changing_result = seed.changing_result;
+    st.seed_pickers();
 }
 
 /// The one place in this screen that writes to start.gg. Only appears for a
@@ -894,80 +963,22 @@ fn action_bar<'a>(st: &'a State, ctx: &Ctx) -> Option<Element<'a, Msg>> {
             .on_press(Msg::Deselect),
     );
 
-    // Why this set can't be acted on, if it can't. Said once, plainly, rather
-    // than leaving a row of dead buttons to explain itself.
-    let blocked = if let Some(why) = &ctx.blocked {
-        Some(why.clone())
+    // Whether this install can write to the bracket at all is a property of
+    // the install, said once, plainly. What a PARTICULAR set can accept is
+    // then decided per set below.
+    // Always `Some` here — `selected_set` above resolved through it.
+    let bracket = st.bracket.as_ref()?;
+    let actions: Element<'_, Msg> = if let Some(why) = &ctx.blocked {
+        text(why.clone()).size(12).color(theme::TEXT_MUTED).into()
     } else if set.is_complete() {
-        Some("Already reported.".to_string())
+        reported_actions(st, set)
     } else if !set.is_ready() {
-        Some("Waiting on an earlier round.".to_string())
+        text("Waiting on an earlier round.")
+            .size(12)
+            .color(theme::TEXT_MUTED)
+            .into()
     } else {
-        None
-    };
-
-    let actions: Element<'_, Msg> = match &blocked {
-        Some(why) => text(why.clone()).size(12).color(theme::TEXT_MUTED).into(),
-        None => {
-            let mut options: Vec<String> = vec![NO_STATION.to_string()];
-            options.extend(ctx.stations.iter().map(|n| format!("Station {n}")));
-            let mut r = row![
-                pick_list(
-                    options,
-                    Some(
-                        st.picked_station
-                            .clone()
-                            .unwrap_or_else(|| NO_STATION.to_string())
-                    ),
-                    Msg::PickStation,
-                )
-                .text_size(13)
-                .style(theme::pick_list_style)
-                .menu_style(theme::pick_list_menu),
-                button(
-                    text(if set.is_ongoing() {
-                        "Re-call"
-                    } else {
-                        "Start match"
-                    })
-                    .size(13)
-                )
-                .style(theme::button_surface)
-                .on_press_maybe((!st.busy).then_some(Msg::StartMatch)),
-                Space::new().width(Length::Fixed(12.0)),
-                text(theme::tracked(if set.preview { "" } else { "Winner" }))
-                    .size(10)
-                    .font(theme::FONT_BODY_SEMIBOLD)
-                    .color(theme::TEXT_MUTED),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center);
-            if set.preview {
-                // The set has no id on start.gg to report against yet.
-                // Starting it (above) is what gives it one — and starts the
-                // whole bracket — so say that instead of offering a button
-                // that could only fail.
-                r = r.push(
-                    text("start it first — the bracket isn't live on start.gg yet")
-                        .size(12)
-                        .color(theme::TEXT_MUTED),
-                );
-            }
-            for slot in &set.slots {
-                let (Some(id), Some(name)) = (slot.entrant_id.clone(), slot.name.clone()) else {
-                    continue;
-                };
-                if set.preview {
-                    break;
-                }
-                r = r.push(
-                    button(text(name).size(13))
-                        .style(theme::button_primary_rich)
-                        .on_press_maybe((!st.busy).then_some(Msg::Report(id))),
-                );
-            }
-            r.into()
-        }
+        callable_actions(st, set, bracket)
     };
 
     Some(
@@ -977,6 +988,169 @@ fn action_bar<'a>(st: &'a State, ctx: &Ctx) -> Option<Element<'a, Msg>> {
             .width(Length::Fill)
             .into(),
     )
+}
+
+/// A set the bracket already has a result for.
+///
+/// This is the one place in the app that can fix such a set: the operator
+/// console can only correct sets one of ITS stations recorded, and by top 8
+/// the results worth fixing are usually on sets no station saw — a stream
+/// setup, a phone report, or an auto-report that read a tag wrong. So the
+/// bracket offers it, behind a deliberate second click.
+fn reported_actions<'a>(st: &'a State, set: &'a BracketSet) -> Element<'a, Msg> {
+    let winner = set
+        .winner_slot()
+        .and_then(|i| set.slots[i].name.clone())
+        .unwrap_or_else(|| "someone".into());
+
+    if !st.changing_result {
+        return row![
+            text(format!("Reported — {winner} advanced."))
+                .size(12)
+                .color(theme::TEXT_MUTED),
+            button(text("Change result").size(12))
+                .style(theme::button_surface)
+                .on_press(Msg::ToggleChangeResult),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into();
+    }
+
+    let mut picks = row![text(theme::tracked("New winner"))
+        .size(10)
+        .font(theme::FONT_BODY_SEMIBOLD)
+        .color(theme::TEXT_MUTED)]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    for (i, slot) in set.slots.iter().enumerate() {
+        let (Some(id), Some(name)) = (slot.entrant_id.clone(), slot.name.clone()) else {
+            continue;
+        };
+        // Re-picking whoever already won only rewrites the same result, so the
+        // OTHER seat is the action actually on offer here — and reads that way.
+        let already_won = set.winner_slot() == Some(i);
+        picks = picks.push(
+            button(text(name).size(13))
+                .style(if already_won {
+                    theme::button_surface
+                } else {
+                    theme::button_primary_rich
+                })
+                .on_press_maybe((!st.busy).then_some(Msg::Rereport(id))),
+        );
+    }
+    picks = picks.push(
+        button(text("Cancel").size(12))
+            .style(theme::button_linkish)
+            .on_press(Msg::ToggleChangeResult),
+    );
+
+    column![
+        picks,
+        // The one consequence that isn't undone for you: `resetSet` is called
+        // without `resetDependentSets`, on purpose, so a corrected score can't
+        // silently unseed rounds that have already been played.
+        text(
+            "Resets the set on start.gg, then reports the new winner. Later rounds already \
+             played out of this set keep their results — fix those here too if they changed."
+        )
+        .size(11)
+        .color(theme::TEXT_WARNING),
+    ]
+    .spacing(6)
+    .into()
+}
+
+/// A set that can still be called, moved, or reported for the first time.
+fn callable_actions<'a>(
+    st: &'a State,
+    set: &'a BracketSet,
+    bracket: &'a Bracket,
+) -> Element<'a, Msg> {
+    let mut station_opts: Vec<String> = vec![NO_STATION.to_string()];
+    station_opts.extend(bracket.stations.iter().map(|n| format!("Station {n}")));
+    let mut r = row![pick_list(
+        station_opts,
+        Some(
+            st.picked_station
+                .clone()
+                .unwrap_or_else(|| NO_STATION.to_string())
+        ),
+        Msg::PickStation,
+    )
+    .text_size(13)
+    .style(theme::pick_list_style)
+    .menu_style(theme::pick_list_menu)]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    // Stream picker only when the tournament actually has stream setups —
+    // most locals don't, and an empty dropdown is just a thing to wonder about.
+    // Separate from the station picker because a set can be on both at once.
+    if !bracket.streams.is_empty() {
+        let mut stream_opts: Vec<String> = vec![NO_STREAM.to_string()];
+        stream_opts.extend(bracket.streams.iter().map(|s| format!("Stream: {s}")));
+        r = r.push(
+            pick_list(
+                stream_opts,
+                Some(
+                    st.picked_stream
+                        .clone()
+                        .unwrap_or_else(|| NO_STREAM.to_string()),
+                ),
+                Msg::PickStream,
+            )
+            .text_size(13)
+            .style(theme::pick_list_style)
+            .menu_style(theme::pick_list_menu),
+        );
+    }
+
+    r = r.push(
+        button(
+            text(if set.is_ongoing() {
+                "Re-call"
+            } else {
+                "Start match"
+            })
+            .size(13),
+        )
+        .style(theme::button_surface)
+        .on_press_maybe((!st.busy).then_some(Msg::StartMatch)),
+    );
+    r = r.push(Space::new().width(Length::Fixed(12.0)));
+
+    if set.preview {
+        // The set has no id on start.gg to report against yet. Starting it
+        // (above) is what gives it one — and starts the whole bracket — so say
+        // that instead of offering a button that could only fail.
+        return r
+            .push(
+                text("start it first — the bracket isn't live on start.gg yet")
+                    .size(12)
+                    .color(theme::TEXT_MUTED),
+            )
+            .into();
+    }
+
+    r = r.push(
+        text(theme::tracked("Winner"))
+            .size(10)
+            .font(theme::FONT_BODY_SEMIBOLD)
+            .color(theme::TEXT_MUTED),
+    );
+    for slot in &set.slots {
+        let (Some(id), Some(name)) = (slot.entrant_id.clone(), slot.name.clone()) else {
+            continue;
+        };
+        r = r.push(
+            button(text(name).size(13))
+                .style(theme::button_primary_rich)
+                .on_press_maybe((!st.busy).then_some(Msg::Report(id))),
+        );
+    }
+    r.into()
 }
 
 #[cfg(test)]
@@ -990,6 +1164,9 @@ mod tests {
             event_name: "Rivals 2 Singles".into(),
             tournament_name: "The Hangout #47".into(),
             selected: Some("w-g".into()),
+            changing_result: false,
+            stations: vec![1, 2, 3],
+            streams: vec!["socalrivals".into()],
             sets: vec![
                 SeedSet {
                     id: "w-c".into(),
@@ -1077,20 +1254,23 @@ mod tests {
         let bracket = Bracket {
             event_name: seed.event_name,
             tournament_name: seed.tournament_name,
+            stations: seed.stations,
+            streams: seed.streams,
             sets,
         };
-        State {
+        let mut st = State {
             group: layout::groups_of(&bracket).into_iter().next(),
             selected: seed.selected,
             bracket: Some(bracket),
             ..State::default()
-        }
+        };
+        st.seed_pickers();
+        st
     }
 
     fn ctx(blocked: Option<&str>) -> Ctx {
         Ctx {
             now_s: 1_786_000_000,
-            stations: vec![1, 2, 3],
             blocked: blocked.map(str::to_string),
         }
     }
@@ -1130,6 +1310,90 @@ mod tests {
         );
     }
 
+    /// Both halves of a destination are independent — a set can be at a
+    /// station AND on a stream — and both pickers seed from where start.gg
+    /// already has the set, so acting without touching them moves nothing.
+    #[test]
+    fn both_pickers_seed_from_the_selected_set() {
+        let mut st = seeded();
+        // The live Semi-Final is on station 2, no stream.
+        assert_eq!(st.picked_station.as_deref(), Some("Station 2"));
+        assert_eq!(st.picked_stream, None);
+        assert_eq!(st.station_choice(), Some(2));
+        assert_eq!(st.stream_choice(), None);
+
+        // A set that start.gg has on a stream seeds that half too.
+        st.bracket.as_mut().unwrap().sets[1].stream = Some("socalrivals".into());
+        st.seed_pickers();
+        assert_eq!(st.picked_stream.as_deref(), Some("Stream: socalrivals"));
+        assert_eq!(st.stream_choice().as_deref(), Some("socalrivals"));
+    }
+
+    /// "Leave it as is" has to mean "send nothing for that half", or every
+    /// call would clobber the other one.
+    #[test]
+    fn leaving_a_half_alone_sends_nothing_for_it() {
+        let mut st = seeded();
+        st.picked_station = None;
+        st.picked_stream = None;
+        assert_eq!(st.station_choice(), None);
+        assert_eq!(st.stream_choice(), None);
+    }
+
+    #[test]
+    fn a_tournament_with_no_streams_still_renders_its_callable_set() {
+        // The stream picker hides itself when there are no stream setups —
+        // an empty dropdown is just a thing to wonder about. `pick_list`
+        // content isn't reachable through `find`, so what this pins is that
+        // both shapes render at all, either side of that branch.
+        let mut st = seeded();
+        assert!(!st.bracket.as_ref().unwrap().streams.is_empty());
+        {
+            let mut ui = iced_test::simulator(screen(&st, &ctx(None)));
+            assert!(ui.find("Re-call").is_ok());
+        }
+
+        st.bracket.as_mut().unwrap().streams.clear();
+        let mut ui = iced_test::simulator(screen(&st, &ctx(None)));
+        assert!(ui.find("Re-call").is_ok());
+    }
+
+    #[test]
+    fn a_reported_set_can_have_its_result_changed_in_two_clicks() {
+        // The whole point: by top 8 the results worth fixing are on sets no
+        // station recorded, so the console can't touch them — the bracket can.
+        let mut st = seeded();
+        st.selected = Some("w-c".into()); // completed, jugeeya beat Marsh
+        {
+            let mut ui = iced_test::simulator(screen(&st, &ctx(None)));
+            assert!(ui.find("Reported — jugeeya advanced.").is_ok());
+            assert!(ui.find("Change result").is_ok());
+            assert!(
+                ui.find("Cancel").is_err(),
+                "resetting a reported set is never one stray tap away"
+            );
+        }
+
+        st.changing_result = true;
+        let mut ui = iced_test::simulator(screen(&st, &ctx(None)));
+        assert!(
+            ui.find("Marsh").is_ok(),
+            "the seat that didn't win is the offer"
+        );
+        assert!(
+            ui.find("Cancel").is_ok(),
+            "and backing out doesn't require picking someone"
+        );
+        assert!(
+            ui.find(
+                "Resets the set on start.gg, then reports the new winner. Later rounds already \
+                 played out of this set keep their results — fix those here too if they changed."
+            )
+            .is_ok(),
+            "the one consequence that isn't undone for you is stated"
+        );
+    }
+
     #[test]
     fn a_station_install_sees_the_tree_but_cannot_act() {
         // Reading is unauthenticated, so the bracket itself still renders;
@@ -1143,5 +1407,15 @@ mod tests {
         assert!(ui.find("Bracket actions run on the operator PC.").is_ok());
         assert!(ui.find("Start match").is_err());
         assert!(ui.find("Re-call").is_err());
+
+        // Same for a reported set: the install-level block comes first, so
+        // nothing offers to reset someone else's bracket.
+        let mut done = seeded();
+        done.selected = Some("w-c".into());
+        let mut ui = iced_test::simulator(screen(
+            &done,
+            &ctx(Some("Bracket actions run on the operator PC.")),
+        ));
+        assert!(ui.find("Change result").is_err());
     }
 }

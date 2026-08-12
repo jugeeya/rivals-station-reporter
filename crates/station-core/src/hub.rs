@@ -1890,6 +1890,57 @@ impl Hub {
         Ok(json!({ "ok": true, "setId": set_id, "winnerEntrantId": wid }))
     }
 
+    /// Replace a result the bracket ALREADY has, from the Bracket screen:
+    /// reset the set on start.gg, then report the new winner through exactly
+    /// the same path a first report takes (`do_report_set`, which re-reads the
+    /// set and re-checks that the winner is one of its entrants).
+    ///
+    /// The station-side twin is `do_rereport`, which needs a hub record to
+    /// find the matched start.gg set; here the set id IS start.gg's, so there
+    /// is nothing to look up — which is the whole point: a set nobody's
+    /// station recorded (a stream setup, a phone report, an auto-report the
+    /// operator wants to correct after the fact) is still fixable.
+    ///
+    /// `resetDependentSets` is deliberately not passed (see
+    /// `startgg::RESET_SET_MUTATION`), so later rounds already played off this
+    /// one keep their results; the UI says so before offering the button.
+    pub fn do_rereport_set(
+        &self,
+        slug: &str,
+        set_id: &Value,
+        winner_entrant_id: &Value,
+    ) -> Result<Value, (Value, u16)> {
+        if !self.startgg.enabled() {
+            return Err((
+                json!({"error": "No start.gg token configured on the hub."}),
+                501,
+            ));
+        }
+        reject_preview_set(set_id)?;
+
+        // Only reset what actually needs it — same reasoning as `do_rereport`:
+        // a set whose earlier report never landed is still open, and resetting
+        // it would be a pointless write against a live bracket.
+        let completed = matches!(
+            self.startgg.set_state(set_id),
+            Ok(v) if py_int(Some(&v)) == Some(matching::STARTGG_STATE_COMPLETED)
+        );
+        if completed {
+            if let Err(e) = self.startgg.reset_set(set_id) {
+                return Err((
+                    json!({"error": format!("start.gg would not reset the set: {}", e)}),
+                    502,
+                ));
+            }
+            (self.log)(&format!(
+                "reset set {} on start.gg to re-report it",
+                py_str(set_id)
+            ));
+        }
+
+        self.do_report_set(slug, set_id, winner_entrant_id)
+    }
+
     /// Sets for the operator's Current Sets panel -- both entrants
     /// determined, either playing now (state 2) or startable (state 1/6) --
     /// plus the event's stations. Read-only, like `event_view`.
@@ -4703,6 +4754,50 @@ mod tests {
         assert!(
             fake.reports().is_empty(),
             "never report over someone else's result"
+        );
+    }
+
+    #[test]
+    fn bracket_rereport_resets_then_reports_the_new_winner() {
+        // The case the Bracket screen exists for: a set start.gg already has
+        // a result for, corrected without leaving the app.
+        let (h, fake) = hub_with_sets(json!([reportable_set("S1")]));
+        fake.set_state_will_answer_for(&json!("S1"), json!(matching::STARTGG_STATE_COMPLETED));
+
+        let out = h.do_rereport_set(SLUG, &json!("S1"), &json!("E2")).unwrap();
+        assert_eq!(out["ok"], json!(true));
+        assert_eq!(
+            fake.reset_calls(),
+            vec![json!("S1")],
+            "the completed set is reset exactly once before the new report"
+        );
+        let reports = fake.reports();
+        assert_eq!(reports.len(), 1);
+        assert_eq!((&reports[0].0, &reports[0].1), (&json!("S1"), &json!("E2")));
+    }
+
+    #[test]
+    fn bracket_rereport_skips_the_reset_when_the_set_is_still_open() {
+        // A first report that never landed leaves the set open; resetting it
+        // would be a pointless write against a live bracket.
+        let (h, fake) = hub_with_sets(json!([reportable_set("S1")]));
+        h.do_rereport_set(SLUG, &json!("S1"), &json!("E1")).unwrap();
+        assert!(fake.reset_calls().is_empty(), "nothing to undo");
+        assert_eq!(fake.reports().len(), 1);
+    }
+
+    #[test]
+    fn bracket_rereport_still_refuses_a_winner_from_a_different_set() {
+        // Correcting a result must not become a way around the entrant check.
+        let (h, fake) = hub_with_sets(json!([reportable_set("S1")]));
+        fake.set_state_will_answer_for(&json!("S1"), json!(matching::STARTGG_STATE_COMPLETED));
+        let err = h
+            .do_rereport_set(SLUG, &json!("S1"), &json!("E9"))
+            .unwrap_err();
+        assert_eq!(err.1, 400);
+        assert!(
+            fake.reports().is_empty(),
+            "the bad winner is rejected, not written"
         );
     }
 

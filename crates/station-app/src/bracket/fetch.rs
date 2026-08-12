@@ -35,7 +35,11 @@ query Bracket($slug: String!, $page: Int!, $perPage: Int!) {
   event(slug: $slug) {
     id
     name
-    tournament { name }
+    tournament {
+      name
+      stations(perPage: 32) { nodes { number } }
+      streams { streamName }
+    }
     sets(page: $page, perPage: $perPage, sortType: STANDARD) {
       pageInfo { totalPages }
       nodes {
@@ -181,6 +185,14 @@ pub struct Bracket {
     pub event_name: String,
     pub tournament_name: String,
     pub sets: Vec<BracketSet>,
+    /// Station numbers the TOURNAMENT has configured, for the action bar's
+    /// picker. Tournament-level, not `Event.stations` — that one only returns
+    /// stations already assigned to a set in this event, so a picker built
+    /// from it silently offers fewer setups than really exist (the same trap
+    /// `startgg::AVAILABLE_SETS_QUERY` documents at length).
+    pub stations: Vec<i64>,
+    /// Stream names the tournament has configured, same source and reason.
+    pub streams: Vec<String>,
 }
 
 // ---- raw response shapes ---------------------------------------------------
@@ -205,8 +217,34 @@ struct RespData {
 #[derive(Deserialize)]
 struct RawEvent {
     name: Option<String>,
-    tournament: Option<RawNamed>,
+    tournament: Option<RawTournament>,
     sets: Option<RawSets>,
+}
+
+#[derive(Deserialize)]
+struct RawTournament {
+    name: Option<String>,
+    #[serde(default)]
+    stations: Option<RawStations>,
+    #[serde(default)]
+    streams: Option<Vec<RawTournamentStream>>,
+}
+
+#[derive(Deserialize)]
+struct RawTournamentStream {
+    #[serde(rename = "streamName")]
+    stream_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawStations {
+    #[serde(default)]
+    nodes: Option<Vec<RawStationNode>>,
+}
+
+#[derive(Deserialize)]
+struct RawStationNode {
+    number: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -485,13 +523,28 @@ pub async fn fetch(slug: String) -> Result<Bracket, String> {
             .and_then(|d| d.event)
             .ok_or_else(|| "start.gg has no event at that link — check it in Settings.")?;
 
-        if out.event_name.is_empty() {
+        if page == 1 {
             out.event_name = event.name.clone().unwrap_or_default();
-            out.tournament_name = event
-                .tournament
-                .as_ref()
-                .and_then(|t| t.name.clone())
-                .unwrap_or_default();
+            if let Some(t) = &event.tournament {
+                out.tournament_name = t.name.clone().unwrap_or_default();
+                out.stations = t
+                    .stations
+                    .as_ref()
+                    .and_then(|s| s.nodes.as_ref())
+                    .map(|nodes| nodes.iter().filter_map(|n| n.number).collect())
+                    .unwrap_or_default();
+                out.stations.sort_unstable();
+                out.streams = t
+                    .streams
+                    .as_ref()
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|s| s.stream_name.clone())
+                            .filter(|n| !n.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
         }
 
         let sets = event.sets.ok_or("Event has no bracket yet.")?;
@@ -524,6 +577,8 @@ mod tests {
         let event = parsed.data.and_then(|d| d.event).expect("event present");
         let sets = event.sets.expect("sets present");
         Bracket {
+            stations: Vec::new(),
+            streams: Vec::new(),
             event_name: event.name.unwrap_or_default(),
             tournament_name: event.tournament.and_then(|t| t.name).unwrap_or_default(),
             sets: sets

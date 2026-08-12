@@ -217,6 +217,18 @@ pub fn do_report_bracket_set(
         .map_err(err_text)
 }
 
+/// Replace a result the bracket already has, from the Bracket screen —
+/// no station record needed. See `Hub::do_rereport_set`.
+pub fn do_rereport_bracket_set(
+    inner: &Arc<EngineInner>,
+    set_id: &str,
+    winner: &Value,
+) -> Result<Value, String> {
+    let (hub, slug) = hub_and_slug(inner)?;
+    hub.do_rereport_set(&slug, &json!(set_id), winner)
+        .map_err(err_text)
+}
+
 /// Replace a set's result with what the operator says happened — see
 /// `Hub::do_override_result`.
 pub fn do_override_result(

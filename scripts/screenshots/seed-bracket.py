@@ -15,8 +15,9 @@ behind it:
   * The rest of the tree is still waiting on earlier rounds, so the shot
     shows all four card states at once: done, live, called, and empty seats.
 
-The action bar's station picker reads the Current Sets data rather than the
-bracket, so this writes an `availableSets` block alongside the bracket one.
+The action bar's pickers read the tournament's stations and streams off the
+bracket itself (the real fetch asks start.gg for both), so the fixture carries
+them too.
 """
 import json
 import sys
@@ -122,17 +123,12 @@ add("l-g", "Q", -5, "Losers Semi-Final", None, None, feeds=("l-f", None))
 add("l-h", "R", -6, "Losers Final", None, None, feeds=("l-g", None))
 
 seed = {
-    # The action bar's station picker reads the Current Sets data, so the
-    # bracket shot has to seed the tournament's stations too — the sets list
-    # itself is irrelevant here (that panel is on the other screen).
-    "availableSets": {
-        "sets": [],
-        "stations": [{"number": 1}, {"number": 2}, {"number": 3}],
-        "streams": [{"name": "socalrivals"}],
-    },
     "bracket": {
         "event_name": "Rivals 2 Singles",
         "tournament_name": "The Hangout #47",
+        # What the action bar's two pickers offer.
+        "stations": [1, 2, 3],
+        "streams": ["socalrivals"],
         # Pin the selection rather than letting set_needing_attention pick,
         # so the action bar in the shot is always the live Semi-Final.
         "selected": "w-g",
@@ -181,7 +177,9 @@ elif variant == "done":
             ]
         elif st["winner_id"] is None:
             st["winner_id"] = st["slots"][0]["entrant_id"]
-    seed["bracket"]["selected"] = None
+    # Land on the Grand Final: a played-out bracket's action bar is where a
+    # wrong result gets fixed, so the shot should show that being offered.
+    seed["bracket"]["selected"] = "w-j"
 
 name = "bracket-seed.json" if variant == "live" else f"bracket-{variant}-seed.json"
 json.dump(seed, open(profile + "/" + name, "w"))

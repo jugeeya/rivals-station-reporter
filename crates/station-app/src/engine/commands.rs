@@ -62,6 +62,16 @@ pub fn report_bracket_set(
     hub_glue::do_report_bracket_set(engine, set_id, winner_entrant_id)
 }
 
+/// Replace a result the bracket already has, from the Bracket screen: reset
+/// the set on start.gg, then report the new winner.
+pub fn rereport_bracket_set(
+    engine: &Arc<EngineInner>,
+    set_id: &str,
+    winner_entrant_id: &Value,
+) -> Result<Value, String> {
+    hub_glue::do_rereport_bracket_set(engine, set_id, winner_entrant_id)
+}
+
 /// Replace a set's result with the operator's own — the console's result
 /// editor. `games` is `[{winnerSlot, chars:[{slot, character}]}]`.
 pub fn override_result(

@@ -413,6 +413,8 @@ mod tests {
 
     fn bracket(sets: Vec<BracketSet>) -> Bracket {
         Bracket {
+            stations: Vec::new(),
+            streams: Vec::new(),
             event_name: "e".into(),
             tournament_name: "t".into(),
             sets,

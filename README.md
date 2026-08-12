@@ -92,8 +92,19 @@ lines drawn in, so it reads as a bracket rather than a grid of rounds.
 
 The station (`St 2`) shows only on sets that haven't finished — on a played
 set it's history, on an upcoming one it's where to walk. Selecting a set
-opens the bar underneath: assign a station, start the match, or report a
-winner.
+opens the bar underneath, offering only what that set can accept:
+
+- **Not called yet, or live:** separate station and stream pickers (a set can
+  sit at a station and on a stream at once), Start match / Re-call, and the
+  two winner buttons. Both pickers start on where start.gg already has the
+  set, so calling it without touching them moves nothing. The stream picker
+  hides itself at tournaments with no stream setups.
+- **Already reported:** who advanced, plus **Change result** — this is the
+  one place in the app that can fix such a set, since the operator console
+  can only correct sets one of *its* stations recorded, and by top 8 the
+  results worth fixing are usually on sets no station saw. It takes a second
+  click on purpose (it resets the set on start.gg first), and says plainly
+  that rounds already played out of that set keep their results.
 
 **Before anyone calls the first match**, start.gg holds the sets as
 placeholders (middle shot). Starting any one of them materialises the whole
@@ -102,35 +113,19 @@ real set ids it gets back. Reporting is the one thing that needs the bracket
 live first, so the bar offers Start match and says why the winner buttons
 aren't there.
 
-the event's whole tree, in the app. Winners above,
-losers below, each round a column, every set showing its entrants, the
-characters they played, and the score. Sets are placed against the sets that
-feed them and joined with connector lines, so you can follow who advances
-into what. Finished sets recede; the one playing right now is highlighted; a
-set called to a setup but not yet started is flagged; a set with both seats
-filled that nobody has called is picked out in amber as `ready`, which is
-what a TO is scanning for; seats still waiting on an earlier round are drawn
-empty. The station shows on sets that haven't finished — on a played set it
-is history, on an upcoming one it is where to walk.
-
 Reading the bracket needs **no API token** — it uses start.gg's public
-website endpoint, so a station PC can pull it up too. Acting on it does:
-select any set and the bar underneath offers
-
-- **a station**, resolved to start.gg's own station id server-side,
-- **Start match** (`markSetInProgress` — the same call the Current Sets panel
-  makes, and still only ever from an explicit click), and
-- **a winner**, which finalizes the set on start.gg.
+website endpoint, so a station PC can pull the tree up too (its action bar
+just says why it's read-only there). Writing does: stations, streams, Start
+match (`markSetInProgress`) and reporting all go through the operator's token,
+and only ever from an explicit click — the cards themselves carry no write, so
+panning around a bracket can't advance anyone.
 
 Reporting from here sends the winner alone, with no per-game data — that's
 the difference from the operator console's Report button, which reports a set
 a station actually tracked and carries its character data up with it. Prefer
 the console for sets your stations covered; use this for everything else
-(an untracked setup, a DQ, a set someone played before the reporter was up).
-
-If a set can't be acted on, the bar says why rather than leaving dead
-buttons: no token configured, the phase isn't started on start.gg yet, the
-set is already reported, or it's still waiting on an earlier round.
+(an untracked setup, a DQ, a set someone played before the reporter was up,
+a result that needs changing after the fact).
 
 ## A station, over one evening
 

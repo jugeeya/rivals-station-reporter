@@ -97,9 +97,11 @@ reports itself only when **all** of the following hold:
   report presses it for you — a TO who assigns setups but never calls them is
   normal, and refusing the report just stranded the set),
 - it is a local bracket game, not an online or ranked match, and
-- the winner's tag matched a bracket entrant **exactly**. A partial match is
-  good enough to pre-select for you; it is nowhere near good enough to
-  advance a bracket unwatched.
+- the winner is **certain**: their tag matched a bracket entrant exactly, or
+  the loser's tag did (so the winner is the other entrant by elimination), or
+  both players' partial matches independently agree on who is who. A lone
+  partial match is good enough to pre-select for you; it is nowhere near good
+  enough to advance a bracket unwatched.
 
 ### Correcting a result
 

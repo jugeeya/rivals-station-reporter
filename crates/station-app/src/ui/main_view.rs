@@ -38,9 +38,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
 
     let actions = row![
-        button(text("Bracket").size(13))
-            .style(theme::button_linkish)
-            .on_press(Message::OpenBracket),
+        super::view_toggle(false, Message::OpenBracket, Message::OpenBracket),
+        Space::new().width(Length::Fixed(8.0)),
         button(text("Tag Installer").size(13))
             .style(theme::button_linkish)
             .on_press(Message::OpenTagInstaller),

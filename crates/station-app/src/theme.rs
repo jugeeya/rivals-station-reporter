@@ -168,6 +168,21 @@ pub fn button_surface(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// The active half of the Bracket/Matches view toggle: a surface chip whose
+/// accent border says "you are here" without shouting like a primary button.
+pub fn button_tab_active(_theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(Background::Color(SURFACE_HOVER)),
+        text_color: TEXT_PRIMARY,
+        border: Border {
+            color: Color { a: 0.7, ..ACCENT },
+            width: 1.0,
+            radius: Radius::new(RADIUS_BUTTON),
+        },
+        ..button::Style::default()
+    }
+}
+
 /// Text-like button (.linkish): no chrome, accent on hover.
 pub fn button_linkish(_theme: &Theme, status: button::Status) -> button::Style {
     button::Style {

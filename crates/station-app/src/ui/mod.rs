@@ -35,6 +35,32 @@ pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static)
         .expect("blocking task panicked")
 }
 
+/// The Bracket View / Matches View toggle both main screens carry top-right.
+/// The active half is inert (nothing to do), the other switches screens.
+pub fn view_toggle<'a, M: Clone + 'a>(
+    bracket_active: bool,
+    to_bracket: M,
+    to_matches: M,
+) -> iced::Element<'a, M> {
+    use iced::widget::{button, row, text};
+    let half = |label: &'static str, active: bool, msg: M| {
+        button(text(label).size(13))
+            .style(if active {
+                theme::button_tab_active
+            } else {
+                theme::button_surface
+            })
+            .padding([5, 12])
+            .on_press_maybe((!active).then_some(msg))
+    };
+    row![
+        half("Bracket View", bracket_active, to_bracket),
+        half("Matches View", !bracket_active, to_matches),
+    ]
+    .spacing(4)
+    .into()
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     /// A full engine state snapshot arrived on the feed.
@@ -211,6 +237,15 @@ impl App {
             Ok("vod") => app.screen = Screen::VodSplitter,
             Ok("tags") => app.screen = Screen::TagInstaller,
             _ => {}
+        }
+
+        // An operator's home screen is the bracket — the thing a TO is
+        // actually running — with Matches View a toggle away. A station stays
+        // on its own screen (health chips, the live set: the reasons that PC
+        // runs this app at all). Never under a seed, whose fixture belongs to
+        // whatever screen RSR_OPEN asked for.
+        if app.screen == Screen::Reporter && configured_operator && !app.frozen {
+            app.screen = Screen::Bracket;
         }
 
         // A screen opened via RSR_OPEN still needs its opened() hook (save

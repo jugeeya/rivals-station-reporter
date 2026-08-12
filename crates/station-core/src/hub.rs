@@ -1244,6 +1244,29 @@ impl Hub {
         set_bucket(&mut s, slug).get(&key).cloned()
     }
 
+    /// The station record bound to a given START.GG set, if any station
+    /// tracked it: `(station, station's setId)`, newest ingest winning when a
+    /// re-played set left more than one. This is how the Bracket screen finds
+    /// the game-by-game data behind a set it only knows by its start.gg id.
+    fn station_record_for_startgg_set(
+        &self,
+        slug: &str,
+        startgg_set_id: &Value,
+    ) -> Option<(i64, Value)> {
+        let want = py_str(startgg_set_id);
+        let mut s = self.state.lock().unwrap();
+        set_bucket(&mut s, slug)
+            .values()
+            .filter(|r| py_str(r.get("matchedStartggSetId").unwrap_or(&Value::Null)) == want)
+            .filter(|r| r.pointer("/set/complete").is_some_and(|v| truthy(Some(v))))
+            .max_by_key(|r| ingested(r))
+            .and_then(|r| {
+                let station = py_int(r.get("station"))?;
+                let set_id = r.pointer("/set/setId").filter(|v| truthy(Some(v)))?.clone();
+                Some((station, set_id))
+            })
+    }
+
     /// Re-ask start.gg what's at this station and re-evaluate the record.
     ///
     /// A set finished before the TO pressed Start Match is correctly refused at
@@ -1795,9 +1818,10 @@ impl Hub {
     /// station this hub tracks.
     ///
     /// `do_report` is the station path: it reports the set a station PLAYED,
-    /// carrying that station's per-game character data up with it. This one
-    /// has no station and no games behind it, only "this entrant won", so it
-    /// sends the winner alone. Everything else it guards exactly as
+    /// carrying that station's per-game character data up with it. When one
+    /// of this hub's stations tracked the set, this delegates straight to
+    /// that path so the games ride along; only a set no station saw goes up
+    /// winner-alone. Everything else it guards exactly as
     /// `do_report` does, because it is the same irreversible bracket write:
     /// a token is required, a preview set is refused, the winner must really
     /// be one of that set's entrants, and a set someone already finalized
@@ -1820,6 +1844,14 @@ impl Hub {
             ));
         }
         reject_preview_set(set_id)?;
+
+        // When one of this event's stations tracked the set, report through
+        // the station path instead — identical to the console's Report
+        // button, so the per-game character/winner data goes up with it. The
+        // winner-alone path below is only for sets nothing recorded.
+        if let Some((station, station_set_id)) = self.station_record_for_startgg_set(slug, set_id) {
+            return self.do_report(slug, station, &station_set_id, winner_entrant_id);
+        }
 
         let wid = if truthy(Some(winner_entrant_id)) {
             py_str(winner_entrant_id)
@@ -1917,6 +1949,13 @@ impl Hub {
             ));
         }
         reject_preview_set(set_id)?;
+
+        // Same delegation as `do_report_set`: a set one of our stations
+        // tracked corrects through the console's own path, so the corrected
+        // report carries the per-game data too.
+        if let Some((station, station_set_id)) = self.station_record_for_startgg_set(slug, set_id) {
+            return self.do_rereport(slug, station, &station_set_id, winner_entrant_id);
+        }
 
         // Only reset what actually needs it — same reasoning as `do_rereport`:
         // a set whose earlier report never landed is still open, and resetting
@@ -4754,6 +4793,62 @@ mod tests {
         assert!(
             fake.reports().is_empty(),
             "never report over someone else's result"
+        );
+    }
+
+    #[test]
+    fn bracket_report_uses_the_station_record_when_one_tracked_the_set() {
+        // The Bracket screen only knows the start.gg id — but station 1
+        // tracked this set (bound to 105639152 by the fake), so reporting
+        // from the bracket must go through the console's own path and carry
+        // the per-game character/winner data, not the winner alone.
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        h.handle_current(SLUG, 1, Some(&json!({"state": "set_start"})))
+            .unwrap();
+        h.handle_ingest(SLUG, 1, &real_set()).unwrap();
+
+        let out = h
+            .do_report_set(SLUG, &json!(105639152), &json!(24186345))
+            .unwrap();
+        assert_eq!(out["ok"], json!(true));
+        let reports = fake.reports();
+        assert_eq!(reports.len(), 1);
+        let games = reports[0].2.as_ref().and_then(|v| v.as_array());
+        assert_eq!(
+            games.map(|g| g.len()),
+            Some(2),
+            "both games went up with the report, same as the console's button"
+        );
+        assert_eq!(
+            h.get_set(SLUG, 1, &json!("20260724_075508")).unwrap()["status"],
+            json!("reported"),
+            "the station record knows it was reported, so nothing re-offers it"
+        );
+    }
+
+    #[test]
+    fn bracket_rereport_uses_the_station_record_too() {
+        // Correcting a tracked set from the bracket goes through do_rereport:
+        // reset on start.gg, then the game-data-carrying report.
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        h.handle_current(SLUG, 1, Some(&json!({"state": "set_start"})))
+            .unwrap();
+        h.handle_ingest(SLUG, 1, &real_set()).unwrap();
+        fake.set_state_will_answer_for(&json!(105639152), json!(matching::STARTGG_STATE_COMPLETED));
+
+        h.do_rereport_set(SLUG, &json!(105639152), &json!(24186347))
+            .unwrap();
+        assert_eq!(fake.reset_calls(), vec![json!(105639152)]);
+        let reports = fake.reports();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].1, json!("24186347"));
+        assert!(
+            reports[0].2.is_some(),
+            "the corrected report still carries the games"
         );
     }
 

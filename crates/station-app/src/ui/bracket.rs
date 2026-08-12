@@ -418,9 +418,7 @@ fn screen<'a>(st: &'a State, ctx: &Ctx) -> Element<'a, Msg> {
         )
         .style(theme::button_surface)
         .on_press_maybe((!st.loading).then_some(Msg::Refresh)),
-        button(text("← Reporter").size(13))
-            .style(theme::button_linkish)
-            .on_press(Msg::Close),
+        super::view_toggle(true, Msg::Close, Msg::Close),
     ]
     .spacing(10)
     .align_y(Alignment::Center);

@@ -204,9 +204,11 @@ pub fn do_report(
         .map_err(err_text)
 }
 
-/// Finalize a set from the Bracket screen, where there is no station behind
-/// it — winner only, no game data. Explicit operator action, same standing as
-/// `do_report`; see `Hub::do_report_set` for the guards it shares with it.
+/// Finalize a set from the Bracket screen. When a station this hub tracks
+/// played the set, its per-game data rides along exactly as a station report
+/// would send it; only a set no station saw goes up winner-alone. Explicit
+/// operator action, same standing as `do_report`; see `Hub::do_report_set`
+/// for the guards it shares with it.
 pub fn do_report_bracket_set(
     inner: &Arc<EngineInner>,
     set_id: &str,

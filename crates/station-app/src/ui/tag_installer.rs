@@ -948,14 +948,18 @@ fn screen(st: &State) -> Element<'_, Msg> {
             r = r.push(Space::new().width(Length::Fill));
             let diff_open = st.open_diff.as_deref() == Some(t.file.as_str());
             r = r.push(
-                button(text(if diff_open { "hide changes" } else { "changes" }).size(11))
-                    .style(theme::button_linkish)
-                    .padding([1, 4])
-                    .on_press(Msg::ToggleDiff(t.file.clone())),
+                button(
+                    text(if diff_open {
+                        "Hide changes"
+                    } else {
+                        "View changes"
+                    })
+                    .size(11),
+                )
+                .style(theme::button_linkish)
+                .padding([1, 4])
+                .on_press(Msg::ToggleDiff(t.file.clone())),
             );
-            if !t.author.is_empty() {
-                r = r.push(text(t.author.clone()).size(11).color(theme::TEXT_MUTED));
-            }
             let mut cell = column![r].spacing(8);
             if diff_open {
                 cell = cell.push(diff_panel(st.diffs.get(&t.file)));

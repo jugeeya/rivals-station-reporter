@@ -366,10 +366,48 @@ impl Ctx {
 }
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    screen(&app.bracket, &Ctx::of(app)).map(Message::Bracket)
+    let st = &app.bracket;
+    let ctx = Ctx::of(app);
+    // The same page chrome as the Matches view: bracket-owned header pieces
+    // mapped up, the shared nav (toggle, other screens, overlays) as-is.
+    let header = row![
+        Element::from(title_row(st)).map(Message::Bracket),
+        Space::new().width(Length::Fill),
+        Element::from(refresh_button(st)).map(Message::Bracket),
+        super::nav_actions(app, true),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+    page(
+        header,
+        Element::from(below_header(st, &ctx)).map(Message::Bracket),
+    )
 }
 
+/// The bracket screen with a bracket-only header — what the tests drive,
+/// where every message is a `Msg`.
+#[cfg(test)]
 fn screen<'a>(st: &'a State, ctx: &Ctx) -> Element<'a, Msg> {
+    let header = row![
+        title_row(st),
+        Space::new().width(Length::Fill),
+        refresh_button(st),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+    page(header, below_header(st, ctx))
+}
+
+fn page<'a, M: 'a>(header: iced::widget::Row<'a, M>, below: Element<'a, M>) -> Element<'a, M> {
+    container(column![header, below].spacing(14))
+        .style(theme::card_rich)
+        .padding(24)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+fn title_row(st: &State) -> Element<'_, Msg> {
     let mut title = row![
         text("Bracket").font(theme::FONT_DISPLAY).size(20),
         text(
@@ -404,25 +442,23 @@ fn screen<'a>(st: &'a State, ctx: &Ctx) -> Element<'a, Msg> {
                 .menu_style(theme::pick_list_menu),
         );
     }
+    title.into()
+}
 
-    let header = row![
-        title,
-        Space::new().width(Length::Fill),
-        button(
-            text(if st.loading {
-                "Refreshing…"
-            } else {
-                "Refresh"
-            })
-            .size(13)
-        )
-        .style(theme::button_surface)
-        .on_press_maybe((!st.loading).then_some(Msg::Refresh)),
-        super::view_toggle(true, Msg::Close, Msg::Close),
-    ]
-    .spacing(10)
-    .align_y(Alignment::Center);
+/// Compact — the same ⟳ the Current Sets panel uses — because this header
+/// also carries the shared nav, and a worded button pushes it off the card
+/// at ordinary window widths.
+fn refresh_button(st: &State) -> Element<'_, Msg> {
+    button(text(if st.loading { "…" } else { "⟳" }).size(13))
+        .style(theme::button_linkish)
+        .padding([2, 6])
+        .on_press_maybe((!st.loading).then_some(Msg::Refresh))
+        .into()
+}
 
+/// Everything under the header: the not-started note, the tree, and the
+/// selected set's action bar.
+fn below_header<'a>(st: &'a State, ctx: &Ctx) -> Element<'a, Msg> {
     let body: Element<'_, Msg> = match (&st.bracket, st.group.as_ref()) {
         _ if !st.load_err.is_empty() => notice(&st.load_err, true),
         (Some(b), Some(group)) => tree(b, group, st.selected.as_deref()),
@@ -446,7 +482,7 @@ fn screen<'a>(st: &'a State, ctx: &Ctx) -> Element<'a, Msg> {
         })
         .unwrap_or(false);
 
-    let mut content = column![header].spacing(14);
+    let mut content = column![].spacing(14).height(Length::Fill);
     if unstarted {
         content = content.push(
             container(
@@ -465,13 +501,7 @@ fn screen<'a>(st: &'a State, ctx: &Ctx) -> Element<'a, Msg> {
     if let Some(bar) = action_bar(st, ctx) {
         content = content.push(bar);
     }
-
-    container(content)
-        .style(theme::card_rich)
-        .padding(24)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    content.into()
 }
 
 fn notice(msg: &str, bad: bool) -> Element<'_, Msg> {

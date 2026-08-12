@@ -35,6 +35,36 @@ pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static)
         .expect("blocking task panicked")
 }
 
+/// The top-right page actions both main views share: the Bracket/Matches
+/// toggle, then the other screens and overlays. Same page, different view
+/// piece — so nothing moves when the toggle is clicked.
+pub fn nav_actions(app: &App, bracket_active: bool) -> Element<'_, Message> {
+    use iced::widget::{button, row, text, Space};
+    row![
+        view_toggle(
+            bracket_active,
+            Message::OpenBracket,
+            Message::Bracket(bracket::Msg::Close),
+        ),
+        Space::new().width(Length::Fixed(8.0)),
+        button(text("Tag Installer").size(13))
+            .style(theme::button_linkish)
+            .on_press(Message::OpenTagInstaller),
+        button(text("VOD Splitter").size(13))
+            .style(theme::button_linkish)
+            .on_press(Message::OpenVodSplitter),
+        button(text(if app.show_log { "Log ▾" } else { "Log" }).size(13))
+            .style(theme::button_linkish)
+            .on_press(Message::ToggleLog),
+        button(text("Settings").size(13))
+            .style(theme::button_linkish)
+            .on_press(Message::OpenSettings),
+    ]
+    .spacing(4)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
 /// The Bracket View / Matches View toggle both main screens carry top-right.
 /// The active half is inert (nothing to do), the other switches screens.
 pub fn view_toggle<'a, M: Clone + 'a>(

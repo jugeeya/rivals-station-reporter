@@ -37,26 +37,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
         title_row = title_row.push(text("DRY-RUN").size(11).color(theme::TEXT_WARNING));
     }
 
-    let actions = row![
-        super::view_toggle(false, Message::OpenBracket, Message::OpenBracket),
-        Space::new().width(Length::Fixed(8.0)),
-        button(text("Tag Installer").size(13))
-            .style(theme::button_linkish)
-            .on_press(Message::OpenTagInstaller),
-        button(text("VOD Splitter").size(13))
-            .style(theme::button_linkish)
-            .on_press(Message::OpenVodSplitter),
-        button(text(if app.show_log { "Log ▾" } else { "Log" }).size(13))
-            .style(theme::button_linkish)
-            .on_press(Message::ToggleLog),
-        button(text("Settings").size(13))
-            .style(theme::button_linkish)
-            .on_press(Message::OpenSettings),
+    let header = row![
+        title_row,
+        Space::new().width(Length::Fill),
+        super::nav_actions(app, false)
     ]
-    .spacing(4);
-
-    let header =
-        row![title_row, Space::new().width(Length::Fill), actions].align_y(Alignment::Center);
+    .align_y(Alignment::Center);
 
     // ---- health strip ----------------------------------------------------------
     let mut chips = row![].spacing(6);

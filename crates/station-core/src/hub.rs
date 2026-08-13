@@ -466,6 +466,13 @@ pub struct Hub {
     /// Whether finished sets finalize themselves, and how long they wait
     /// first. Set from config right after construction, like `event_slug`.
     auto_report: Mutex<AutoReport>,
+    /// start.gg set ids this hub has successfully reported. start.gg's
+    /// state-filtered set index lags its own report mutation, so for a
+    /// while after a report the "current sets" read still returns the set
+    /// as ongoing — and the console would keep offering a set that is
+    /// already decided. `available_sets` drops these. In-memory only: the
+    /// ghost window is minutes, and after a restart start.gg has caught up.
+    reported_set_ids: Mutex<std::collections::HashSet<String>>,
 }
 
 /// Auto-report policy. Off means every bracket write comes from an operator
@@ -750,6 +757,7 @@ impl Hub {
             state: Mutex::new(state),
             event_slug: Mutex::new(None),
             auto_report: Mutex::new(AutoReport::default()),
+            reported_set_ids: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -1479,6 +1487,7 @@ impl Hub {
                 502,
             ));
         }
+        self.mark_reported(&rec["matchedStartggSetId"]);
         let games_reported = game_data
             .as_ref()
             .and_then(|v| v.as_array())
@@ -1722,6 +1731,7 @@ impl Hub {
                     502,
                 ));
             }
+            self.unmark_reported(&matched);
             (self.log)(&format!("reset set {} on start.gg", py_str(&matched)));
         }
 
@@ -1916,6 +1926,7 @@ impl Hub {
                 502,
             ));
         }
+        self.mark_reported(set_id);
         (self.log)(&format!(
             "reported set {set_id_s} on start.gg from the bracket (winner {wid})"
         ));
@@ -1971,6 +1982,7 @@ impl Hub {
                     502,
                 ));
             }
+            self.unmark_reported(set_id);
             (self.log)(&format!(
                 "reset set {} on start.gg to re-report it",
                 py_str(set_id)
@@ -1990,9 +2002,44 @@ impl Hub {
                 501,
             ));
         }
-        self.startgg
+        let mut data = self
+            .startgg
             .available_sets(slug)
-            .map_err(|e| (json!({"error": format!("start.gg error: {}", e)}), 502))
+            .map_err(|e| (json!({"error": format!("start.gg error: {}", e)}), 502))?;
+        // Drop sets this hub already reported: start.gg's state-filtered set
+        // index lags its own report mutation, so for a while the read still
+        // returns them as ongoing — and the panel would keep offering a set
+        // that is already decided. Internal validations deliberately read
+        // `self.startgg.available_sets` directly and stay unfiltered.
+        {
+            let reported = self.reported_set_ids.lock().unwrap();
+            if !reported.is_empty() {
+                if let Some(sets) = data.get_mut("sets").and_then(|v| v.as_array_mut()) {
+                    sets.retain(|s| {
+                        !reported.contains(&py_str(s.get("id").unwrap_or(&Value::Null)))
+                    });
+                }
+            }
+        }
+        Ok(data)
+    }
+
+    /// Remember a successful bracket write, so `available_sets` stops
+    /// offering the set even while start.gg's set index catches up.
+    fn mark_reported(&self, startgg_set_id: &Value) {
+        self.reported_set_ids
+            .lock()
+            .unwrap()
+            .insert(py_str(startgg_set_id));
+    }
+
+    /// A successful reset makes the set live again: if the re-report that
+    /// follows fails, the set must reappear rather than stay hidden.
+    fn unmark_reported(&self, startgg_set_id: &Value) {
+        self.reported_set_ids
+            .lock()
+            .unwrap()
+            .remove(&py_str(startgg_set_id));
     }
 
     /// Resolve `dest` against a fresh `available_sets` read and assign it,
@@ -2905,6 +2952,7 @@ mod tests {
         assign_station_should_fail: Mutex<bool>,
         assign_stream_should_fail: Mutex<bool>,
         start_match_should_fail: Mutex<bool>,
+        report_should_fail: Mutex<bool>,
         /// Extra fields merged onto `station_set`'s returned object -- used
         /// to simulate start.gg's `startedAt`/`startAt`/`totalGames`
         /// without disturbing every other test's `station_set` shape.
@@ -2947,6 +2995,7 @@ mod tests {
                 assign_station_should_fail: Mutex::new(false),
                 assign_stream_should_fail: Mutex::new(false),
                 start_match_should_fail: Mutex::new(false),
+                report_should_fail: Mutex::new(false),
                 station_set_extra: Mutex::new(json!({})),
                 station_set_ids: Mutex::new(HashMap::new()),
                 set_state_overrides: Mutex::new(HashMap::new()),
@@ -3145,6 +3194,9 @@ mod tests {
             winner_entrant_id: &Value,
             game_data: Option<&Value>,
         ) -> Result<Value, StartggError> {
+            if *self.0.report_should_fail.lock().unwrap() {
+                return Err(StartggError("reportBracketSet failed".to_string()));
+            }
             self.0.reports.lock().unwrap().push((
                 set_id.clone(),
                 winner_entrant_id.clone(),
@@ -4755,6 +4807,55 @@ mod tests {
         assert_eq!(
             reports[0].2, None,
             "no station played this, so there is no game data to send"
+        );
+    }
+
+    #[test]
+    fn a_reported_set_drops_out_of_the_panel_while_startgg_catches_up() {
+        // start.gg's state-filtered set index lags its own report mutation,
+        // so its read keeps returning a just-reported set as ongoing for a
+        // while. The panel's read is filtered by the hub's own memory of
+        // what it reported; the raw client read the validations use is not.
+        let (h, _fake) = hub_with_sets(json!([reportable_set("S1"), reportable_set("S2")]));
+        h.do_report_set(SLUG, &json!("S1"), &json!("E2")).unwrap();
+        let data = h.available_sets(SLUG).unwrap();
+        let ids: Vec<String> = data["sets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| py_str(&s["id"]))
+            .collect();
+        assert_eq!(ids, vec!["S2"], "S1 is decided, only S2 is still on offer");
+    }
+
+    #[test]
+    fn a_reset_set_reappears_until_its_new_report_lands() {
+        let (h, fake) = hub_with_sets(json!([reportable_set("S1")]));
+        h.do_report_set(SLUG, &json!("S1"), &json!("E2")).unwrap();
+        assert!(
+            h.available_sets(SLUG).unwrap()["sets"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "reported, so hidden"
+        );
+
+        // Correcting it: the reset lands but the new report fails. The set
+        // is genuinely open on start.gg again, so the panel must offer it
+        // rather than keep hiding a set that now needs someone's attention.
+        fake.set_state_will_answer_for(&json!("S1"), json!(matching::STARTGG_STATE_COMPLETED));
+        *fake.report_should_fail.lock().unwrap() = true;
+        let err = h
+            .do_rereport_set(SLUG, &json!("S1"), &json!("E1"))
+            .unwrap_err();
+        assert_eq!(err.1, 502);
+        assert_eq!(
+            h.available_sets(SLUG).unwrap()["sets"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "reset succeeded, report did not: the set is live again"
         );
     }
 

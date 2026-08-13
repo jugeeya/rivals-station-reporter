@@ -685,19 +685,25 @@ impl<Message> iced::widget::canvas::Program<Message> for Connectors {
             let y1 = mid_y(link.from_row);
             let x2 = col_x(link.to_col);
             let y2 = mid_y(link.to_row);
+            // A feeder level with its successor — every set whose other seat
+            // was seeded from entry or a bye — is a straight line, and both
+            // renderers mishandle it as a stroked path: lyon's tessellator
+            // drops the elbow over its zero-length middle segment, and
+            // tiny-skia culls even a clean two-point path by its zero-height
+            // bounds. A filled rectangle is a primitive both draw correctly.
+            if (y1 - y2).abs() <= 0.01 {
+                frame.fill_rectangle(
+                    iced::Point::new(x1, y1 - 0.75),
+                    iced::Size::new(x2 - x1, 1.5),
+                    theme::LINE_CONNECTOR,
+                );
+                continue;
+            }
             let elbow = (x1 + x2) / 2.0;
             let path = Path::new(|b| {
                 b.move_to(iced::Point::new(x1, y1));
-                // A feeder level with its successor — every set whose other
-                // seat was seeded from entry or a bye — needs a straight
-                // line. The elbow shape would put a zero-length segment in
-                // the path, and the stroke tessellator silently drops the
-                // whole path over it: these were exactly the lines missing
-                // from the tree.
-                if (y1 - y2).abs() > 0.01 {
-                    b.line_to(iced::Point::new(elbow, y1));
-                    b.line_to(iced::Point::new(elbow, y2));
-                }
+                b.line_to(iced::Point::new(elbow, y1));
+                b.line_to(iced::Point::new(elbow, y2));
                 b.line_to(iced::Point::new(x2, y2));
             });
             frame.stroke(&path, stroke.clone());

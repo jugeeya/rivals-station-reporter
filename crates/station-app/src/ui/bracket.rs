@@ -378,10 +378,37 @@ pub fn view(app: &App) -> Element<'_, Message> {
     ]
     .spacing(10)
     .align_y(Alignment::Center);
-    page(
-        header,
-        Element::from(below_header(st, &ctx)).map(Message::Bracket),
-    )
+    let mut below = column![Element::from(below_header(st, &ctx)).map(Message::Bracket)]
+        .spacing(14)
+        .height(Length::Fill);
+    // The station's own record of the selected set — the same card the
+    // Matches view shows, same actions and all (report, edit result, switch
+    // players) — so the TO can check the tags the station read before
+    // advancing anyone, without leaving the tree.
+    if let Some(r) = st
+        .selected
+        .as_deref()
+        .and_then(|id| station_record(&app.st.hub_snapshot.sets, id))
+    {
+        below = below.push(super::console::set_row(app, r));
+    }
+    page(header, below.into())
+}
+
+/// The station record tracking this start.gg set, if one of the hub's
+/// stations played it. Newest ingest wins — the same tie-break the hub uses
+/// when a bracket report borrows a station's game data.
+fn station_record<'a>(
+    records: &'a [serde_json::Value],
+    startgg_set_id: &str,
+) -> Option<&'a serde_json::Value> {
+    records
+        .iter()
+        .filter(|r| {
+            r.get("matchedStartggSetId")
+                .is_some_and(|v| crate::model::id_str(v) == startgg_set_id)
+        })
+        .max_by_key(|r| r.get("ingestedAt").and_then(|v| v.as_i64()).unwrap_or(0))
 }
 
 /// The bracket screen with a bracket-only header — what the tests drive,
@@ -1184,6 +1211,20 @@ fn callable_actions<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_station_record_for_the_selected_set_is_found_by_startgg_id() {
+        let recs = vec![
+            json!({"matchedStartggSetId": "111", "ingestedAt": 5}),
+            // Numeric vs string id must not matter, and of two records
+            // matched to the same set the newest ingest wins.
+            json!({"matchedStartggSetId": 222, "ingestedAt": 9, "station": 2}),
+            json!({"matchedStartggSetId": "222", "ingestedAt": 3, "station": 1}),
+        ];
+        let hit = station_record(&recs, "222").expect("record found");
+        assert_eq!(hit.get("station").and_then(|v| v.as_i64()), Some(2));
+        assert!(station_record(&recs, "999").is_none());
+    }
 
     fn seeded() -> State {
         // The same fixture the README shot uses, trimmed to what a test needs:

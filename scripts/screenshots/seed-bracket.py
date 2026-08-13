@@ -134,6 +134,47 @@ seed = {
         "selected": "w-g",
         "sets": sets,
     },
+    # Station 2's own record of the selected Semi-Final (matched to it by
+    # start.gg set id), so the shot shows the station card the Bracket
+    # screen renders under a tracked set — tags, games, edit result,
+    # switch players. Same set as seed-hub-state.py's station 2.
+    "hubSnapshot": {
+        "stations": {},
+        "sets": [{
+            "id": "sim-w-g", "station": 2, "ingestedAt": now - 20,
+            "set": {"setId": "sim-w-g", "complete": False,
+                    "startEpoch": now - 6 * m, "endEpoch": None,
+                    "winsRequired": 3, "matchCount": 3,
+                    "winnerSlot": None, "winnerName": None,
+                    "players": [
+                        {"slot": 0, "name": "BRUJITA", "character": "Maypul",
+                         "wins": 2},
+                        {"slot": 1, "name": "NAVI", "character": "Fleet",
+                         "wins": 1}],
+                    "games": [
+                        {"gameNum": 1, "winnerSlot": 0,
+                         "chars": [{"slot": 0, "character": "Maypul"},
+                                   {"slot": 1, "character": "Clairen"}]},
+                        {"gameNum": 2, "winnerSlot": 1,
+                         "chars": [{"slot": 0, "character": "Maypul"},
+                                   {"slot": 1, "character": "Clairen"}]},
+                        {"gameNum": 3, "winnerSlot": 0,
+                         "chars": [{"slot": 0, "character": "Maypul"},
+                                   {"slot": 1, "character": "Fleet"}]}]},
+            "matchedStartggSetId": "w-g",
+            "fullRoundText": "Winners Semi-Final",
+            "entrants": [{"id": "E3", "name": "BRUJITA"},
+                         {"id": "E4", "name": "NAVI"}],
+            "slotEntrants": [
+                {"slot": 0, "entrantId": "E3", "entrantName": "BRUJITA"},
+                {"slot": 1, "entrantId": "E4", "entrantName": "NAVI"}],
+            "candidateWinnerEntrantId": None, "confidence": "none",
+            "status": "live", "liveConfirmed": True, "swap": False,
+            "mode": None, "startggState": 2,
+            "startggStartedAt": now - 6 * m, "startggTotalGames": 5,
+            "reportable": True, "notReportableReason": None,
+        }],
+    },
 }
 if variant == "unstarted":
     # Nothing has been started on start.gg: every set is a placeholder, no

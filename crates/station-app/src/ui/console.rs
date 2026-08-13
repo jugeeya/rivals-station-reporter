@@ -13,7 +13,7 @@ use iced::widget::{button, column, container, pick_list, row, text, tooltip, Spa
 use iced::{Alignment, Element, Length, Task};
 use serde_json::Value;
 
-use super::{blocking, format, App, Message};
+use super::{blocking, format, App, Message, Screen};
 use crate::model::id_str;
 use crate::theme;
 
@@ -97,6 +97,47 @@ pub struct State {
 }
 
 pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
+    // Handled before the console borrow: a finished action may need to
+    // refresh the Bracket screen too, which borrows all of `app`.
+    if let Msg::Done {
+        result,
+        bracket_changed,
+    } = msg
+    {
+        let c = &mut app.console;
+        c.busy = false;
+        c.picker_for = None;
+        if result.is_ok() {
+            c.editing = None;
+        }
+        match result {
+            Ok(m) => {
+                c.action_msg = m;
+                c.action_err = false;
+                if bracket_changed {
+                    // Grace period for start.gg to settle the new set
+                    // state before re-reading; the 20s cycle cleans up
+                    // any eventual-consistency stragglers.
+                    let sets = Task::perform(
+                        tokio::time::sleep(std::time::Duration::from_millis(800)),
+                        |_| Message::SetsAutoRefresh,
+                    );
+                    // The same set sits in the Bracket screen's tree; a
+                    // report made from its station card must reach it too.
+                    if app.screen == Screen::Bracket {
+                        return Task::batch([sets, super::bracket::refresh(app)]);
+                    }
+                    return sets;
+                }
+            }
+            Err(e) => {
+                c.action_msg = e;
+                c.action_err = true;
+            }
+        }
+        return Task::none();
+    }
+
     let c = &mut app.console;
     match msg {
         Msg::OpenPicker(k) => {
@@ -280,35 +321,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 },
             );
         }
-        Msg::Done {
-            result,
-            bracket_changed,
-        } => {
-            c.busy = false;
-            c.picker_for = None;
-            if result.is_ok() {
-                c.editing = None;
-            }
-            match result {
-                Ok(m) => {
-                    c.action_msg = m;
-                    c.action_err = false;
-                    if bracket_changed {
-                        // Grace period for start.gg to settle the new set
-                        // state before re-reading; the 20s cycle cleans up
-                        // any eventual-consistency stragglers.
-                        return Task::perform(
-                            tokio::time::sleep(std::time::Duration::from_millis(800)),
-                            |_| Message::SetsAutoRefresh,
-                        );
-                    }
-                }
-                Err(e) => {
-                    c.action_msg = e;
-                    c.action_err = true;
-                }
-            }
-        }
+        // Handled above, before the console borrow.
+        Msg::Done { .. } => unreachable!("handled at the top of update"),
     }
     Task::none()
 }
@@ -673,7 +687,11 @@ fn group_head(title: &str, n: usize, color: iced::Color) -> Element<'static, Mes
     .into()
 }
 
-fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
+/// One station record as a full card: tags with their entrants, the per-game
+/// character strip, score, status, and the report / edit result / switch
+/// players actions. `pub(super)` because the Bracket screen renders the same
+/// card under a selected set one of the hub's stations tracked.
+pub(super) fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
     let key = rec_key(r);
     let station = r.get("station").and_then(|v| v.as_i64()).unwrap_or(0);
     let set_id = id_str(r.get("id").unwrap_or(&Value::Null));
@@ -1191,7 +1209,31 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
         "matched" => (Some(theme::TEXT_WARNING), 0.06),
         _ => (None, 0.0),
     };
-    let styled = container(match edge {
+    let styled = container(body)
+        .style(move |t: &iced::Theme| {
+            let mut s = theme::panel(t);
+            if let Some(color) = edge {
+                s.background = Some(iced::Background::Color(iced::Color { a: tint, ..color }));
+            }
+            if status == "reported" {
+                s.text_color = Some(theme::TEXT_MUTED);
+            }
+            s
+        })
+        .padding(iced::Padding {
+            top: 12.0,
+            right: 12.0,
+            bottom: 12.0,
+            // Room for the edge overlay (3px strip + the old 10px gap).
+            left: if edge.is_some() { 25.0 } else { 12.0 },
+        })
+        .width(Length::Fill);
+
+    // The edge is an overlay in a Shrink stack, whose base child (the card)
+    // dictates the height — never a Fill-height rule inside the row, which
+    // would make the card grab all free height when it renders outside a
+    // scrollable (the Bracket screen puts it in a plain column).
+    match edge {
         Some(color) => {
             let rule = container(Space::new())
                 .width(Length::Fixed(3.0))
@@ -1204,24 +1246,19 @@ fn set_row<'a>(app: &'a App, r: &'a Value) -> Element<'a, Message> {
                     },
                     ..container::Style::default()
                 });
-            row![rule, body].spacing(10).into()
+            iced::widget::stack![
+                styled,
+                container(rule).padding(iced::Padding {
+                    top: 12.0,
+                    right: 0.0,
+                    bottom: 12.0,
+                    left: 12.0,
+                })
+            ]
+            .into()
         }
-        None => Element::<'_, Message>::from(body),
-    })
-    .style(move |t: &iced::Theme| {
-        let mut s = theme::panel(t);
-        if let Some(color) = edge {
-            s.background = Some(iced::Background::Color(iced::Color { a: tint, ..color }));
-        }
-        if status == "reported" {
-            s.text_color = Some(theme::TEXT_MUTED);
-        }
-        s
-    })
-    .padding(12)
-    .width(Length::Fill);
-
-    styled.into()
+        None => styled.into(),
+    }
 }
 
 #[cfg(test)]

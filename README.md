@@ -57,6 +57,12 @@ The event's whole tree, so nobody has to keep start.gg's page open on a
 second monitor. Each set sits level with the sets that feed it, with the
 lines drawn in, so it reads as a bracket rather than a grid of rounds.
 
+Selecting a set opens its action bar — and if one of your stations tracked
+that set, the station's own record appears under it: the tags it read, the
+per-game characters, and the same Report / `edit result` / `switch players`
+actions the Matches view has. Check who the station thinks is who before
+anything advances, without leaving the tree.
+
 | card | meaning |
 |---|---|
 | indigo, `● live` | being played right now |

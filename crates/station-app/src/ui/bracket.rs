@@ -688,8 +688,16 @@ impl<Message> iced::widget::canvas::Program<Message> for Connectors {
             let elbow = (x1 + x2) / 2.0;
             let path = Path::new(|b| {
                 b.move_to(iced::Point::new(x1, y1));
-                b.line_to(iced::Point::new(elbow, y1));
-                b.line_to(iced::Point::new(elbow, y2));
+                // A feeder level with its successor — every set whose other
+                // seat was seeded from entry or a bye — needs a straight
+                // line. The elbow shape would put a zero-length segment in
+                // the path, and the stroke tessellator silently drops the
+                // whole path over it: these were exactly the lines missing
+                // from the tree.
+                if (y1 - y2).abs() > 0.01 {
+                    b.line_to(iced::Point::new(elbow, y1));
+                    b.line_to(iced::Point::new(elbow, y2));
+                }
                 b.line_to(iced::Point::new(x2, y2));
             });
             frame.stroke(&path, stroke.clone());

@@ -112,6 +112,11 @@ pub struct EngineInner {
     dev_health: Mutex<Option<Value>>,
     /// Same dev-only mechanism for the status line.
     dev_status: Mutex<Option<Value>>,
+    /// Same dev-only mechanism for the hub snapshot. A seeded value must be
+    /// a shadow, not a write to `hub_snapshot`: the hub pushes its own (empty)
+    /// snapshot whenever it finishes building, and on a slow machine that
+    /// lands AFTER the seed and would wipe the fixture out of the capture.
+    dev_hub_snapshot: Mutex<Option<Value>>,
 }
 
 impl EngineInner {
@@ -319,7 +324,12 @@ impl EngineInner {
             "config": cfg,
             "status": status,
             "snapshot": annotate_sgg(&self.snapshot.lock().unwrap(), &self.tagdb.map()),
-            "hubSnapshot": *self.hub_snapshot.lock().unwrap(),
+            "hubSnapshot": self
+                .dev_hub_snapshot
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| self.hub_snapshot.lock().unwrap().clone()),
             "hubUrl": *self.hub_url.lock().unwrap(),
             "forwardUrl": *self.forward_url.lock().unwrap(),
             "log": self.log.lock().unwrap().iter().cloned().collect::<Vec<_>>(),
@@ -368,7 +378,7 @@ impl EngineInner {
             *self.snapshot.lock().unwrap() = s;
         }
         if let Some(h) = hub_snapshot {
-            *self.hub_snapshot.lock().unwrap() = h;
+            *self.dev_hub_snapshot.lock().unwrap() = Some(h);
         }
         if health.is_some() {
             *self.dev_health.lock().unwrap() = health;
@@ -644,6 +654,7 @@ pub fn start(config_dir: PathBuf) -> Engine {
         forward_bad: Mutex::new(None),
         dev_health: Mutex::new(None),
         dev_status: Mutex::new(None),
+        dev_hub_snapshot: Mutex::new(None),
     });
 
     // Background refresher — its own thread, its own schedule, never the

@@ -27,6 +27,13 @@ HEALTH='{"savePath":"C:\\Users\\Station\\AppData\\Local\\Rivals2\\Saved\\SaveGam
 cargo build --release -p station-app
 BIN="${CARGO_TARGET_DIR:-target}/release/rivals-station-reporter"
 
+# Warm the renderer before the first real shot. On a software Vulkan driver
+# (CI's lavapipe) the first launch spends longer compiling shaders than the
+# capture delay waits, and the shot comes out blank; this throwaway run pays
+# that cost into Mesa's shader cache so every real shot renders.
+mkdir -p "$WORK/warmup"
+RSR_CONFIG_DIR="$WORK/warmup" RSR_SCREENSHOT="$WORK/warmup/shot.png" "$BIN" || true
+
 station_config() { # dir station-number
   mkdir -p "$1"
   cat > "$1/config.json" <<EOF

@@ -23,14 +23,14 @@ and never touch the bracket.
 
 ## Setup
 
-| [<img src="docs/screenshots/onboarding.png" width="400">](docs/screenshots/onboarding.png) | [<img src="docs/screenshots/settings.png" width="400">](docs/screenshots/settings.png) |
+| [<img src="docs/screenshots/onboarding.png" width="430">](docs/screenshots/onboarding.png) | [<img src="docs/screenshots/settings.png" width="430">](docs/screenshots/settings.png) |
 |:--:|:--:|
 | **First run** | **Settings**, any time after |
 | pick what this PC is | everything else, without restarting |
 
 ## Operator Screen
 
-| [<img src="docs/screenshots/operator-console.png" width="400">](docs/screenshots/operator-console.png) | [<img src="docs/screenshots/available-sets.png" width="400">](docs/screenshots/available-sets.png) |
+| [<img src="docs/screenshots/operator-console.png" width="430">](docs/screenshots/operator-console.png) | [<img src="docs/screenshots/available-sets.png" width="430">](docs/screenshots/available-sets.png) |
 |:--:|:--:|
 | **The console** | **Current Sets**, below it |
 | every station's sets, live and awaiting | what start.gg says is happening now |
@@ -48,10 +48,14 @@ Start Match happens as a single action.
 
 ## Bracket
 
-| [<img src="docs/screenshots/bracket.png" width="270">](docs/screenshots/bracket.png) | [<img src="docs/screenshots/bracket-unstarted.png" width="270">](docs/screenshots/bracket-unstarted.png) | [<img src="docs/screenshots/bracket-done.png" width="270">](docs/screenshots/bracket-done.png) |
-|:--:|:--:|:--:|
-| **Mid-event** | **Not started on start.gg** | **Finished** |
-| every card state at once | every set still a placeholder | the event as a record |
+| [<img src="docs/screenshots/bracket.png" width="880">](docs/screenshots/bracket.png) |
+|:--:|
+| **Mid-event** — every card state at once |
+
+| [<img src="docs/screenshots/bracket-unstarted.png" width="430">](docs/screenshots/bracket-unstarted.png) | [<img src="docs/screenshots/bracket-done.png" width="430">](docs/screenshots/bracket-done.png) |
+|:--:|:--:|
+| **Not started on start.gg** | **Finished** |
+| every set still a placeholder | the event as a record |
 
 The event's whole tree, so nobody has to keep start.gg's page open on a
 second monitor. Each set sits level with the sets that feed it, with the
@@ -73,10 +77,14 @@ anything advances, without leaving the tree.
 
 ## Station Screen
 
-| [<img src="docs/screenshots/station-idle.png" width="270">](docs/screenshots/station-idle.png) | [<img src="docs/screenshots/station-live.png" width="270">](docs/screenshots/station-live.png) | [<img src="docs/screenshots/station-finished.png" width="270">](docs/screenshots/station-finished.png) |
-|:--:|:--:|:--:|
-| **Between sets** | **Mid-set** | **Just finished** |
-| health chips, waiting for a game | live score as it's played | the set it just closed out |
+| [<img src="docs/screenshots/station-live.png" width="880">](docs/screenshots/station-live.png) |
+|:--:|
+| **Mid-set** — live score as it's played |
+
+| [<img src="docs/screenshots/station-idle.png" width="430">](docs/screenshots/station-idle.png) | [<img src="docs/screenshots/station-finished.png" width="430">](docs/screenshots/station-finished.png) |
+|:--:|:--:|
+| **Between sets** | **Just finished** |
+| health chips, waiting for a game | the set it just closed out |
 
 A station's whole job is on one screen: health chips up top, the set being
 played front and centre, earlier sets below (online ladder games greyed out —

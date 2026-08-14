@@ -443,10 +443,12 @@ fn title_row(st: &State) -> Element<'_, Msg> {
                 st.bracket
                     .as_ref()
                     .map(|b| {
+                        // Event first: when the header runs out of room it is
+                        // the tournament name that clips, not the event.
                         if b.tournament_name.is_empty() {
                             b.event_name.clone()
                         } else {
-                            format!("{} · {}", b.tournament_name, b.event_name)
+                            format!("{} · {}", b.event_name, b.tournament_name)
                         }
                     })
                     .unwrap_or_default()
@@ -456,6 +458,7 @@ fn title_row(st: &State) -> Element<'_, Msg> {
             .wrapping(iced::widget::text::Wrapping::None)
         )
         .width(Length::Fill)
+        .padding(iced::Padding::default().right(12.0))
         .clip(true),
     ]
     .spacing(10)

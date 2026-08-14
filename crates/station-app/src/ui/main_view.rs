@@ -14,38 +14,41 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let is_operator = cfg.mode != "station";
 
     // ---- header --------------------------------------------------------------
-    let mut title_row = row![text("Rivals Station Reporter")
-        .font(theme::FONT_DISPLAY)
-        .size(20)
-        .color(theme::TEXT_PRIMARY)]
-    .spacing(10)
-    .align_y(Alignment::Center);
-    if is_station {
-        title_row = title_row.push(
-            text(format!("Station {}", cfg.station))
-                .size(12)
-                .color(theme::TEXT_MUTED),
-        );
-    }
-    title_row = title_row.push(
-        text(theme::tracked(&cfg.mode))
-            .font(theme::FONT_BODY_SEMIBOLD)
-            .size(10)
-            .color(theme::TEXT_MUTED),
-    );
-    if cfg.dry_run {
-        title_row = title_row.push(text("DRY-RUN").size(11).color(theme::TEXT_WARNING));
-    }
-
+    // The title row carries only the title and the nav; what this PC IS
+    // (mode, station number, dry-run) lives in the chip strip below, where
+    // the rest of this machine's state already is — crowding it against the
+    // nav made both harder to read.
     let header = row![
-        title_row,
+        text("Rivals Station Reporter")
+            .font(theme::FONT_DISPLAY)
+            .size(20)
+            .color(theme::TEXT_PRIMARY),
         Space::new().width(Length::Fill),
         super::nav_actions(app, super::NavView::Matches)
     ]
+    .spacing(10)
     .align_y(Alignment::Center);
 
     // ---- health strip ----------------------------------------------------------
     let mut chips = row![].spacing(6);
+    if is_station {
+        chips = chips.push(id_chip(
+            format!("STATION {}", cfg.station),
+            format!("This PC reports its games as station {}.", cfg.station),
+        ));
+    }
+    if is_operator {
+        chips = chips.push(id_chip(
+            "OPERATOR".into(),
+            "This PC runs the hub and is the one that talks to start.gg.".into(),
+        ));
+    }
+    if cfg.dry_run {
+        chips = chips.push(warn_chip(
+            "DRY-RUN",
+            "Dry run: everything is tracked and logged, nothing is sent to start.gg.",
+        ));
+    }
     let h = &app.st.health;
     if is_station {
         chips = chips.push(chip(
@@ -203,6 +206,44 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .padding(24)
     .width(Length::Fixed(920.0))
     .height(Length::Fill)
+    .into()
+}
+
+/// Identity chip: what this PC is, not how it's doing — no status icon.
+fn id_chip<'a>(label: String, detail: String) -> Element<'a, Message> {
+    tooltip(
+        container(
+            text(theme::tracked(&label))
+                .font(theme::FONT_BODY_SEMIBOLD)
+                .size(10)
+                .color(theme::TEXT_PRIMARY),
+        )
+        .style(theme::panel)
+        .padding([5, 10]),
+        container(text(detail).size(12))
+            .style(theme::tooltip_bubble)
+            .padding(8),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+/// A standing warning the operator opted into, in the same chip strip.
+fn warn_chip<'a>(label: &'static str, detail: &'static str) -> Element<'a, Message> {
+    tooltip(
+        container(
+            text(theme::tracked(label))
+                .font(theme::FONT_BODY_SEMIBOLD)
+                .size(10)
+                .color(theme::TEXT_WARNING),
+        )
+        .style(theme::panel)
+        .padding([5, 10]),
+        container(text(detail).size(12))
+            .style(theme::tooltip_bubble)
+            .padding(8),
+        tooltip::Position::Bottom,
+    )
     .into()
 }
 

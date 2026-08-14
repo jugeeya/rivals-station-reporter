@@ -763,25 +763,24 @@ pub fn apply_seed(app: &mut App, seed: Seed) {
 pub fn view(app: &App) -> Element<'_, Message> {
     // Header at the app level, so it can carry the same top-right nav every
     // screen shares; everything below stays in this screen's own Msg.
-    let header = row![
-        text("Tag Installer")
-            .font(theme::FONT_DISPLAY)
-            .size(20)
-            .color(theme::TEXT_PRIMARY),
-        // The subtitle takes whatever room the nav doesn't need and clips,
-        // so the nav never falls off the card.
-        container(
-            text("everyone's saved tags on this setup, before the bracket")
-                .size(12)
-                .color(theme::TEXT_MUTED)
-                .wrapping(iced::widget::text::Wrapping::None)
-        )
-        .width(Length::Fill)
-        .clip(true),
-        super::nav_actions(app, super::NavView::TagInstaller),
+    // Title and nav on one line; the tagline gets its own full-width line
+    // below rather than a permanently-clipped scrap squeezed between them.
+    let header = column![
+        row![
+            text("Tag Installer")
+                .font(theme::FONT_DISPLAY)
+                .size(20)
+                .color(theme::TEXT_PRIMARY),
+            Space::new().width(Length::Fill),
+            super::nav_actions(app, super::NavView::TagInstaller),
+        ]
+        .spacing(10)
+        .align_y(Center),
+        text("everyone's saved tags on this setup, before the bracket")
+            .size(12)
+            .color(theme::TEXT_MUTED),
     ]
-    .spacing(10)
-    .align_y(Center);
+    .spacing(6);
 
     container(
         column![

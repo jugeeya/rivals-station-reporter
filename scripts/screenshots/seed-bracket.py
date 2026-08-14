@@ -221,6 +221,45 @@ elif variant == "done":
     # Land on the Grand Final: a played-out bracket's action bar is where a
     # wrong result gets fixed, so the shot should show that being offered.
     seed["bracket"]["selected"] = "w-j"
+    # Station 1's own record of that Grand Final, auto-reported — so the shot
+    # also shows the station card the bracket renders under a tracked set:
+    # the games as the station saw them, and the after-the-fact actions
+    # (Re-report, edit result, switch players).
+    seed["hubSnapshot"] = {
+        "stations": {},
+        "sets": [{
+            "id": "sim-w-j", "station": 1, "ingestedAt": now - 9 * m,
+            "set": {"setId": "sim-w-j", "complete": True,
+                    "startEpoch": now - 36 * m, "endEpoch": now - 10 * m,
+                    "durationSeconds": 26 * m, "winsRequired": 3,
+                    "matchCount": 5, "winnerSlot": 0, "winnerName": "BRUJITA",
+                    "winnerCharacter": "Maypul",
+                    "players": [
+                        {"slot": 0, "name": "BRUJITA", "character": "Maypul",
+                         "wins": 3},
+                        {"slot": 1, "name": "LOOM", "character": "Zetterburn",
+                         "wins": 2}],
+                    "games": [
+                        {"gameNum": n, "winnerSlot": w,
+                         "chars": [{"slot": 0, "character": "Maypul"},
+                                   {"slot": 1, "character": c1}]}
+                        for n, w, c1 in [(1, 0, "Zetterburn"),
+                                         (2, 1, "Zetterburn"),
+                                         (3, 0, "Ranno"),
+                                         (4, 1, "Ranno"),
+                                         (5, 0, "Zetterburn")]]},
+            "matchedStartggSetId": "w-j", "fullRoundText": "Grand Final",
+            "entrants": [{"id": "E3", "name": "BRUJITA"},
+                         {"id": "E5", "name": "LOOM"}],
+            "slotEntrants": [
+                {"slot": 0, "entrantId": "E3", "entrantName": "BRUJITA"},
+                {"slot": 1, "entrantId": "E5", "entrantName": "LOOM"}],
+            "candidateWinnerEntrantId": "E3", "confidence": "high",
+            "status": "reported", "reportedBy": "auto", "swap": False,
+            "mode": None, "startggState": 3,
+            "reportable": False, "notReportableReason": None,
+        }],
+    }
 
 name = "bracket-seed.json" if variant == "live" else f"bracket-{variant}-seed.json"
 json.dump(seed, open(profile + "/" + name, "w"))

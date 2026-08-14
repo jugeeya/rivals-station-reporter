@@ -1377,7 +1377,10 @@ mod tests {
         let st = seeded();
         let mut ui = iced_test::simulator(screen(&st, &ctx(None)));
         assert!(ui.find("Bracket").is_ok());
-        assert!(ui.find("The Hangout #47 · Rivals 2 Singles").is_ok());
+        assert!(
+            ui.find("Rivals 2 Singles · The Hangout #47").is_ok(),
+            "event first, so the tournament is what clips when room runs out"
+        );
         assert!(ui.find("Winners Quarter-Final").is_ok());
         assert!(
             ui.find("jugeeya").is_ok(),

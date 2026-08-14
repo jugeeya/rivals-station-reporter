@@ -791,7 +791,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     )
     .style(theme::card_rich)
     .padding(24)
-    .width(Length::Fixed(920.0))
+    .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }

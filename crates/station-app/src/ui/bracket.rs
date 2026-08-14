@@ -377,19 +377,30 @@ pub fn view(app: &App) -> Element<'_, Message> {
     ]
     .spacing(10)
     .align_y(Alignment::Center);
-    let mut below = column![Element::from(below_header(st, &ctx)).map(Message::Bracket)]
+    let mut below = column![Element::from(tree_area(st)).map(Message::Bracket)]
         .spacing(14)
         .height(Length::Fill);
-    // The station's own record of the selected set — the same card the
-    // Matches view shows, same actions and all (report, edit result, switch
-    // players) — so the TO can check the tags the station read before
-    // advancing anyone, without leaving the tree.
+    // The action bar and — when a station tracked the selected set — the
+    // station's own record card (same card as the Matches view, same
+    // report / edit result / switch players actions). Capped and scrollable:
+    // a tall bottom (Change result open, the card's editor expanded, a short
+    // window) must scroll, never run its text off the bottom of the card.
+    let mut bottom = column![].spacing(14);
+    let mut has_bottom = false;
+    if let Some(bar) = action_bar(st, &ctx) {
+        bottom = bottom.push(Element::from(bar).map(Message::Bracket));
+        has_bottom = true;
+    }
     if let Some(r) = st
         .selected
         .as_deref()
         .and_then(|id| station_record(&app.st.hub_snapshot.sets, id))
     {
-        below = below.push(super::console::set_row(app, r));
+        bottom = bottom.push(super::console::set_row(app, r));
+        has_bottom = true;
+    }
+    if has_bottom {
+        below = below.push(container(scrollable(bottom).width(Length::Fill)).max_height(460.0));
     }
     page(header, below.into())
 }
@@ -421,7 +432,11 @@ fn screen<'a>(st: &'a State, ctx: &Ctx) -> Element<'a, Msg> {
     ]
     .spacing(10)
     .align_y(Alignment::Center);
-    page(header, below_header(st, ctx))
+    let mut below = column![tree_area(st)].spacing(14).height(Length::Fill);
+    if let Some(bar) = action_bar(st, ctx) {
+        below = below.push(bar);
+    }
+    page(header, below.into())
 }
 
 fn page<'a, M: 'a>(header: iced::widget::Row<'a, M>, below: Element<'a, M>) -> Element<'a, M> {
@@ -497,9 +512,9 @@ fn refresh_button(st: &State) -> Element<'_, Msg> {
         .into()
 }
 
-/// Everything under the header: the not-started note, the tree, and the
-/// selected set's action bar.
-fn below_header<'a>(st: &'a State, ctx: &Ctx) -> Element<'a, Msg> {
+/// The not-started note and the tree. The action bar and the station card
+/// live below in their own (scrollable) region — see `view`.
+fn tree_area(st: &State) -> Element<'_, Msg> {
     let body: Element<'_, Msg> = match (&st.bracket, st.group.as_ref()) {
         _ if !st.load_err.is_empty() => notice(&st.load_err, true),
         (Some(b), Some(group)) => tree(b, group, st.selected.as_deref()),
@@ -539,9 +554,6 @@ fn below_header<'a>(st: &'a State, ctx: &Ctx) -> Element<'a, Msg> {
         );
     }
     content = content.push(body);
-    if let Some(bar) = action_bar(st, ctx) {
-        content = content.push(bar);
-    }
     content.into()
 }
 

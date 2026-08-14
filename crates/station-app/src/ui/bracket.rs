@@ -372,9 +372,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // mapped up, the shared nav (toggle, other screens, overlays) as-is.
     let header = row![
         Element::from(title_row(st)).map(Message::Bracket),
-        Space::new().width(Length::Fill),
         Element::from(refresh_button(st)).map(Message::Bracket),
-        super::nav_actions(app, true),
+        super::nav_actions(app, super::NavView::Bracket),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
@@ -437,20 +436,27 @@ fn page<'a, M: 'a>(header: iced::widget::Row<'a, M>, below: Element<'a, M>) -> E
 fn title_row(st: &State) -> Element<'_, Msg> {
     let mut title = row![
         text("Bracket").font(theme::FONT_DISPLAY).size(20),
-        text(
-            st.bracket
-                .as_ref()
-                .map(|b| {
-                    if b.tournament_name.is_empty() {
-                        b.event_name.clone()
-                    } else {
-                        format!("{} · {}", b.tournament_name, b.event_name)
-                    }
-                })
-                .unwrap_or_default()
+        // The event name takes whatever room the nav doesn't need and
+        // clips, so the nav never falls off the card.
+        container(
+            text(
+                st.bracket
+                    .as_ref()
+                    .map(|b| {
+                        if b.tournament_name.is_empty() {
+                            b.event_name.clone()
+                        } else {
+                            format!("{} · {}", b.tournament_name, b.event_name)
+                        }
+                    })
+                    .unwrap_or_default()
+            )
+            .size(13)
+            .color(theme::TEXT_MUTED)
+            .wrapping(iced::widget::text::Wrapping::None)
         )
-        .size(13)
-        .color(theme::TEXT_MUTED),
+        .width(Length::Fill)
+        .clip(true),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
@@ -476,7 +482,12 @@ fn title_row(st: &State) -> Element<'_, Msg> {
 /// also carries the shared nav, and a worded button pushes it off the card
 /// at ordinary window widths.
 fn refresh_button(st: &State) -> Element<'_, Msg> {
-    button(text(if st.loading { "…" } else { "⟳" }).size(13))
+    let label: Element<'_, Msg> = if st.loading {
+        text("…").size(13).into()
+    } else {
+        super::nav_icon(theme::ICON_REFRESH).into()
+    };
+    button(label)
         .style(theme::button_linkish)
         .padding([2, 6])
         .on_press_maybe((!st.loading).then_some(Msg::Refresh))

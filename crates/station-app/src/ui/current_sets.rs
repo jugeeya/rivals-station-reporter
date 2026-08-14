@@ -242,10 +242,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .size(11)
             .color(theme::TEXT_MUTED),
         Space::new().width(Length::Fill),
-        button(text(if cs.refreshing { "…" } else { "⟳" }).size(13))
-            .style(theme::button_linkish)
-            .padding([2, 6])
-            .on_press(Message::Sets(Msg::Refresh)),
+        button(if cs.refreshing {
+            iced::widget::text("…").size(13)
+        } else {
+            super::nav_icon(theme::ICON_REFRESH)
+        })
+        .style(theme::button_linkish)
+        .padding([2, 6])
+        .on_press(Message::Sets(Msg::Refresh)),
     ]
     .spacing(8)
     .align_y(Alignment::Center)]

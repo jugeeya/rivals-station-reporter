@@ -26,7 +26,7 @@ use iced::{Center, Element, Fill, Length, Task};
 use chrono::TimeZone;
 use serde::Deserialize;
 
-use super::{App, Message, Screen};
+use super::{App, Message};
 use crate::theme;
 use std::collections::HashMap;
 
@@ -141,9 +141,6 @@ pub struct State {
 
 #[derive(Debug, Clone)]
 pub enum Msg {
-    /// Back to the reporter (handled at the App level).
-    Close,
-
     SlugChanged(String),
     TournamentChanged(String),
     Fetch,
@@ -370,8 +367,6 @@ impl State {
     /// Runs on `&mut State` so tests can drive the screen without an `App`.
     fn step(&mut self, message: Msg) -> Task<Msg> {
         match message {
-            Msg::Close => Task::none(),
-
             Msg::SlugChanged(v) => {
                 self.slug = v;
                 Task::none()
@@ -859,13 +854,7 @@ impl State {
 // ---- App-level wiring --------------------------------------------------------
 
 pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
-    match msg {
-        Msg::Close => {
-            app.screen = Screen::Reporter;
-            Task::none()
-        }
-        other => app.vod.step(other).map(Message::Vod),
-    }
+    app.vod.step(msg).map(Message::Vod)
 }
 
 /// Called when the screen is opened: prefill the slug from the reporter's own
@@ -1040,7 +1029,34 @@ pub fn apply_seed(app: &mut App, seed: Seed) -> Task<Message> {
 // ---- view --------------------------------------------------------------------
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    screen(&app.vod).map(Message::Vod)
+    // Header at the app level, so it can carry the same top-right nav every
+    // screen shares; everything below stays in this screen's own Msg.
+    let header = row![
+        text("VOD Splitter")
+            .font(theme::FONT_DISPLAY)
+            .size(20)
+            .color(theme::TEXT_PRIMARY),
+        // The subtitle takes whatever room the nav doesn't need and clips,
+        // so the nav never falls off the card.
+        container(
+            text("one clip per set, cut from a station's recording")
+                .size(12)
+                .color(theme::TEXT_MUTED)
+                .wrapping(iced::widget::text::Wrapping::None)
+        )
+        .width(Length::Fill)
+        .clip(true),
+        super::nav_actions(app, super::NavView::VodSplitter),
+    ]
+    .spacing(10)
+    .align_y(Center);
+
+    container(column![header, Element::from(screen(&app.vod)).map(Message::Vod)].spacing(14))
+        .style(theme::card_rich)
+        .padding(24)
+        .width(Length::Fixed(920.0))
+        .height(Length::Fill)
+        .into()
 }
 
 fn screen(st: &State) -> Element<'_, Msg> {
@@ -1064,23 +1080,6 @@ fn screen(st: &State) -> Element<'_, Msg> {
             .width(132)
     };
     let hint = |s: String| text(s).size(12).color(theme::TEXT_MUTED);
-
-    // ---- header ---------------------------------------------------------------
-    let header = row![
-        text("VOD Splitter")
-            .font(theme::FONT_DISPLAY)
-            .size(20)
-            .color(theme::TEXT_PRIMARY),
-        text("one clip per set, cut from a station's recording")
-            .size(12)
-            .color(theme::TEXT_MUTED),
-        Space::new().width(Length::Fill),
-        button(text("← Reporter").size(13))
-            .style(theme::button_linkish)
-            .on_press(Msg::Close),
-    ]
-    .spacing(10)
-    .align_y(Center);
 
     // ---- step 1: event ----------------------------------------------------------
     let sets_label = match (&st.sets_dir, st.local_sets.len()) {
@@ -1306,10 +1305,8 @@ fn screen(st: &State) -> Element<'_, Msg> {
             Tone::Bad => theme::TEXT_FAILURE,
         });
 
-    container(column![header, step1, step2, step3, actions, progress, status, body].spacing(14))
-        .style(theme::card_rich)
-        .padding(24)
-        .width(Length::Fixed(920.0))
+    column![step1, step2, step3, actions, progress, status, body]
+        .spacing(14)
         .height(Length::Fill)
         .into()
 }
@@ -1652,8 +1649,10 @@ mod tests {
         let _ = st.step(Msg::Build);
         // Exercises the whole widget tree headlessly — catches view() panics
         // and proves the clip rows actually make it on screen.
+        // The title lives in the app-level header now (with the shared nav);
+        // the screen body starts at the numbered steps.
         let mut ui = iced_test::simulator(screen(&st));
-        assert!(ui.find("VOD Splitter").is_ok());
+        assert!(ui.find("Event").is_ok());
         assert!(
             ui.find("[Hangout] jugz (Fleet) vs. kim (Zetter) - Winners Final")
                 .is_ok(),

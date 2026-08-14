@@ -35,57 +35,112 @@ pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static)
         .expect("blocking task panicked")
 }
 
-/// The top-right page actions both main views share: the Bracket/Matches
-/// toggle, then the other screens and overlays. Same page, different view
-/// piece — so nothing moves when the toggle is clicked.
-pub fn nav_actions(app: &App, bracket_active: bool) -> Element<'_, Message> {
-    use iced::widget::{button, row, text, Space};
-    row![
-        view_toggle(
-            bracket_active,
-            Message::OpenBracket,
-            Message::Bracket(bracket::Msg::Close),
-        ),
-        Space::new().width(Length::Fixed(8.0)),
-        button(text("Tag Installer").size(13))
-            .style(theme::button_linkish)
-            .on_press(Message::OpenTagInstaller),
-        button(text("VOD Splitter").size(13))
-            .style(theme::button_linkish)
-            .on_press(Message::OpenVodSplitter),
-        button(text(if app.show_log { "Log ▾" } else { "Log" }).size(13))
-            .style(theme::button_linkish)
-            .on_press(Message::ToggleLog),
-        button(text("Settings").size(13))
-            .style(theme::button_linkish)
-            .on_press(Message::OpenSettings),
-    ]
-    .spacing(4)
-    .align_y(iced::Alignment::Center)
-    .into()
+/// Which view the shared nav sits on: the toggle marks Bracket/Matches as
+/// active, and the current screen's own link is omitted rather than shown
+/// as a dead destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavView {
+    Bracket,
+    Matches,
+    TagInstaller,
+    VodSplitter,
 }
 
-/// The Bracket View / Matches View toggle both main screens carry top-right.
-/// The active half is inert (nothing to do), the other switches screens.
-pub fn view_toggle<'a, M: Clone + 'a>(
-    bracket_active: bool,
-    to_bracket: M,
-    to_matches: M,
-) -> iced::Element<'a, M> {
+/// An icon glyph from the bundled Material Symbols subset, sized to sit next
+/// to size-13 nav text.
+pub fn nav_icon(glyph: &'static str) -> iced::widget::Text<'static> {
+    iced::widget::text(glyph).font(theme::FONT_ICONS).size(15)
+}
+
+/// The top-right page actions every screen shares: the Bracket/Matches
+/// toggle, then the other screens and overlays. Same chrome everywhere, so
+/// switching views moves nothing.
+pub fn nav_actions(app: &App, view: NavView) -> Element<'_, Message> {
+    use iced::widget::{button, row, text, tooltip, Space};
+    let link = |glyph: &'static str, label: &'static str, msg: Message| {
+        button(
+            row![nav_icon(glyph), text(label).size(13)]
+                .spacing(5)
+                .align_y(iced::Alignment::Center),
+        )
+        .style(theme::button_linkish)
+        .on_press(msg)
+    };
+    // Log and Settings are utilities, not destinations: icon-only (with a
+    // tooltip) keeps the header inside the card at ordinary window widths.
+    let utility = |glyph: &'static str, tip: &'static str, msg: Message| {
+        tooltip(
+            button(nav_icon(glyph).size(17))
+                .style(theme::button_linkish)
+                .padding([4, 6])
+                .on_press(msg),
+            container(text(tip).size(12))
+                .style(theme::tooltip_bubble)
+                .padding(6),
+            tooltip::Position::Bottom,
+        )
+    };
+    let mut nav = row![view_toggle(view), Space::new().width(Length::Fixed(6.0))]
+        .spacing(2)
+        .align_y(iced::Alignment::Center);
+    if view != NavView::TagInstaller {
+        nav = nav.push(link(
+            theme::ICON_TAGS,
+            "Tag Installer",
+            Message::OpenTagInstaller,
+        ));
+    }
+    if view != NavView::VodSplitter {
+        nav = nav.push(link(
+            theme::ICON_SPLIT,
+            "VOD Splitter",
+            Message::OpenVodSplitter,
+        ));
+    }
+    nav = nav.push(utility(
+        theme::ICON_LOG,
+        if app.show_log { "Hide the log" } else { "Log" },
+        Message::ToggleLog,
+    ));
+    nav = nav.push(utility(
+        theme::ICON_SETTINGS,
+        "Settings",
+        Message::OpenSettings,
+    ));
+    nav.into()
+}
+
+/// The Bracket View / Matches View toggle. The active half is inert (nothing
+/// to do); from a third screen neither is active and both switch.
+pub fn view_toggle<'a>(view: NavView) -> iced::Element<'a, Message> {
     use iced::widget::{button, row, text};
-    let half = |label: &'static str, active: bool, msg: M| {
-        button(text(label).size(13))
-            .style(if active {
-                theme::button_tab_active
-            } else {
-                theme::button_surface
-            })
-            .padding([5, 12])
-            .on_press_maybe((!active).then_some(msg))
+    let half = |glyph: &'static str, label: &'static str, active: bool, msg: Message| {
+        button(
+            row![nav_icon(glyph), text(label).size(13)]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+        )
+        .style(if active {
+            theme::button_tab_active
+        } else {
+            theme::button_surface
+        })
+        .padding([5, 10])
+        .on_press_maybe((!active).then_some(msg))
     };
     row![
-        half("Bracket View", bracket_active, to_bracket),
-        half("Matches View", !bracket_active, to_matches),
+        half(
+            theme::ICON_BRACKET,
+            "Bracket View",
+            view == NavView::Bracket,
+            Message::OpenBracket,
+        ),
+        half(
+            theme::ICON_MATCHES,
+            "Matches View",
+            view == NavView::Matches,
+            Message::Bracket(bracket::Msg::Close),
+        ),
     ]
     .spacing(4)
     .into()

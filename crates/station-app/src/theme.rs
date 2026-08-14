@@ -77,8 +77,20 @@ pub const FONT_BODY_BOLD: iced::Font = iced::Font {
     ..iced::Font::with_name("Inter")
 };
 pub const FONT_MONO: iced::Font = iced::Font::with_name("Ubuntu Sans Mono");
+/// Material Symbols Outlined, subset to just the glyphs below (2.6 KB).
+/// Regenerate with fonttools if a new icon is needed: instance the variable
+/// font at FILL=0 GRAD=0 opsz=24 wght=400, then pyftsubset to the codepoints.
+pub const FONT_ICONS: iced::Font = iced::Font::with_name("Material Symbols Outlined");
 
-pub const FONT_BYTES: [&[u8]; 7] = [
+pub const ICON_BRACKET: &str = "\u{e97a}"; // account_tree
+pub const ICON_MATCHES: &str = "\u{e8ef}"; // view_list
+pub const ICON_TAGS: &str = "\u{f05b}"; // sell
+pub const ICON_SPLIT: &str = "\u{e14e}"; // content_cut
+pub const ICON_LOG: &str = "\u{eb8e}"; // terminal
+pub const ICON_SETTINGS: &str = "\u{e8b8}"; // settings
+pub const ICON_REFRESH: &str = "\u{e5d5}"; // refresh
+
+pub const FONT_BYTES: [&[u8]; 8] = [
     include_bytes!("../assets/fonts/SpaceGrotesk-Medium.ttf"),
     include_bytes!("../assets/fonts/SpaceGrotesk-Bold.ttf"),
     include_bytes!("../assets/fonts/Inter-Regular.ttf"),
@@ -86,6 +98,7 @@ pub const FONT_BYTES: [&[u8]; 7] = [
     include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
     include_bytes!("../assets/fonts/Inter-Bold.ttf"),
     include_bytes!("../assets/fonts/UbuntuSansMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/MaterialSymbolsSubset.ttf"),
 ];
 
 // ---- widget styles ----------------------------------------------------------

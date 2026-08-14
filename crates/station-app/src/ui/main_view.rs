@@ -40,7 +40,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let header = row![
         title_row,
         Space::new().width(Length::Fill),
-        super::nav_actions(app, false)
+        super::nav_actions(app, super::NavView::Matches)
     ]
     .align_y(Alignment::Center);
 

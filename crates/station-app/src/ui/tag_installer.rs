@@ -24,7 +24,7 @@ use iced::{Center, Element, Fill, Length, Task};
 
 use serde::Deserialize;
 
-use super::{blocking, App, Message, Screen};
+use super::{blocking, App, Message};
 use crate::tags::{bracket, diff, match_bracket, save, site};
 use crate::theme;
 
@@ -74,9 +74,6 @@ pub struct State {
 
 #[derive(Debug, Clone)]
 pub enum Msg {
-    /// Back to the reporter (handled at the App level).
-    Close,
-
     ChooseSave,
     SavePicked(Option<PathBuf>),
     SaveTagsRead(Result<Vec<String>, String>),
@@ -201,8 +198,6 @@ impl State {
 
     fn step(&mut self, message: Msg) -> Task<Msg> {
         match message {
-            Msg::Close => Task::none(),
-
             Msg::ChooseSave => Task::perform(
                 async {
                     rfd::AsyncFileDialog::new()
@@ -631,13 +626,7 @@ async fn install_files(
 // ---- App-level wiring --------------------------------------------------------
 
 pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
-    match msg {
-        Msg::Close => {
-            app.screen = Screen::Reporter;
-            Task::none()
-        }
-        other => app.tag_installer.step(other).map(Message::Tags),
-    }
+    app.tag_installer.step(msg).map(Message::Tags)
 }
 
 /// Called when the screen is opened: locate the tag save (next to the stats
@@ -772,7 +761,40 @@ pub fn apply_seed(app: &mut App, seed: Seed) {
 // ---- view --------------------------------------------------------------------
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    screen(&app.tag_installer).map(Message::Tags)
+    // Header at the app level, so it can carry the same top-right nav every
+    // screen shares; everything below stays in this screen's own Msg.
+    let header = row![
+        text("Tag Installer")
+            .font(theme::FONT_DISPLAY)
+            .size(20)
+            .color(theme::TEXT_PRIMARY),
+        // The subtitle takes whatever room the nav doesn't need and clips,
+        // so the nav never falls off the card.
+        container(
+            text("everyone's saved tags on this setup, before the bracket")
+                .size(12)
+                .color(theme::TEXT_MUTED)
+                .wrapping(iced::widget::text::Wrapping::None)
+        )
+        .width(Length::Fill)
+        .clip(true),
+        super::nav_actions(app, super::NavView::TagInstaller),
+    ]
+    .spacing(10)
+    .align_y(Center);
+
+    container(
+        column![
+            header,
+            Element::from(screen(&app.tag_installer)).map(Message::Tags)
+        ]
+        .spacing(14),
+    )
+    .style(theme::card_rich)
+    .padding(24)
+    .width(Length::Fixed(920.0))
+    .height(Length::Fill)
+    .into()
 }
 
 fn screen(st: &State) -> Element<'_, Msg> {
@@ -783,23 +805,6 @@ fn screen(st: &State) -> Element<'_, Msg> {
             .color(theme::TEXT_MUTED)
             .width(132)
     };
-
-    // ---- header ---------------------------------------------------------------
-    let header = row![
-        text("Tag Installer")
-            .font(theme::FONT_DISPLAY)
-            .size(20)
-            .color(theme::TEXT_PRIMARY),
-        text("everyone's saved tags on this setup, before the bracket")
-            .size(12)
-            .color(theme::TEXT_MUTED),
-        Space::new().width(Length::Fill),
-        button(text("← Reporter").size(13))
-            .style(theme::button_linkish)
-            .on_press(Msg::Close),
-    ]
-    .spacing(10)
-    .align_y(Center);
 
     // ---- tag save -------------------------------------------------------------
     let save_label: String = match (&st.save_path, &st.save_tags) {
@@ -848,7 +853,7 @@ fn screen(st: &State) -> Element<'_, Msg> {
     .spacing(10)
     .align_y(Center);
 
-    let mut setup = column![header, save_row, bracket_row].spacing(12);
+    let mut setup = column![save_row, bracket_row].spacing(12);
 
     if !st.misses.is_empty() {
         let mut misses = column![button(
@@ -1020,10 +1025,8 @@ fn screen(st: &State) -> Element<'_, Msg> {
             Tone::Bad => theme::TEXT_FAILURE,
         });
 
-    container(column![setup, list_head, list, actions, status].spacing(14))
-        .style(theme::card_rich)
-        .padding(24)
-        .width(Length::Fixed(920.0))
+    column![setup, list_head, list, actions, status]
+        .spacing(14)
         .height(Length::Fill)
         .into()
 }
@@ -1092,8 +1095,10 @@ mod tests {
     fn view_renders_manifest_rows() {
         let mut st = state_with_manifest();
         st.selected.insert("kim.r2tag.zip".into());
+        // The title lives in the app-level header now (with the shared nav);
+        // the screen body starts at the tag-save row.
         let mut ui = iced_test::simulator(screen(&st));
-        assert!(ui.find("Tag Installer").is_ok());
+        assert!(ui.find("Tag save").is_ok());
         assert!(ui.find("LOOM").is_ok(), "manifest rows should be visible");
         assert!(ui.find("Install 1 tag(s)").is_ok());
     }

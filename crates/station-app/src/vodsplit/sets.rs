@@ -15,6 +15,11 @@ const ENDPOINT: &str = "https://www.start.gg/api/-/gql";
 const USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) \
     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36";
 const PER_PAGE: u32 = 50;
+/// start.gg budgets each query at ~1000 returned objects; a completed
+/// best-of-5 with reported games costs dozens per set, so a big finished
+/// event can refuse the full page size. A "query complexity" answer halves
+/// the page size and refetches, down to this floor.
+const MIN_PER_PAGE: u32 = 8;
 
 /// start.gg caps how much you can pull per minute; a big bracket is a lot of
 /// pages, so give each request room rather than failing the whole fetch.
@@ -214,13 +219,39 @@ fn players_of(set: &RawSet) -> Vec<Player> {
     out
 }
 
-/// Fetch every completed set in an event, following pagination.
+/// Does this GraphQL error mean "you asked for too much per page"? Same
+/// check as `bracket::fetch` (the two clients stay deliberately standalone).
+fn is_complexity_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("complexity") || m.contains("objects returned")
+}
+
+/// Fetch every completed set in an event, following pagination. Starts at
+/// the full page size and halves it whenever start.gg refuses the page as
+/// too complex — a finished event's sets carry far more objects (games,
+/// selections) than the fixtures this was sized against.
 pub async fn fetch_sets(slug: String) -> Result<EventSets, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
 
+    let mut per_page = PER_PAGE;
+    loop {
+        match fetch_sets_at(&client, &slug, per_page).await {
+            Err(e) if is_complexity_error(&e) && per_page > MIN_PER_PAGE => {
+                per_page = (per_page / 2).max(MIN_PER_PAGE);
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn fetch_sets_at(
+    client: &reqwest::Client,
+    slug: &str,
+    per_page: u32,
+) -> Result<EventSets, String> {
     let mut all: Vec<SetInfo> = Vec::new();
     let mut event_name = String::new();
     let mut tournament_name = String::new();
@@ -230,7 +261,7 @@ pub async fn fetch_sets(slug: String) -> Result<EventSets, String> {
     while page <= total_pages {
         let body = serde_json::json!({
             "query": QUERY,
-            "variables": { "slug": slug, "page": page, "perPage": PER_PAGE },
+            "variables": { "slug": slug, "page": page, "perPage": per_page },
         });
         let resp = client
             .post(ENDPOINT)

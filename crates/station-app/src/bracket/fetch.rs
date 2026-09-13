@@ -19,9 +19,16 @@ const ENDPOINT: &str = "https://www.start.gg/api/-/gql";
 const USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) \
     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36";
 const PER_PAGE: u32 = 60;
-/// 60 sets/page — 20 pages is a 1200-set event, far past anything this runs
-/// against, and bounds a pathological response instead of paging forever.
-const MAX_PAGES: u32 = 20;
+/// start.gg budgets each query at ~1000 returned objects, and a completed
+/// best-of-5 set with reported games costs ~50 of them (games × selections ×
+/// entrant/character, slots × standing/stats/score). 60 sets/page sails
+/// through a live event but can blow the budget on a played-out one, so a
+/// "query complexity" answer halves the page size and refetches, down to
+/// this floor. See `is_complexity_error`.
+const MIN_PER_PAGE: u32 = 8;
+/// Bounds a pathological response instead of paging forever — a 1200-set
+/// event is far past anything this runs against.
+const MAX_SETS: u32 = 1200;
 const TIMEOUT_SECS: u64 = 30;
 
 /// `round`, `identifier` and `winnerId` are what make this a bracket rather
@@ -474,21 +481,44 @@ fn convert(node: RawSet) -> Option<BracketSet> {
     })
 }
 
-/// Fetch every set in an event, following pagination.
+/// Does this GraphQL error mean "you asked for too much per page"? start.gg
+/// phrases it as "query complexity is too high: the query returns more than
+/// 1000 objects" (wording drifts; both halves are matched loosely).
+fn is_complexity_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("complexity") || m.contains("objects returned")
+}
+
+/// Fetch every set in an event, following pagination. Starts at the full
+/// page size (one request for a typical local) and halves it whenever
+/// start.gg refuses the page as too complex — a completed bracket's sets
+/// carry far more objects (games, selections) than a live one's.
 pub async fn fetch(slug: String) -> Result<Bracket, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
 
+    let mut per_page = PER_PAGE;
+    loop {
+        match fetch_at(&client, &slug, per_page).await {
+            Err(e) if is_complexity_error(&e) && per_page > MIN_PER_PAGE => {
+                per_page = (per_page / 2).max(MIN_PER_PAGE);
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn fetch_at(client: &reqwest::Client, slug: &str, per_page: u32) -> Result<Bracket, String> {
     let mut out = Bracket::default();
     let mut page = 1u32;
     let mut total_pages = 1u32;
 
-    while page <= total_pages && page <= MAX_PAGES {
+    while page <= total_pages && (page - 1) * per_page < MAX_SETS {
         let body = json!({
             "query": QUERY,
-            "variables": { "slug": slug, "page": page, "perPage": PER_PAGE },
+            "variables": { "slug": slug, "page": page, "perPage": per_page },
         });
         let resp = client
             .post(ENDPOINT)
@@ -571,6 +601,19 @@ pub async fn fetch(slug: String) -> Result<Bracket, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_complexity_refusal_is_recognized_however_startgg_words_it() {
+        // The wording that prompted the page-size ladder, plus the halves it
+        // could drift between — and a plain failure must NOT retry.
+        assert!(is_complexity_error(
+            "query complexity is too high: the query returns more than 1000 objects"
+        ));
+        assert!(is_complexity_error("Query complexity too high"));
+        assert!(is_complexity_error("more than 1000 objects returned"));
+        assert!(!is_complexity_error("start.gg returned HTTP 503"));
+        assert!(!is_complexity_error("rate limit exceeded"));
+    }
 
     fn parse(body: &str) -> Bracket {
         let parsed: Resp = serde_json::from_str(body).expect("fixture parses");

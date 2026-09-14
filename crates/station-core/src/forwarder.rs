@@ -150,18 +150,28 @@ impl Forwarder {
 
     // -- persistence --------------------------------------------------------
     fn load_state(&self) -> Value {
+        let mut state = json!({ "version": STATE_VERSION, "sent_sets": [], "current_hash": null });
         if let Ok(text) = std::fs::read_to_string(&self.state_path) {
             if let Ok(s) = serde_json::from_str::<Value>(&text) {
                 if s["version"].as_i64() == Some(STATE_VERSION) {
-                    let mut s = s;
-                    if !s["sent_sets"].is_array() {
-                        s["sent_sets"] = json!([]);
+                    state = s;
+                    if !state["sent_sets"].is_array() {
+                        state["sent_sets"] = json!([]);
                     }
-                    return s;
                 }
             }
         }
-        json!({ "version": STATE_VERSION, "sent_sets": [], "current_hash": null })
+        // A stable identity for THIS install, persisted with the send state:
+        // the hub uses it to warn when two different PCs both claim the same
+        // station number, which no station-number check can catch on its own.
+        if state["senderId"].as_str().is_none_or(str::is_empty) {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            state["senderId"] = json!(format!("{:x}-{:x}", std::process::id(), nanos));
+        }
+        state
     }
 
     fn save_state(&self) {
@@ -183,7 +193,11 @@ impl Forwarder {
 
     // -- work helpers ---------------------------------------------------------
     fn payload(&self, extra: Value) -> Value {
-        let mut p = json!({ "slug": self.slug, "station": self.station });
+        let mut p = json!({
+            "slug": self.slug,
+            "station": self.station,
+            "sender": self.state["senderId"],
+        });
         if let (Some(obj), Some(ex)) = (p.as_object_mut(), extra.as_object()) {
             for (k, v) in ex {
                 obj.insert(k.clone(), v.clone());

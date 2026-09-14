@@ -857,6 +857,19 @@ impl Hub {
         station: i64,
         current: Option<&Value>,
     ) -> Result<Value, (Value, u16)> {
+        self.handle_current_from(slug, station, current, None)
+    }
+
+    /// `handle_current` with the sender's identity, when the payload carries
+    /// one — the hub's only handle on "two different PCs are both claiming to
+    /// be station N", which no binding rule can otherwise detect.
+    pub fn handle_current_from(
+        &self,
+        slug: &str,
+        station: i64,
+        current: Option<&Value>,
+        sender: Option<&str>,
+    ) -> Result<Value, (Value, u16)> {
         let current = match current {
             Some(v) if v.is_object() => v.clone(),
             _ => json!({}),
@@ -889,40 +902,180 @@ impl Hub {
         };
         let rebind = state == &json!("set_start")
             || (state == &json!("set_open") && (new_set_here || prev_binding.is_none()));
-        if rebind {
+        let fresh = if rebind {
             let sg = self.bind_station_set(slug, station);
-            if truthy(Some(&sg)) {
-                rec["startgg"] = sg;
-            }
+            truthy(Some(&sg)).then_some(sg)
             // A fresh lookup that finds nothing deliberately DROPS any old
             // binding: it belonged to the previous set at this station, and
             // "no start.gg set at this station" (kept off the bracket) is
             // strictly safer than pushing this set's games to that one.
-        } else if let Some(b) = prev_binding {
-            rec["startgg"] = b;
+        } else {
+            if let Some(b) = prev_binding {
+                rec["startgg"] = b;
+            }
+            None
+        };
+        // Sender identity rides on the stations record so a conflict, once
+        // seen, stays visible; the log line is the operator-facing warning.
+        let prev_sender = prev
+            .as_ref()
+            .and_then(|p| p.get("sender"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mut conflict = prev
+            .as_ref()
+            .is_some_and(|p| truthy(p.get("senderConflict")));
+        match sender {
+            Some(snd) if !snd.is_empty() => {
+                rec["sender"] = json!(snd);
+                if !prev_sender.is_empty() && prev_sender != snd && !conflict {
+                    conflict = true;
+                    (self.log)(&format!(
+                        "WARNING: two different senders are posting as station {station} —                          check each PC's station number in Settings"
+                    ));
+                }
+            }
+            _ => {
+                if !prev_sender.is_empty() {
+                    rec["sender"] = json!(prev_sender);
+                }
+            }
+        }
+        if conflict {
+            rec["senderConflict"] = json!(true);
         }
         let mut s = self.state.lock().unwrap();
+        if let Some(mut sg) = fresh {
+            // One bracket set, one claim: a start.gg set still held by a
+            // finished-but-unreported record (or one this hub just reported,
+            // which start.gg's filtered index may still be echoing) is the
+            // PREVIOUS set at this station, not this one. Decline and let a
+            // later heartbeat/live post retry once the bracket has advanced.
+            if self.startgg_set_claimed(&mut s, slug, sg.get("setId"), None) {
+                (self.log)(&format!(
+                    "station {station}: start.gg still shows the previous (unreported) set                      here; waiting to bind the new one"
+                ));
+            } else {
+                // Stamp which local set this binding was made for: a report
+                // may only ever use the binding made for it (see
+                // `station_binding_for`), never "whatever is here now".
+                sg["boundForSetId"] = rec["current"].get("setId").cloned().unwrap_or(Value::Null);
+                rec["startgg"] = sg;
+            }
+        }
         stations_bucket(&mut s, slug).insert(station.to_string(), rec.clone());
         self.touch(&mut s);
         Ok(json!({"ok": true, "startgg": rec.get("startgg")}))
     }
 
-    /// Which start.gg set a record from this station should bind to: the
-    /// station's stored binding if it has one, else a fresh lookup. The lock
-    /// is taken only for the read and released before any network — see
-    /// `handle_current` for why the lookup must never run under it.
-    fn station_binding(&self, slug: &str, station: i64) -> Value {
-        if let Some(prev) = self.prev_station(slug, station) {
-            if truthy(prev.get("startgg")) {
-                return prev["startgg"].clone();
+    /// Is this start.gg set already spoken for by a finished station record
+    /// awaiting report (any station, same event), or so recently reported by
+    /// this hub that start.gg's `[1,2,6]`-filtered station lookup may still
+    /// be echoing it? `except_key` lets a record re-checking its own binding
+    /// skip itself.
+    fn startgg_set_claimed(
+        &self,
+        s: &mut HubState,
+        slug: &str,
+        sgg_id: Option<&Value>,
+        except_key: Option<&str>,
+    ) -> bool {
+        let Some(id) = sgg_id.filter(|v| truthy(Some(v))) else {
+            return false;
+        };
+        let want = py_str(id);
+        if self.reported_set_ids.lock().unwrap().contains(&want) {
+            return true;
+        }
+        set_bucket(s, slug).iter().any(|(key, r)| {
+            except_key != Some(key.as_str())
+                && r["status"] == *"matched"
+                && r.pointer("/set/complete").is_some_and(|v| truthy(Some(v)))
+                && py_str(r.get("matchedStartggSetId").unwrap_or(&Value::Null)) == want
+        })
+    }
+
+    /// Which start.gg set a record from this station may bind to: the binding
+    /// made when THIS set opened — never "whatever start.gg shows at the
+    /// station right now". "The set at station N" is a sequence over an
+    /// evening, and a completed set delivered late (wifi outage, queued
+    /// retries) belongs to a previous value of it; evaluating it at arrival
+    /// time is how a report ends up on the wrong bracket set with the wrong
+    /// players. The lock is taken only for short reads/writes and released
+    /// before any network — see `handle_current` for why.
+    ///
+    /// Returns the binding plus, when it declines a stale one, a note for the
+    /// operator explaining why the record sits unmatched.
+    fn station_binding_for(
+        &self,
+        slug: &str,
+        station: i64,
+        set_id: Option<&Value>,
+        own_key: &str,
+    ) -> (Value, Option<String>) {
+        let prev = self.prev_station(slug, station);
+        let sid_v = set_id.filter(|v| truthy(Some(v)));
+        if let Some(p) = &prev {
+            if truthy(p.get("startgg")) {
+                let b = p["startgg"].clone();
+                match b.get("boundForSetId").filter(|v| truthy(Some(v))) {
+                    // Unstamped: a legacy `set_start` sender with no setId in
+                    // its heartbeats. Nothing to compare eras with, so it
+                    // keeps the old semantics.
+                    None => return (b, None),
+                    Some(bf) if sid_v.is_some_and(|sid| py_str(bf) == py_str(sid)) => {
+                        return (b, None)
+                    }
+                    // Stamped for a DIFFERENT set: never hand it over. Fall
+                    // through — a fresh lookup below may still be legitimate.
+                    Some(_) => {}
+                }
             }
         }
-        self.bind_station_set(slug, station)
+        // A fresh lookup is only meaningful while this set is still the one
+        // open at the station (hub restarted mid-set, token configured late).
+        // Staleness can only be DECLARED when both eras are known: a legacy
+        // sender whose heartbeats (or sets) carry no setId has no era to
+        // compare, and keeps the pre-stamping behavior.
+        let current_sid = prev
+            .as_ref()
+            .and_then(|p| p.pointer("/current/setId").filter(|v| truthy(Some(v))))
+            .map(py_str);
+        let stale = match (&current_sid, sid_v.map(py_str)) {
+            (Some(c), Some(sid)) => *c != sid,
+            _ => false,
+        };
+        if !stale {
+            let sg = self.bind_station_set(slug, station);
+            if truthy(Some(&sg)) {
+                let mut s = self.state.lock().unwrap();
+                if !self.startgg_set_claimed(&mut s, slug, sg.get("setId"), Some(own_key)) {
+                    let mut sg = sg;
+                    sg["boundForSetId"] = sid_v.cloned().unwrap_or(Value::Null);
+                    // Stamp it back onto the station too, so later posts for
+                    // this same set agree without another lookup.
+                    if let Some(stn) = stations_bucket(&mut s, slug).get_mut(&station.to_string()) {
+                        stn["startgg"] = sg.clone();
+                    }
+                    return (sg, None);
+                }
+            }
+            return (Value::Null, None);
+        }
+        (
+            Value::Null,
+            Some(
+                "finished before the set now at this station — report it from the Bracket view"
+                    .to_string(),
+            ),
+        )
     }
 
     /// Build/refresh the stored record for a set coming off a station. `sg`
     /// is the station's start.gg binding, resolved by the caller (via
     /// `station_binding`) BEFORE taking the state lock.
+    #[allow(clippy::too_many_arguments)] // one call shape, two call sites
     fn record_for(
         &self,
         s: &HubState,
@@ -931,6 +1084,7 @@ impl Hub {
         station: i64,
         slug: &str,
         status: &str,
+        bind_note: Option<String>,
     ) -> (String, Value) {
         let mut summary = matching::summarize_set(st);
         summary["mode"] = st.get("mode").cloned().unwrap_or(Value::Null);
@@ -961,7 +1115,8 @@ impl Hub {
                 }
             ));
         } else if !truthy(Some(&sg)) {
-            reason = Some("no start.gg set at this station".to_string());
+            reason =
+                Some(bind_note.unwrap_or_else(|| "no start.gg set at this station".to_string()));
         }
         // The operator's swap survives rebuilds, so the displayed mapping
         // below must be computed under it too.
@@ -1066,10 +1221,11 @@ impl Hub {
             return Err((json!({"error": "Missing set."}), 400));
         }
         // Resolved before the lock: may hit start.gg (see handle_current).
-        let sg = self.station_binding(slug, station);
+        let own_key = sid(station, st.get("setId").unwrap_or(&Value::Null));
+        let (sg, bind_note) = self.station_binding_for(slug, station, st.get("setId"), &own_key);
         let (key, rec, tag_map) = {
             let mut s = self.state.lock().unwrap();
-            let (key, mut rec) = self.record_for(&s, sg, st, station, slug, "live");
+            let (key, mut rec) = self.record_for(&s, sg, st, station, slug, "live", bind_note);
             // Don't clobber the mode label _record_for set for online/ranked.
             if rec["status"] != *"reported" && get_default_true(&rec, "reportable") {
                 rec["status"] = json!("live");
@@ -1205,10 +1361,11 @@ impl Hub {
             return Err((json!({"error": "Missing set."}), 400));
         }
         // Resolved before the lock: may hit start.gg (see handle_current).
-        let sg = self.station_binding(slug, station);
+        let own_key = sid(station, st.get("setId").unwrap_or(&Value::Null));
+        let (sg, bind_note) = self.station_binding_for(slug, station, st.get("setId"), &own_key);
         let rec = {
             let mut s = self.state.lock().unwrap();
-            let (key, mut rec) = self.record_for(&s, sg, st, station, slug, "recorded");
+            let (key, mut rec) = self.record_for(&s, sg, st, station, slug, "recorded", bind_note);
             if rec["status"] != *"reported" && get_default_true(&rec, "reportable") {
                 rec["status"] = json!(if truthy(rec.get("matchedStartggSetId")) {
                     "matched"
@@ -1296,6 +1453,39 @@ impl Hub {
         };
         if !matching::set_started(Some(&sg)) {
             return Some(rec);
+        }
+        // Rebind may REFRESH a binding (the TO pressed Start Match late, the
+        // preview set materialised), never SWITCH it: if start.gg now shows a
+        // different set at this station, that set belongs to whoever is
+        // playing there now, not to this record.
+        let prev_bound = rec
+            .get("matchedStartggSetId")
+            .filter(|v| truthy(Some(v)))
+            .cloned();
+        if let Some(prev_id) = &prev_bound {
+            if py_str(sg.get("setId").unwrap_or(&Value::Null)) != py_str(prev_id) {
+                (self.log)(&format!(
+                    "station {station}: start.gg now shows a different set here; keeping                      set {} bound as it was",
+                    py_str(prev_id)
+                ));
+                return Some(rec);
+            }
+        }
+        let mut sg = sg;
+        // The station-bucket copy below must carry the same for-this-set
+        // stamp a heartbeat binding would, or later posts for OTHER sets
+        // could borrow it.
+        sg["boundForSetId"] = set_id.clone();
+        if prev_bound.is_none() {
+            let mut s = self.state.lock().unwrap();
+            if self.startgg_set_claimed(&mut s, slug, sg.get("setId"), Some(&sid(station, set_id)))
+            {
+                drop(s);
+                (self.log)(&format!(
+                    "station {station}: the set start.gg shows here is already claimed by                      another finished record; not binding"
+                ));
+                return Some(rec);
+            }
         }
         let updated = {
             let mut s = self.state.lock().unwrap();
@@ -2606,7 +2796,12 @@ fn route_post(hub: &Hub, req: &mut tiny_http::Request, url: &str) -> (Value, u16
     let null = Value::Null;
     let dispatch = || -> Option<Result<Value, (Value, u16)>> {
         match op.as_str() {
-            "current" => Some(hub.handle_current(&slug, station, body.get("current"))),
+            "current" => Some(hub.handle_current_from(
+                &slug,
+                station,
+                body.get("current"),
+                body.get("sender").and_then(|v| v.as_str()),
+            )),
             "live" => Some(hub.handle_live(&slug, station, body.get("set").unwrap_or(&null))),
             "ingest" => Some(hub.handle_ingest(&slug, station, body.get("set").unwrap_or(&null))),
             "report" => Some(hub.do_report(
@@ -3497,6 +3692,11 @@ mod tests {
         h.set_event_slug(SLUG);
 
         // ---- online / ranked games are logged but never reported ---------------
+        // The first set reported above, so start.gg has advanced the bracket:
+        // the station now shows the NEXT assigned set (the real service drops
+        // reported sets from the [1,2,6] lookup). Without this, the heartbeat
+        // below would correctly refuse to bind to the already-reported set.
+        fake.set_station_set_id(1, json!("NEXTSET1"));
         let before = fake.pushes().len();
         let online = with(
             real_set(),
@@ -3570,8 +3770,10 @@ mod tests {
         h.handle_ingest(SLUG, 1, &local).unwrap();
         let lrec = h.get_set(SLUG, 1, &json!("LOCAL1")).unwrap();
         assert!(
-            lrec["reportable"] == json!(true) && lrec["matchedStartggSetId"] == json!(105639152),
-            "LOCAL sets still match and stay reportable"
+            lrec["reportable"] == json!(true) && lrec["matchedStartggSetId"] == json!("NEXTSET1"),
+            "LOCAL sets still match and stay reportable  [{} / {}]",
+            lrec["reportable"],
+            lrec["matchedStartggSetId"],
         );
 
         server.stop();
@@ -4807,6 +5009,210 @@ mod tests {
         assert_eq!(
             reports[0].2, None,
             "no station played this, so there is no game data to send"
+        );
+    }
+
+    #[test]
+    fn a_delayed_report_never_borrows_the_next_sets_binding() {
+        // The wifi-outage timeline from the Hangout 5.1: set X finishes at
+        // station 1 while the hub is unreachable; the TO calls the next set W
+        // there (same winner — winner stays on the setup); the connection
+        // returns and the station posts the NEW heartbeat first, THEN the
+        // queued old set. The old report must land unmatched — not attach to
+        // W's binding and auto-report W with X's winner and X's games.
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        h.set_auto_report(AutoReport { enabled: true });
+
+        // Set X opens; the hub pre-binds it to the set start.gg has here.
+        h.handle_current(
+            SLUG,
+            1,
+            Some(&json!({"state": "set_open", "setId": "20260724_075508"})),
+        )
+        .unwrap();
+
+        // Outage. The TO calls the next set on this station; on reconnect the
+        // fresh heartbeat lands before the queued ingest.
+        fake.set_station_set_id(1, json!("NEXT-W"));
+        h.handle_current(
+            SLUG,
+            1,
+            Some(&json!({"state": "set_open", "setId": "W-LOCAL"})),
+        )
+        .unwrap();
+
+        // The queued set X finally arrives.
+        h.handle_ingest(SLUG, 1, &real_set()).unwrap();
+        let rec = h.get_set(SLUG, 1, &json!("20260724_075508")).unwrap();
+        assert!(
+            rec["matchedStartggSetId"].is_null(),
+            "a report from a previous era must not borrow the current binding  [{}]",
+            rec["matchedStartggSetId"]
+        );
+        assert!(
+            py_str(&rec["notReportableReason"]).contains("finished before"),
+            "the operator is told why it sits unmatched  [{}]",
+            rec["notReportableReason"]
+        );
+
+        // And nothing auto-reports: even though X's winner (jugeeya) is an
+        // entrant of W too, there is no binding to write through.
+        h.sweep_auto_report(SLUG);
+        assert_eq!(
+            fake.reports().len(),
+            0,
+            "the wrong-set auto-report is exactly the bug"
+        );
+    }
+
+    #[test]
+    fn a_promptly_delivered_report_still_binds_and_reports() {
+        // The normal flow the rules must not break: open, play, deliver
+        // within the same era — matched and auto-reported as before.
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        h.set_auto_report(AutoReport { enabled: true });
+        h.handle_current(
+            SLUG,
+            1,
+            Some(&json!({"state": "set_open", "setId": "20260724_075508"})),
+        )
+        .unwrap();
+        h.handle_ingest(SLUG, 1, &real_set()).unwrap();
+        let rec = h.get_set(SLUG, 1, &json!("20260724_075508")).unwrap();
+        assert_eq!(rec["matchedStartggSetId"], json!(105639152));
+        h.sweep_auto_report(SLUG);
+        assert_eq!(
+            fake.reports().len(),
+            1,
+            "the right set still reports itself"
+        );
+    }
+
+    #[test]
+    fn the_next_set_waits_until_the_previous_one_reports() {
+        // One bracket set, one claim: while finished set X (bound to A) is
+        // still awaiting report, start.gg keeps showing A at the station —
+        // the NEW set opening there must not claim A too.
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        h.handle_current(
+            SLUG,
+            1,
+            Some(&json!({"state": "set_open", "setId": "20260724_075508"})),
+        )
+        .unwrap();
+        h.handle_ingest(SLUG, 1, &real_set()).unwrap();
+
+        let res = h
+            .handle_current(
+                SLUG,
+                1,
+                Some(&json!({"state": "set_open", "setId": "W-LOCAL"})),
+            )
+            .unwrap();
+        assert!(
+            res["startgg"].is_null(),
+            "the unreported set A is claimed; W binds to nothing yet"
+        );
+
+        // X reports; the bracket advances; the next heartbeat binds W to the
+        // set now actually at the station.
+        h.do_report(SLUG, 1, &json!("20260724_075508"), &json!(24186345))
+            .unwrap();
+        fake.set_station_set_id(1, json!("NEXT-W"));
+        let res = h
+            .handle_current(
+                SLUG,
+                1,
+                Some(&json!({"state": "set_open", "setId": "W-LOCAL"})),
+            )
+            .unwrap();
+        assert_eq!(res["startgg"]["setId"], json!("NEXT-W"));
+        assert_eq!(
+            res["startgg"]["boundForSetId"],
+            json!("W-LOCAL"),
+            "the binding is stamped for the set it was made for"
+        );
+    }
+
+    #[test]
+    fn rebind_refreshes_but_never_switches() {
+        // Report-time rebind exists for "the TO pressed Start Match late" —
+        // same set, fresher state. If start.gg now shows a DIFFERENT set at
+        // the station, that set belongs to whoever is playing there now.
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        h.handle_current(
+            SLUG,
+            1,
+            Some(&json!({"state": "set_open", "setId": "20260724_075508"})),
+        )
+        .unwrap();
+        h.handle_ingest(SLUG, 1, &real_set()).unwrap();
+
+        fake.set_station_set_id(1, json!("SOMEONE-ELSES-SET"));
+        let rec = h.rebind(SLUG, 1, &json!("20260724_075508")).unwrap();
+        assert_eq!(
+            rec["matchedStartggSetId"],
+            json!(105639152),
+            "rebind kept the original binding instead of retargeting"
+        );
+    }
+
+    #[test]
+    fn two_senders_on_one_station_number_warn() {
+        // Two PCs both configured as station 1 — the one failure no binding
+        // rule can catch, so it has to be said out loud.
+        let logged = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let l2 = logged.clone();
+        let fake = FakeStartgg::new();
+        let mut h = Hub::new(
+            None,
+            Some(tags()),
+            None,
+            None,
+            Some(Box::new(move |m| l2.lock().unwrap().push(m.to_string()))),
+            None,
+            None,
+        );
+        h.startgg = Box::new(Shared(fake.clone()));
+        h.handle_current_from(SLUG, 1, Some(&json!({"state": "idle"})), Some("pc-a"))
+            .unwrap();
+        h.handle_current_from(SLUG, 1, Some(&json!({"state": "idle"})), Some("pc-b"))
+            .unwrap();
+        assert!(
+            logged
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m.contains("two different senders are posting as station 1")),
+            "the operator's log names the problem"
+        );
+        let snap = h.event_view(SLUG);
+        assert_eq!(
+            snap["stations"]["1"]["senderConflict"],
+            json!(true),
+            "the conflict is sticky on the station record"
+        );
+
+        // Same sender again: no NEW warning, but the flag stays.
+        let before = logged.lock().unwrap().len();
+        h.handle_current_from(SLUG, 1, Some(&json!({"state": "idle"})), Some("pc-b"))
+            .unwrap();
+        assert_eq!(
+            logged.lock().unwrap().len(),
+            before,
+            "warned once, not per heartbeat"
+        );
+        assert_eq!(
+            h.event_view(SLUG)["stations"]["1"]["senderConflict"],
+            json!(true)
         );
     }
 

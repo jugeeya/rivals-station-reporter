@@ -552,23 +552,39 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     "idle" => ("○", theme::TEXT_MUTED),
                     _ => ("·", theme::TEXT_MUTED),
                 };
-                chips = chips.push(tooltip(
-                    container(
-                        row![
-                            text(format!("Stn {n}"))
-                                .font(theme::FONT_BODY_SEMIBOLD)
-                                .size(11)
-                                .color(theme::TEXT_PRIMARY),
-                            text(glyph).size(10).color(color),
-                        ]
-                        .spacing(6)
-                        .align_y(Alignment::Center),
+                // Two different PCs posting as the same station number — the
+                // one setup mistake the hub can't untangle by itself, so the
+                // chip carries the warning until it's fixed.
+                let conflict = map[&n]
+                    .get("senderConflict")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let mut chip = row![
+                    text(format!("Stn {n}"))
+                        .font(theme::FONT_BODY_SEMIBOLD)
+                        .size(11)
+                        .color(theme::TEXT_PRIMARY),
+                    text(glyph).size(10).color(color),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center);
+                if conflict {
+                    chip = chip.push(text("⚠").size(10).color(theme::TEXT_FAILURE));
+                }
+                let tip = if conflict {
+                    format!(
+                        "{state} — WARNING: two different PCs are posting as station {n}. \
+                         Check each PC's station number in Settings."
                     )
-                    .style(theme::panel)
-                    .padding([3, 8]),
-                    container(text(state).size(12))
+                } else {
+                    state.clone()
+                };
+                chips = chips.push(tooltip(
+                    container(chip).style(theme::panel).padding([3, 8]),
+                    container(text(tip).size(12))
                         .style(theme::tooltip_bubble)
-                        .padding(6),
+                        .padding(6)
+                        .max_width(320),
                     tooltip::Position::Bottom,
                 ));
             }

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rivals Station Reporter overlay</title>
+<!--
+  Stream overlay written by Rivals Station Reporter. Add it in OBS as a
+  Browser source with "Local file" ticked, pointing at this file (1920x1080,
+  background is transparent). It re-reads overlay-data.js next to it every
+  second, so nothing needs refreshing. Append ?hide=set to drop the live-set
+  line, ?hide=record for the win-rate line (comma-separate both), or ?scale=1.5 to size it up. Safe to delete: the app rewrites it.
+-->
+<style>
+  :root { --ink: #f4f3ff; --dim: #a9a7c9; --accent: #818cf8; --live: #34d399; --panel: rgba(17, 16, 40, .86); }
+  html, body { margin: 0; background: transparent; overflow: hidden; }
+  body { font-family: "Space Grotesk", "Inter", "Segoe UI", system-ui, sans-serif; color: var(--ink); }
+  #wrap { position: fixed; top: 96px; right: 24px; transform-origin: top right; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+  .chip { display: flex; align-items: baseline; gap: 12px; padding: 10px 20px; background: var(--panel); border: 1px solid rgba(129, 140, 248, .45); border-radius: 14px; box-shadow: 0 6px 24px rgba(0, 0, 0, .35); }
+  .label { font-size: 15px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+  .count { font-size: 44px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .count.bump { animation: bump .5s ease-out; }
+  @keyframes bump { 0% { transform: scale(1.35); color: var(--accent); } 100% { transform: scale(1); } }
+  .set { display: none; align-items: center; gap: 10px; padding: 6px 16px; background: var(--panel); border-radius: 10px; font-size: 20px; font-weight: 600; max-width: 560px; }
+  .set.on { display: flex; }
+  .set .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--live); box-shadow: 0 0 8px var(--live); flex: none; }
+  .set .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .set .score { font-variant-numeric: tabular-nums; color: var(--accent); }
+  .rec { display: none; align-items: baseline; gap: 18px; padding: 6px 16px; background: var(--panel); border-radius: 10px; font-size: 20px; font-weight: 600; }
+  .rec.on { display: flex; }
+  .rec .k { font-size: 13px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); margin-right: 6px; }
+  .rec .pct { color: var(--accent); margin-left: 6px; font-variant-numeric: tabular-nums; }
+  #wrap.stale { opacity: .35; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div class="chip"><span class="label" id="label">Games this session</span><span class="count" id="count">0</span></div>
+  <div class="rec" id="rec"><span><span class="k">Games</span><span id="gRec"></span><span class="pct" id="gPct"></span></span><span><span class="k">Sets</span><span id="sRec"></span><span class="pct" id="sPct"></span></span></div>
+  <div class="set" id="set"><span class="dot"></span><span class="name" id="p1"></span><span class="score" id="score"></span><span class="name" id="p2"></span></div>
+</div>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var wrap = document.getElementById('wrap');
+  var scale = parseFloat(q.get('scale'));
+  if (scale > 0) wrap.style.transform = 'scale(' + scale + ')';
+  var hide = (q.get('hide') || '').split(',');
+  var hideSet = hide.indexOf('set') >= 0;
+  var hideRec = hide.indexOf('record') >= 0;
+  var recEl = document.getElementById('rec');
+  function pct(w, l) { return w + l > 0 ? Math.round(100 * w / (w + l)) + '%' : '-'; }
+  var countEl = document.getElementById('count');
+  var setEl = document.getElementById('set');
+  var last = null;
+
+  function render(d) {
+    if (!d) return;
+    var n = Number(d.sessionGames) || 0;
+    if (last !== null && n !== last) {
+      countEl.classList.remove('bump');
+      void countEl.offsetWidth;
+      countEl.classList.add('bump');
+    }
+    last = n;
+    countEl.textContent = String(n);
+    document.getElementById('label').textContent = n === 1 ? 'Game this session' : 'Games this session';
+
+    var r = d.record;
+    if (r && !hideRec) {
+      document.getElementById('gRec').textContent = r.gameWins + '-' + r.gameLosses;
+      document.getElementById('gPct').textContent = pct(r.gameWins, r.gameLosses);
+      document.getElementById('sRec').textContent = r.setWins + '-' + r.setLosses;
+      document.getElementById('sPct').textContent = pct(r.setWins, r.setLosses);
+      recEl.classList.add('on');
+    } else {
+      recEl.classList.remove('on');
+    }
+
+    var live = d.live;
+    if (live && !hideSet && live.players && live.players.length === 2) {
+      document.getElementById('p1').textContent = live.players[0].tag;
+      document.getElementById('p2').textContent = live.players[1].tag;
+      document.getElementById('score').textContent = live.players[0].wins + ' - ' + live.players[1].wins;
+      setEl.classList.add('on');
+    } else {
+      setEl.classList.remove('on');
+    }
+    // The app rewrites this every tick; a long silence means it was closed.
+    var age = Date.now() / 1000 - (Number(d.updatedAt) || 0);
+    wrap.classList.toggle('stale', age > 30);
+  }
+
+  function load() {
+    var s = document.createElement('script');
+    s.src = 'overlay-data.js?t=' + Date.now();
+    s.onload = function () { render(window.RSR_OVERLAY); s.remove(); };
+    s.onerror = function () { s.remove(); };
+    document.head.appendChild(s);
+  }
+  load();
+  setInterval(load, 1000);
+})();
+</script>
+</body>
+</html>

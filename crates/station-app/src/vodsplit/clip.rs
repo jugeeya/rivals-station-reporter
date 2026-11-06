@@ -283,11 +283,13 @@ pub fn parse_obs_filename(name: &str) -> Option<DateTime<Local>> {
     let bytes: Vec<char> = name.chars().collect();
     // Scan for the first "dddd-dd-dd" then a separator then "dd-dd-dd".
     for i in 0..bytes.len() {
-        let rest: String = bytes[i..].iter().collect();
-        if rest.len() < 19 {
+        // Counted in chars, not bytes: a byte slice can split a multi-byte
+        // character in a non-ASCII filename and panic.
+        if bytes.len() - i < 19 {
             break;
         }
-        let candidate = &rest[..19];
+        let candidate: String = bytes[i..i + 19].iter().collect();
+        let candidate = candidate.as_str();
         let digits_ok = |s: &str, positions: &[usize]| {
             positions.iter().all(|&p| {
                 s.chars()

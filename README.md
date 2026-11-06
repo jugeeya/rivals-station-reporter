@@ -96,6 +96,18 @@ screenshot, seen from its own PC. A station only ever knows "this just
 finished" — awaiting-report status, and the reporting itself, live on the
 operator's hub.
 
+## Stream overlay
+
+A station PC also writes `overlay.html` (plus `overlay-data.js`) into its out
+dir (`matchlogger-out/` under the app config dir unless you set one; the path
+is logged at startup). In OBS add a **Browser** source, tick **Local file**,
+pick `overlay.html`, and size it to your canvas (e.g. 1920x1080). The
+background is transparent. Top right shows **games this session** — every
+game this app has recorded since it was launched (it survives a settings
+save) — and, under it, the live set's tags and score. It updates by itself;
+no refresh needed. Options on the file URL: `?hide=set` drops the live-set
+line, `?scale=1.5` sizes it up.
+
 ## Auto-report
 
 On by default (Settings, operator only). A set that finishes reports itself

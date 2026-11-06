@@ -47,6 +47,30 @@ struct OpenSet {
     mode: Option<String>,
 }
 
+/// One player's results since this machine started (see
+/// `SetMachine::tallies`). A set counts only once it is finalized, and only
+/// when it has a unique winner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub game_wins: u64,
+    pub game_losses: u64,
+    pub set_wins: u64,
+    pub set_losses: u64,
+}
+
+impl Tally {
+    pub fn add(&mut self, o: &Tally) {
+        self.game_wins += o.game_wins;
+        self.game_losses += o.game_losses;
+        self.set_wins += o.set_wins;
+        self.set_losses += o.set_losses;
+    }
+
+    pub fn games(&self) -> u64 {
+        self.game_wins + self.game_losses
+    }
+}
+
 pub struct SetMachine {
     out: PathBuf,
     sets_dir: PathBuf,
@@ -69,6 +93,16 @@ pub struct SetMachine {
     /// but "this many wall-clock seconds have passed" survives the restart
     /// intact and can rebuild an equivalent `Instant` on the other side.
     last_game_at_wall: Option<i64>,
+    /// Games recorded by this machine instance (not games resumed from a
+    /// journal). The engine adds it into its session total when a settings
+    /// save rebuilds the producer, so a stream overlay's count survives that.
+    games_recorded: u64,
+    /// Per-tag win/loss record of everything recorded by this instance.
+    tallies: HashMap<String, Tally>,
+    /// How many replays each player name has appeared in. The local account
+    /// is in every one, opponents rotate - used to tell the two apart in a
+    /// mirror matchup (see `players`).
+    replay_names: HashMap<String, u32>,
 }
 
 impl SetMachine {
@@ -84,7 +118,18 @@ impl SetMachine {
             history: Vec::new(),
             last_game_at: None,
             last_game_at_wall: None,
+            games_recorded: 0,
+            tallies: HashMap::new(),
+            replay_names: HashMap::new(),
         })
+    }
+
+    pub fn tallies(&self) -> &HashMap<String, Tally> {
+        &self.tallies
+    }
+
+    pub fn games_recorded(&self) -> u64 {
+        self.games_recorded
     }
 
     fn summ(s: &OpenSet, complete: bool) -> Value {
@@ -179,7 +224,11 @@ impl SetMachine {
     /// ("Cla") — the hub's start.gg character lookup, the console, and Discord
     /// all work in full names. `char_full()` is idempotent on names it doesn't
     /// know, so codes and full names compare safely below.
-    fn players(result: &GameResult, replay: Option<&Replay>) -> Vec<Value> {
+    fn players(
+        result: &GameResult,
+        replay: Option<&Replay>,
+        replay_names: &HashMap<String, u32>,
+    ) -> Vec<Value> {
         let mut players: Vec<Value> = result
             .winners
             .iter()
@@ -198,11 +247,23 @@ impl SetMachine {
             if let Some(rep) = replay {
                 if rep.players.len() == 2 {
                     let mine = players[0].clone();
+                    // The save's tag ("JUGZ!") is not the replay's account
+                    // name ("jugeeya"), so a mirror can't be told apart by
+                    // character or name: take the side seen in fewer
+                    // replays (the local account is in all of them).
+                    let seen = |p: &&crate::stats::ReplayPlayer| {
+                        replay_names.get(&p.name).copied().unwrap_or(0)
+                    };
                     let opp = rep
                         .players
                         .iter()
                         .find(|p| char_full(&p.char_code) != mine["character"])
-                        .or_else(|| rep.players.iter().find(|p| p.name.clone() != mine["name"]));
+                        .or_else(|| {
+                            rep.players
+                                .iter()
+                                .filter(|p| p.name.clone() != mine["name"])
+                                .min_by_key(seen)
+                        });
                     if let Some(opp) = opp {
                         let won = !mine["won"].as_bool().unwrap_or(false);
                         players.push(json!({
@@ -230,28 +291,35 @@ impl SetMachine {
         // character is the fallback for whatever name mismatch already made
         // the online-opponent reconstruction above necessary.
         let mut claimed = vec![false; replay.map(|r| r.players.len()).unwrap_or(0)];
-        for (i, pl) in players.iter_mut().enumerate() {
-            let mut slot: Option<usize> = None;
-            if let Some(rep) = replay {
-                for (idx, rp) in rep.players.iter().enumerate() {
-                    if !claimed[idx] && rp.name == pl["name"] {
-                        slot = Some(idx);
-                        break;
-                    }
-                }
-                if slot.is_none() {
-                    for (idx, rp) in rep.players.iter().enumerate() {
-                        if !claimed[idx] && char_full(&rp.char_code) == pl["character"] {
-                            slot = Some(idx);
-                            break;
-                        }
-                    }
-                }
-                if let Some(idx) = slot {
+        let mut slots: Vec<Option<usize>> = vec![None; players.len()];
+        if let Some(rep) = replay {
+            // Names for everyone first, so a character fallback can't take
+            // a side whose name belongs to another player.
+            for (i, pl) in players.iter().enumerate() {
+                if let Some(idx) = rep
+                    .players
+                    .iter()
+                    .enumerate()
+                    .position(|(idx, rp)| !claimed[idx] && rp.name == pl["name"])
+                {
                     claimed[idx] = true;
+                    slots[i] = Some(idx);
                 }
             }
-            pl["slot"] = json!(slot.unwrap_or(i));
+            for (i, pl) in players.iter().enumerate() {
+                if slots[i].is_some() {
+                    continue;
+                }
+                if let Some(idx) = rep.players.iter().enumerate().position(|(idx, rp)| {
+                    !claimed[idx] && char_full(&rp.char_code) == pl["character"]
+                }) {
+                    claimed[idx] = true;
+                    slots[i] = Some(idx);
+                }
+            }
+        }
+        for (i, pl) in players.iter_mut().enumerate() {
+            pl["slot"] = json!(slots[i].unwrap_or(i));
         }
         players
     }
@@ -270,7 +338,12 @@ impl SetMachine {
             set.mode = Some(result.mode.clone());
         }
 
-        let players = Self::players(result, replay);
+        if let Some(rep) = replay {
+            for rp in &rep.players {
+                *self.replay_names.entry(rp.name.clone()).or_insert(0) += 1;
+            }
+        }
+        let players = Self::players(result, replay, &self.replay_names);
         let winner_name = players
             .iter()
             .find(|p| p["won"].as_bool() == Some(true))
@@ -308,6 +381,18 @@ impl SetMachine {
             set.first_match_start_iso = Some(iso_of(end_epoch));
         }
         set.matches.push(record);
+        self.games_recorded += 1;
+        if let Some(w) = &winner_name {
+            for p in &players {
+                let Some(name) = p["name"].as_str() else { continue };
+                let t = self.tallies.entry(name.to_string()).or_default();
+                if name == w {
+                    t.game_wins += 1;
+                } else {
+                    t.game_losses += 1;
+                }
+            }
+        }
         self.last_game_at = Some(std::time::Instant::now());
         self.last_game_at_wall = Some(now_sec());
 
@@ -389,6 +474,17 @@ impl SetMachine {
                     .cloned()
             })
             .flatten();
+        if let Some(w) = &winner {
+            for p in &standings {
+                let Some(name) = p["name"].as_str() else { continue };
+                let t = self.tallies.entry(name.to_string()).or_default();
+                if p["name"] == w["name"] {
+                    t.set_wins += 1;
+                } else {
+                    t.set_losses += 1;
+                }
+            }
+        }
         let report = json!({
             "setId": set.id, "complete": complete,
             "startTime": set.start_iso, "startEpoch": set.start_epoch,
@@ -818,8 +914,12 @@ impl StatsProducer {
         if self.mtime == Some(mtime) {
             return;
         }
-        self.mtime = Some(mtime);
+        // Only remember this mtime once the read succeeds: a mid-write read
+        // returns None, and recording the mtime first would make the next
+        // poll skip the file as "unchanged" - the game would never be
+        // detected, and the next save write would diff two games at once.
         let Some(nxt) = self.read() else { return }; // mid-write; retry next poll
+        self.mtime = Some(mtime);
         let Some(baseline) = self.baseline.take() else {
             self.baseline = Some(nxt);
             return;
@@ -1358,6 +1458,31 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The save's tag ("JUGZ!") differs from the replay's account name
+    /// ("jugeeya"), so in a mirror the opponent used to be taken from the
+    /// replay as the local player's own entry ("JUGZ! vs jugeeya").
+    #[test]
+    fn online_mirror_picks_the_opponent_not_the_local_account() {
+        let g = snap(&[("JUGZ!", "Fle", "ONLINE", &[("wins", 1.0)])]);
+        let r = to_game_result(diff(&Map::new(), &g)).unwrap();
+        let rep = Replay {
+            iso: String::new(),
+            epoch: 0,
+            game: 2,
+            players: vec![
+                crate::stats::ReplayPlayer { name: "jugeeya".into(), char_code: "Fle".into() },
+                crate::stats::ReplayPlayer { name: "Judge".into(), char_code: "Fle".into() },
+            ],
+        };
+        let seen: HashMap<String, u32> =
+            [("jugeeya".to_string(), 5), ("Judge".to_string(), 1)].into();
+        let players = SetMachine::players(&r, Some(&rep), &seen);
+        let names: Vec<_> = players.iter().map(|p| p["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["JUGZ!", "Judge"]);
+        assert_eq!(players[0]["slot"], 0);
+        assert_eq!(players[1]["slot"], 1);
     }
 
     /// The safety valve: a pending game older than PENDING_TIMEOUT_S is

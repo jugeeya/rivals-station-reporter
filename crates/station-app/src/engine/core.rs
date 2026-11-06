@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -19,10 +19,11 @@ use serde_json::{json, Value};
 use station_core::forwarder::Forwarder;
 use station_core::matching;
 use station_core::save::{check_replay_autosave, ReplayAutoSaveStatus};
-use station_core::set_machine::StatsProducer;
+use station_core::set_machine::{StatsProducer, Tally};
 use station_core::tagdb::TagDb;
 
 use crate::engine::config::{self, Config};
+use crate::engine::overlay;
 
 /// Wording shared by the "Replay Auto Save is misconfigured" warning — used
 /// both for the persistent status override and the one-time log line so the
@@ -74,6 +75,11 @@ pub struct EngineInner {
     // The running hub (operator mode), for the report/swap/delete commands.
     hub: Mutex<Option<Arc<station_core::hub::Hub>>>,
     armed: AtomicBool, // stats save readable at least once
+    /// Games recorded by producers that a rebuild has since replaced; the
+    /// live producer's own count is added on top.
+    session_games_base: AtomicU64,
+    session_tallies_base: Mutex<HashMap<String, Tally>>,
+    overlay_failed: AtomicBool,
 
     // The public tag database (jugeeya.github.io/tags): loaded from its
     // on-disk cache at startup (no network — see `TagDb::load`) and kept
@@ -138,6 +144,44 @@ impl EngineInner {
 
     pub fn set_status(&self, msg: &str, error: bool) {
         *self.status.lock().unwrap() = json!({ "msg": msg, "error": error, "t": Self::now() });
+    }
+
+    /// Refresh the stream overlay files (`overlay.html` + `overlay-data.js`
+    /// in the output dir) from the current snapshot. `live_count` is the
+    /// running producer's own game count; the base from replaced producers is
+    /// added here. A write failure is logged once per streak, not per tick.
+    fn write_overlay(
+        &self,
+        live_count: u64,
+        live_tallies: &HashMap<String, Tally>,
+        last: &mut Option<(String, i64)>,
+    ) {
+        let cfg = self.cfg.lock().unwrap().clone();
+        let games = self.session_games_base.load(Ordering::Relaxed) + live_count;
+        let mut tallies = self.session_tallies_base.lock().unwrap().clone();
+        for (tag, t) in live_tallies {
+            tallies.entry(tag.clone()).or_default().add(t);
+        }
+        let snap = self.snapshot.lock().unwrap().clone();
+        let body = overlay::data_body(games, &tallies, &snap, cfg.station);
+        let first = last.is_none();
+        match overlay::write(&self.out_dir(&cfg), &body, last) {
+            Ok(()) => {
+                if first {
+                    self.log_line(&format!(
+                        "stream overlay: {}",
+                        self.out_dir(&cfg).join("overlay.html").display()
+                    ));
+                }
+            }
+            Err(e) => {
+                if !self.overlay_failed.swap(true, Ordering::Relaxed) {
+                    self.log_line(&format!("could not write stream overlay: {e}"));
+                }
+                return;
+            }
+        }
+        self.overlay_failed.store(false, Ordering::Relaxed);
     }
 
     /// Re-check the "Replay Auto Save" gameplay setting (a settings save
@@ -647,6 +691,9 @@ pub fn start(config_dir: PathBuf) -> Engine {
         forward_url: Mutex::new(None),
         hub: Mutex::new(None),
         armed: AtomicBool::new(false),
+        session_games_base: AtomicU64::new(0),
+        session_tallies_base: Mutex::new(HashMap::new()),
+        overlay_failed: AtomicBool::new(false),
         tagdb,
         replay_autosave_mtime: Mutex::new(None),
         replay_autosave_bad: Mutex::new(None),
@@ -675,12 +722,23 @@ pub fn start(config_dir: PathBuf) -> Engine {
         // so a disconnected station isn't scanning the subnet every tick.
         let mut last_discovery: Option<std::time::Instant> = None;
         const DISCOVERY_RETRY_S: u64 = 30;
+        let mut overlay_last: Option<(String, i64)> = None;
         loop {
             if loop_inner.rebuild.swap(false, Ordering::SeqCst) {
                 // Drop the old pieces first so ports/files release.
                 if let Some(p) = built.hub_pieces.take() {
                     loop_inner.set_hub(None);
                     p.stop();
+                }
+                // Keep the session's game count across the producer swap.
+                if let Some(p) = &built.producer {
+                    loop_inner
+                        .session_games_base
+                        .fetch_add(p.machine.games_recorded(), Ordering::Relaxed);
+                    let mut base = loop_inner.session_tallies_base.lock().unwrap();
+                    for (tag, t) in p.machine.tallies() {
+                        base.entry(tag.clone()).or_default().add(t);
+                    }
                 }
                 built = build(&loop_inner);
                 last_discovery = Some(std::time::Instant::now());
@@ -729,6 +787,13 @@ pub fn start(config_dir: PathBuf) -> Engine {
                 // No hub found yet (or station mode is off) - nothing to
                 // compare a clock against or fail to reach.
                 loop_inner.clear_forward_warnings();
+            }
+            if let Some(p) = &built.producer {
+                loop_inner.write_overlay(
+                    p.machine.games_recorded(),
+                    p.machine.tallies(),
+                    &mut overlay_last,
+                );
             }
             // mtime-gated, so this is a no-op stat() call on almost every
             // tick — only re-parses the settings file when it changes.

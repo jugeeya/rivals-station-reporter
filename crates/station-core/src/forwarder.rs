@@ -211,10 +211,10 @@ impl Forwarder {
         let url = format!("{}{}", self.hub, endpoint);
         if self.dry_run {
             let body = serde_json::to_string_pretty(payload).unwrap_or_default();
-            (self.log)(&format!(
-                "DRY-RUN POST {url}\n{}",
-                &body[..body.len().min(800)]
-            ));
+            // Truncate by chars: a byte slice at 800 can land inside a
+            // multi-byte tag name and panic the engine thread.
+            let preview: String = body.chars().take(800).collect();
+            (self.log)(&format!("DRY-RUN POST {url}\n{preview}"));
             return true;
         }
         // An explicit User-Agent is required: Cloudflare's bot rules 403 the

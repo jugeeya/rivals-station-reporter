@@ -9,5 +9,6 @@ pub mod commands;
 pub mod config;
 pub mod core;
 pub mod hub_glue;
+pub mod overlay;
 
 pub use core::{start, Engine, EngineInner};

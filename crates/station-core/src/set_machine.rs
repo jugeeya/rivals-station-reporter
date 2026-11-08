@@ -324,10 +324,79 @@ impl SetMachine {
         players
     }
 
+    /// Pin each player to the slot they held earlier in the open set.
+    ///
+    /// A replay's side order is not stable from game to game (a LOCAL replay
+    /// is named `Player2(Zet)-Player1(Lar)` one game and `Player1(Lar)-
+    /// Player2(Zet)` the next, and its names never match the save's tags), so
+    /// a slot taken from it swaps players between games. `derive_games`
+    /// reads each game's winner off a slot whose win count ticked up, so a
+    /// swap there credits the wrong player and shows characters trading
+    /// sides. A name already in the set keeps its slot; a newcomer (a tag
+    /// edited mid-set) takes the remaining one and inherits that slot's wins.
+    fn pin_slots(set: &mut OpenSet, players: &mut [Value]) {
+        let Some(last) = set.matches.last() else { return };
+        let prev: Vec<(String, i64)> = last["players"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| Some((p["name"].as_str()?.to_string(), p["slot"].as_i64()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let slot_of = |name: &str| prev.iter().find(|(n, _)| n == name).map(|(_, s)| *s);
+        let mut taken: Vec<i64> = Vec::new();
+        let mut fresh: Vec<usize> = Vec::new();
+        for (i, p) in players.iter_mut().enumerate() {
+            match p["name"].as_str().and_then(slot_of) {
+                Some(slot) => {
+                    p["slot"] = json!(slot);
+                    taken.push(slot);
+                }
+                None => fresh.push(i),
+            }
+        }
+        let free: Vec<i64> = prev
+            .iter()
+            .map(|(_, s)| *s)
+            .filter(|s| !taken.contains(s))
+            .collect();
+        if fresh.len() == 1 && free.len() == 1 {
+            let i = fresh[0];
+            players[i]["slot"] = json!(free[0]);
+            let old = prev.iter().find(|(_, s)| *s == free[0]).map(|(n, _)| n.clone());
+            if let (Some(old), Some(new)) = (old, players[i]["name"].as_str()) {
+                let carried = set.wins_by_name.get(&old).copied().unwrap_or(0);
+                set.wins_by_name.insert(new.to_string(), carried);
+            }
+        }
+    }
+
     pub fn record_game(&mut self, result: &GameResult, replay: Option<&Replay>, at: i64) {
         let game_num = replay.map(|r| r.game);
         let end_epoch = replay.map(|r| r.epoch).unwrap_or(at);
-        if game_num == Some(1) && self.set.as_ref().is_some_and(|s| !s.matches.is_empty()) {
+        if let Some(rep) = replay {
+            for rp in &rep.players {
+                *self.replay_names.entry(rp.name.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut players = Self::players(result, replay, &self.replay_names);
+        // A new set starts on a fresh Game 1, or when nobody from the open
+        // set is in this game (winner-stays stations don't always restart the
+        // game counter, so the next pair would otherwise merge into it).
+        let open_has_games = self.set.as_ref().is_some_and(|s| !s.matches.is_empty());
+        let no_overlap = open_has_games
+            && players.len() == 2
+            && self.set.as_ref().and_then(|s| s.matches.last()).is_some_and(|m| {
+                let names: Vec<&str> = m["players"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|p| p["name"].as_str()).collect())
+                    .unwrap_or_default();
+                players
+                    .iter()
+                    .all(|p| !names.contains(&p["name"].as_str().unwrap_or_default()))
+            });
+        if open_has_games && (game_num == Some(1) || no_overlap) {
             self.finalize(true, Some(at));
         }
         if self.set.is_none() {
@@ -337,13 +406,7 @@ impl SetMachine {
         if !result.mode.is_empty() {
             set.mode = Some(result.mode.clone());
         }
-
-        if let Some(rep) = replay {
-            for rp in &rep.players {
-                *self.replay_names.entry(rp.name.clone()).or_insert(0) += 1;
-            }
-        }
-        let players = Self::players(result, replay, &self.replay_names);
+        Self::pin_slots(set, &mut players);
         let winner_name = players
             .iter()
             .find(|p| p["won"].as_bool() == Some(true))
@@ -1483,6 +1546,82 @@ mod tests {
         assert_eq!(names, ["JUGZ!", "Judge"]);
         assert_eq!(players[0]["slot"], 0);
         assert_eq!(players[1]["slot"], 1);
+    }
+
+    /// LOCAL replays are named `Player1/Player2` and list the sides in a
+    /// different order from game to game, so the replay index can't be the
+    /// slot. A set where B wins game 2 used to credit A (the slot that "won"
+    /// game 2 was the one whose count ticked), swapping players and scores.
+    #[test]
+    fn local_slots_stay_with_the_player_when_the_replay_order_flips() {
+        let dir = std::env::temp_dir().join(format!("statstest_pin_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = SetMachine::new(&dir, Box::new(|_| {}), None).unwrap();
+        let rp = |a: (&str, &str), b: (&str, &str), game| Replay {
+            iso: String::new(),
+            epoch: 1_000 + game,
+            game,
+            players: vec![
+                crate::stats::ReplayPlayer { name: a.0.into(), char_code: a.1.into() },
+                crate::stats::ReplayPlayer { name: b.0.into(), char_code: b.1.into() },
+            ],
+        };
+        let res = |winner: (&str, &str), loser: (&str, &str)| {
+            let g = snap(&[
+                (winner.0, winner.1, "LOCAL", &[("wins", 1.0)]),
+                (loser.0, loser.1, "LOCAL", &[("losses", 1.0)]),
+            ]);
+            to_game_result(diff(&Map::new(), &g)).unwrap()
+        };
+        let (s, b) = (("SCHLONG", "Lar"), ("BUB:)", "Zet"));
+        // Replay side order flips; B wins game 2 but A wins 1 and 3.
+        m.record_game(&res(s, b), Some(&rp(("Player2", "Zet"), ("Player1", "Lar"), 1)), 1_001);
+        m.record_game(&res(b, s), Some(&rp(("Player1", "Lar"), ("Player2", "Zet"), 2)), 1_002);
+        m.record_game(&res(s, b), Some(&rp(("Player1", "Lar"), ("Player2", "Zet"), 3)), 1_003);
+        let st = m.set.as_ref().unwrap();
+        let slot = |g: usize, name: &str| {
+            st.matches[g]["players"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == name)
+                .unwrap()["slot"]
+                .clone()
+        };
+        for g in 0..3 {
+            assert_eq!(slot(g, "SCHLONG"), slot(0, "SCHLONG"), "game {g}");
+            assert_ne!(slot(g, "SCHLONG"), slot(g, "BUB:)"));
+        }
+        let games = crate::matching::derive_games(&json!({ "matches": st.matches }));
+        let winners: Vec<Value> = games
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["winnerSlot"].clone())
+            .collect();
+        assert_eq!(winners, [slot(0, "SCHLONG"), slot(0, "BUB:)"), slot(0, "SCHLONG")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Winner-stays stations don't always restart the game counter: a pair
+    /// with nobody from the open set in it is a new set, not more games.
+    #[test]
+    fn a_game_with_no_one_from_the_open_set_starts_a_new_set() {
+        let dir = std::env::temp_dir().join(format!("statstest_split_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = SetMachine::new(&dir, Box::new(|_| {}), None).unwrap();
+        let res = |w: (&str, &str), l: (&str, &str)| {
+            let g = snap(&[
+                (w.0, w.1, "LOCAL", &[("wins", 1.0)]),
+                (l.0, l.1, "LOCAL", &[("losses", 1.0)]),
+            ]);
+            to_game_result(diff(&Map::new(), &g)).unwrap()
+        };
+        m.record_game(&res(("A", "Fle"), ("B", "Zet")), None, 1_000);
+        m.record_game(&res(("C", "Kra"), ("D", "Lox")), None, 1_200);
+        assert_eq!(m.set.as_ref().unwrap().matches.len(), 1);
+        assert_eq!(m.history.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The safety valve: a pending game older than PENDING_TIMEOUT_S is

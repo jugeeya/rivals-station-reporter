@@ -678,6 +678,27 @@ pub fn auto_report_blocker(rec: &Value) -> Option<&'static str> {
     if rec["confidence"] != *"high" {
         return Some("winner is only a guess");
     }
+    // The per-game results are what start.gg is sent alongside the winner.
+    // If they don't add up to the score the station recorded, one of the two
+    // is wrong, and neither should go onto a bracket unwatched.
+    if let (Some(games), Some(players)) = (
+        rec.pointer("/set/games").and_then(|v| v.as_array()),
+        rec.pointer("/set/players").and_then(|v| v.as_array()),
+    ) {
+        let consistent = players.iter().all(|p| {
+            let (Some(slot), Some(wins)) = (p["slot"].as_i64(), p["wins"].as_i64()) else {
+                return true;
+            };
+            let from_games = games
+                .iter()
+                .filter(|g| g["winnerSlot"].as_i64() == Some(slot))
+                .count() as i64;
+            from_games == wins
+        });
+        if !games.is_empty() && !consistent {
+            return Some("game results don't match the score");
+        }
+    }
     if rec
         .get("autoReportAttempts")
         .and_then(|v| v.as_i64())
@@ -1226,6 +1247,18 @@ impl Hub {
         let (key, rec, tag_map) = {
             let mut s = self.state.lock().unwrap();
             let (key, mut rec) = self.record_for(&s, sg, st, station, slug, "live", bind_note);
+            // A set that already has its result on start.gg - reported here,
+            // or finalized on start.gg's own page - is settled. Keep it so:
+            // the status below would otherwise reset it to "live", and the
+            // station's games-so-far would be pushed over the final result.
+            let was_settled_elsewhere = set_bucket(&mut s, slug)
+                .get(&key)
+                .is_some_and(|p| p["status"] == *"already reported on start.gg");
+            if was_settled_elsewhere {
+                rec["status"] = json!("already reported on start.gg");
+                rec["reportable"] = json!(false);
+                rec["notReportableReason"] = json!("already reported directly on start.gg");
+            }
             // Don't clobber the mode label _record_for set for online/ranked.
             if rec["status"] != *"reported" && get_default_true(&rec, "reportable") {
                 rec["status"] = json!("live");
@@ -1239,7 +1272,12 @@ impl Hub {
         let (mut live, mut games) = (false, 0usize);
         let mut confirmed = false;
         let mut reason: Option<String> = None;
-        if !get_default_true(&rec, "reportable") {
+        if rec["status"] == *"reported"
+            || truthy(rec.get("reportedAt"))
+            || py_int(rec.get("startggState")) == Some(matching::STARTGG_STATE_COMPLETED)
+        {
+            reason = Some("already reported; live score not pushed".to_string());
+        } else if !get_default_true(&rec, "reportable") {
             let why = match rec.get("notReportableReason") {
                 Some(v) if truthy(Some(v)) => py_str(v),
                 _ => "not reportable".to_string(),
@@ -4593,6 +4631,28 @@ mod tests {
     }
 
     #[test]
+    fn auto_report_holds_a_set_whose_games_disagree_with_its_score() {
+        let mut rec = eligible_record();
+        rec["set"]["players"] = json!([
+            {"slot": 0, "name": "A", "wins": 3},
+            {"slot": 1, "name": "B", "wins": 2},
+        ]);
+        rec["set"]["games"] = json!([
+            {"winnerSlot": 0}, {"winnerSlot": 1}, {"winnerSlot": 1},
+            {"winnerSlot": 1}, {"winnerSlot": 0},
+        ]);
+        assert_eq!(
+            auto_report_blocker(&rec),
+            Some("game results don't match the score")
+        );
+        rec["set"]["games"] = json!([
+            {"winnerSlot": 0}, {"winnerSlot": 1}, {"winnerSlot": 1},
+            {"winnerSlot": 0}, {"winnerSlot": 0},
+        ]);
+        assert_eq!(auto_report_blocker(&rec), None);
+    }
+
+    #[test]
     fn auto_report_off_means_nothing_ever_fires() {
         assert!(!auto_reports(&eligible_record(), AutoReport::default()));
     }
@@ -4750,6 +4810,27 @@ mod tests {
             .unwrap();
         assert_eq!(out["live"], json!(false));
         assert!(fake.pushes().is_empty(), "nothing pushed before the call");
+    }
+
+    #[test]
+    fn a_reported_set_gets_no_live_score_pushed_over_its_result() {
+        let fake = FakeStartgg::new();
+        fake.set_state(2);
+        let mut h = Hub::new(None, Some(tags()), None, None, None, None, None);
+        h.startgg = Box::new(Shared(fake.clone()));
+        h.handle_ingest(SLUG, 1, &real_set()).unwrap();
+        {
+            let mut s = h.state.lock().unwrap();
+            for r in set_bucket(&mut s, SLUG).values_mut() {
+                r["status"] = json!("reported");
+                r["reportedAt"] = json!(1);
+            }
+        }
+        let out = h
+            .handle_live(SLUG, 1, &with(real_set(), &[("complete", json!(false))]))
+            .unwrap();
+        assert_eq!(out["live"], json!(false));
+        assert!(fake.pushes().is_empty(), "nothing pushed into a reported set");
     }
 
     // ---- correcting a result ------------------------------------------------------
